@@ -1,0 +1,865 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500;6..72,600;6..72,700&family=JetBrains+Mono:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/three@0.134.0/build/three.min.js"></script>
+<style>
+  body{margin:0;}
+  *{box-sizing:border-box;}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+  @keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.85)}}
+  @keyframes eq{0%,100%{transform:scaleY(.28)}50%{transform:scaleY(1)}}
+  image-slot#candor-hero{display:block !important;width:100% !important;height:100% !important;}
+</style>
+</helmet>
+
+<!-- ============ BAND 1 HEADER ============ -->
+<div style="position:absolute;left:80px;top:54px;font:700 22px 'Space Grotesk',sans-serif;color:#2b2824;letter-spacing:-.01em">01 — Visual directions</div>
+<div style="position:absolute;left:80px;top:88px;font:400 13px 'JetBrains Mono',monospace;color:rgba(43,40,36,.55)">Same screen (live transcription), three aesthetics. Pick a language — they mix.</div>
+
+<!-- ============ A1: MINIMAL LIGHT ============ -->
+<div style="position:absolute;left:80px;top:148px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">A · Minimal Light — neutral + indigo</div>
+  <div data-screen-label="Live · Minimal Light" style="height:840px;overflow:hidden;background:#fdf6ef;border:1px solid #e8d5c2;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Public Sans',sans-serif;color:#1b1a18">
+    <div style="display:flex;align-items:center;gap:14px;height:58px;padding:0 20px;border-bottom:1px solid #e8d5c2">
+      <div style="display:flex;align-items:center;gap:9px">
+        <div style="width:22px;height:22px;border-radius:6px;background:#f0714e"></div>
+        <span style="font-weight:700;font-size:14px;letter-spacing:-.01em">Candor</span>
+      </div>
+      <div style="width:1px;height:20px;background:#e8d5c2"></div>
+      <span style="font-weight:600;font-size:14px">Q3 Roadmap Sync</span>
+      <div style="display:flex;align-items:center;gap:6px;padding:4px 9px;border:1px solid #f1dada;background:#fdf4f4;border-radius:999px">
+        <span style="width:7px;height:7px;border-radius:50%;background:#dc2626;display:block;animation:pulse 1.4s ease-in-out infinite"></span>
+        <span style="font:500 11px/1 'JetBrains Mono',monospace;color:#b91c1c">REC 24:18</span>
+      </div>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center">
+        <div style="width:28px;height:28px;border-radius:50%;background:#f0714e;color:#fff;font:600 11px/28px 'Public Sans';text-align:center;border:2px solid #fdf6ef">MC</div>
+        <div style="width:28px;height:28px;border-radius:50%;background:#cf8a2e;color:#fff;font:600 11px/28px 'Public Sans';text-align:center;border:2px solid #fdf6ef;margin-left:-8px">SL</div>
+        <div style="width:28px;height:28px;border-radius:50%;background:#d97706;color:#fff;font:600 11px/28px 'Public Sans';text-align:center;border:2px solid #fdf6ef;margin-left:-8px">DP</div>
+        <div style="width:28px;height:28px;border-radius:50%;background:#efe2d9;color:#8a7d70;font:600 11px/28px 'Public Sans';text-align:center;border:2px solid #fdf6ef;margin-left:-8px">+2</div>
+      </div>
+      <button style="font:600 13px 'Public Sans';color:#fff;background:#1b1a18;border:none;padding:8px 14px;border-radius:7px;cursor:pointer">Stop &amp; summarize</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 330px;height:782px">
+      <div style="padding:26px 32px;overflow:hidden">
+        <div style="display:flex;gap:14px;margin-bottom:22px">
+          <div style="width:30px;height:30px;border-radius:50%;background:#f0714e;color:#fff;font:600 11px/30px 'Public Sans';text-align:center;flex:none">MC</div>
+          <div>
+            <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="font-weight:600;font-size:13.5px">Maya Chen</span><span style="font:500 11px 'JetBrains Mono';color:#b3a596">24:02</span></div>
+            <div style="font-size:15.5px;line-height:1.62;color:#33312c;max-width:600px">If we ship the export feature in August, that pushes the mobile redesign to Q4. Are we all aligned on that tradeoff?</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:14px;margin-bottom:22px">
+          <div style="width:30px;height:30px;border-radius:50%;background:#d97706;color:#fff;font:600 11px/30px 'Public Sans';text-align:center;flex:none">DP</div>
+          <div>
+            <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="font-weight:600;font-size:13.5px">Devin Park</span><span style="font:500 11px 'JetBrains Mono';color:#b3a596">24:09</span></div>
+            <div style="font-size:15.5px;line-height:1.62;color:#33312c;max-width:600px">I'd rather protect the mobile work. Export can slip two weeks without hurting the enterprise deals on the table.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:14px;margin-bottom:22px">
+          <div style="width:30px;height:30px;border-radius:50%;background:#cf8a2e;color:#fff;font:600 11px/30px 'Public Sans';text-align:center;flex:none">SL</div>
+          <div style="flex:1">
+            <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="font-weight:600;font-size:13.5px">Sarah Liu</span><span style="font:500 11px 'JetBrains Mono';color:#b3a596">24:15</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;background:#fdeee9;padding:1px 6px;border-radius:999px">speaking</span></div>
+            <div style="font-size:15.5px;line-height:1.62;color:#33312c;max-width:600px;background:#fdf2ee;border-radius:8px;padding:8px 12px;margin-left:-12px">From a support standpoint, export is the number-one request this quarter, so I'd push back a little on letting it slip<span style="display:inline-block;width:2px;height:17px;background:#f0714e;margin-left:2px;vertical-align:-3px;animation:blink 1s step-start infinite"></span></div>
+          </div>
+        </div>
+      </div>
+      <div style="background:#f5e3cf;border-left:1px solid #e8d5c2;padding:22px 22px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:18px"><span style="width:6px;height:6px;border-radius:50%;background:#f0714e;display:block;animation:pulse 1.6s infinite"></span><span style="font:500 11px 'JetBrains Mono';letter-spacing:.1em;color:#8a7d70">LIVE INSIGHTS</span></div>
+        <div style="font:600 11px 'JetBrains Mono';letter-spacing:.08em;color:#b3a596;margin-bottom:10px">ACTION ITEMS · 2</div>
+        <div style="display:flex;gap:9px;align-items:flex-start;margin-bottom:11px"><span style="width:15px;height:15px;border:1.5px solid #d8c9bd;border-radius:4px;flex:none;margin-top:2px"></span><div style="font-size:13px;line-height:1.45">Scope 2-week export delay impact<span style="display:block;font:500 11px 'JetBrains Mono';color:#b3a596;margin-top:2px">@devin</span></div></div>
+        <div style="display:flex;gap:9px;align-items:flex-start;margin-bottom:20px"><span style="width:15px;height:15px;border:1.5px solid #d8c9bd;border-radius:4px;flex:none;margin-top:2px"></span><div style="font-size:13px;line-height:1.45">Pull top support requests for Q3<span style="display:block;font:500 11px 'JetBrains Mono';color:#b3a596;margin-top:2px">@sarah</span></div></div>
+        <div style="font:600 11px 'JetBrains Mono';letter-spacing:.08em;color:#b3a596;margin-bottom:10px">DECISION</div>
+        <div style="font-size:13px;line-height:1.5;padding:11px 13px;background:#fdf6ef;border:1px solid #e8d5c2;border-radius:7px;margin-bottom:20px">Mobile redesign holds its Q3 priority slot.</div>
+        <div style="font:600 11px 'JetBrains Mono';letter-spacing:.08em;color:#b3a596;margin-bottom:10px">TOPICS</div>
+        <div style="display:flex;flex-wrap:wrap;gap:7px">
+          <span style="font-size:12px;padding:4px 10px;background:#f4ebe3;border-radius:999px">Roadmap</span>
+          <span style="font-size:12px;padding:4px 10px;background:#f4ebe3;border-radius:999px">Export</span>
+          <span style="font-size:12px;padding:4px 10px;background:#f4ebe3;border-radius:999px">Mobile</span>
+          <span style="font-size:12px;padding:4px 10px;background:#f4ebe3;border-radius:999px">Enterprise</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ A2: EDITORIAL WARM ============ -->
+<div style="position:absolute;left:1480px;top:148px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">B · Editorial Warm — paper, serif, margin notes</div>
+  <div data-screen-label="Live · Editorial Warm" style="height:840px;overflow:hidden;background:#f9ece0;border:1px solid #ecdcc6;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Public Sans',sans-serif;color:#2a2318">
+    <div style="display:flex;align-items:center;gap:14px;height:64px;padding:0 40px;border-bottom:1px solid #ecdcc6">
+      <span style="font:600 19px 'Newsreader',serif;letter-spacing:-.01em">Candor</span>
+      <div style="flex:1"></div>
+      <span style="font:500 14px 'Newsreader',serif;color:#6e6552">Q3 Roadmap Sync</span>
+      <div style="width:1px;height:18px;background:#ecdcc6"></div>
+      <div style="display:flex;align-items:center;gap:7px"><span style="width:7px;height:7px;border-radius:50%;background:#e0613a;display:block;animation:pulse 1.4s infinite"></span><span style="font:500 12px 'IBM Plex Mono';color:#e0613a">Recording · 24:18</span></div>
+    </div>
+    <div style="padding:30px 56px;overflow:hidden">
+      <div style="font:600 11px 'IBM Plex Mono';letter-spacing:.14em;color:#a89c84;margin-bottom:18px">LIVE TRANSCRIPT</div>
+      <div style="display:grid;grid-template-columns:1fr 168px;gap:28px;padding:0 0 16px;border-bottom:1px solid #f0e3d0;margin-bottom:16px">
+        <div>
+          <div style="font:600 15px 'Newsreader',serif;color:#e0613a;margin-bottom:4px">Maya Chen <span style="font:500 11px 'IBM Plex Mono';color:#b3a78f;margin-left:6px">24:02</span></div>
+          <div style="font:400 18px/1.62 'Newsreader',serif">"If we ship the export feature in August, that pushes the mobile redesign to Q4. Are we all aligned on that tradeoff?"</div>
+        </div>
+        <div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 168px;gap:28px;padding:0 0 16px;border-bottom:1px solid #f0e3d0;margin-bottom:16px">
+        <div>
+          <div style="font:600 15px 'Newsreader',serif;color:#7a6f59;margin-bottom:4px">Devin Park <span style="font:500 11px 'IBM Plex Mono';color:#b3a78f;margin-left:6px">24:09</span></div>
+          <div style="font:400 18px/1.62 'Newsreader',serif">"I'd rather protect the mobile work. Export can slip two weeks without hurting the enterprise deals on the table."</div>
+        </div>
+        <div style="padding-top:2px"><span style="font:600 10px 'IBM Plex Mono';letter-spacing:.1em;color:#e0613a">ACTION</span><div style="font:400 13px/1.45 'Newsreader',serif;color:#5c5341;margin-top:3px">Devin to scope a 2-week export delay.</div></div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 168px;gap:28px;padding:0 0 16px">
+        <div>
+          <div style="font:600 15px 'Newsreader',serif;color:#c4862c;margin-bottom:4px">Sarah Liu <span style="font:500 11px 'IBM Plex Mono';color:#b3a78f;margin-left:6px">24:15</span></div>
+          <div style="font:400 18px/1.62 'Newsreader',serif">"From a support standpoint, export is the number-one request this quarter, so I'd push back a little on letting it slip<span style="display:inline-block;width:2px;height:18px;background:#e0613a;margin-left:2px;vertical-align:-3px;animation:blink 1s step-start infinite"></span>"</div>
+        </div>
+        <div style="padding-top:2px"><span style="font:600 10px 'IBM Plex Mono';letter-spacing:.1em;color:#c4862c">TOPIC</span><div style="font:400 13px/1.45 'Newsreader',serif;color:#5c5341;margin-top:3px">Export prioritization</div></div>
+      </div>
+    </div>
+    <div style="position:absolute;left:0;bottom:0;width:100%;padding:16px 56px;border-top:1px solid #ecdcc6;background:#fff9f0;display:flex;align-items:center;gap:14px">
+      <span style="font:600 10px 'IBM Plex Mono';letter-spacing:.12em;color:#a89c84">SO FAR</span>
+      <span style="font:400 14px/1.5 'Newsreader',serif;color:#5c5341;flex:1">The team is weighing export timing against the mobile redesign. Mobile holds priority; export delay to be scoped.</span>
+    </div>
+  </div>
+</div>
+
+<!-- ============ A3: SIGNAL DARK ============ -->
+<div style="position:absolute;left:2880px;top:148px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">C · Sunrise — command center, AI-forward</div>
+  <div data-screen-label="Live · Sunrise" style="height:840px;overflow:hidden;background:#fbf4ef;border:1px solid #efe1d8;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#2b1f33">
+    <div style="display:flex;align-items:center;gap:16px;height:64px;padding:0 22px;border-bottom:1px solid #efe1d8">
+      <div style="width:22px;height:22px;border-radius:6px;background:#f0714e"></div>
+      <span style="font-weight:600;font-size:14px">Q3 Roadmap Sync</span>
+      <div style="flex:1;display:flex;align-items:flex-end;gap:2.5px;height:26px;justify-content:center;max-width:340px">
+        <span style="width:2.5px;height:8px;background:#f0714e;opacity:.5"></span><span style="width:2.5px;height:16px;background:#f0714e;opacity:.7"></span><span style="width:2.5px;height:22px;background:#f0714e"></span><span style="width:2.5px;height:12px;background:#f0714e;opacity:.6"></span><span style="width:2.5px;height:24px;background:#f0714e"></span><span style="width:2.5px;height:9px;background:#f0714e;opacity:.5"></span><span style="width:2.5px;height:18px;background:#f0714e;opacity:.8"></span><span style="width:2.5px;height:26px;background:#f0714e"></span><span style="width:2.5px;height:14px;background:#f0714e;opacity:.6"></span><span style="width:2.5px;height:20px;background:#f0714e;opacity:.9"></span><span style="width:2.5px;height:7px;background:#f0714e;opacity:.4"></span><span style="width:2.5px;height:17px;background:#f0714e;opacity:.7"></span><span style="width:2.5px;height:25px;background:#f0714e"></span><span style="width:2.5px;height:11px;background:#f0714e;opacity:.6"></span><span style="width:2.5px;height:21px;background:#f0714e;opacity:.9"></span><span style="width:2.5px;height:13px;background:#f0714e;opacity:.6"></span><span style="width:2.5px;height:23px;background:#f0714e"></span><span style="width:2.5px;height:8px;background:#f0714e;opacity:.5"></span><span style="width:2.5px;height:19px;background:#f0714e;opacity:.8"></span><span style="width:2.5px;height:15px;background:#f0714e;opacity:.7"></span>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px"><span style="width:8px;height:8px;border-radius:50%;background:#f0506e;display:block;animation:pulse 1.4s infinite"></span><span style="font:500 15px 'JetBrains Mono';color:#f0506e;letter-spacing:.04em">24:18</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:196px 1fr 340px;height:776px">
+      <div style="border-right:1px solid #efe1d8;padding:20px 18px">
+        <div style="font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#a99cb5;margin-bottom:14px">PARTICIPANTS · 5</div>
+        <div style="margin-bottom:16px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:22px;height:22px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 10px/22px 'Space Grotesk';text-align:center">MC</div><span style="font-size:12.5px">Maya Chen</span></div><div style="height:4px;background:#fbe7de;border-radius:2px;overflow:hidden"><div style="width:42%;height:100%;background:#f0714e"></div></div></div>
+        <div style="margin-bottom:16px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:22px;height:22px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 10px/22px 'Space Grotesk';text-align:center">DP</div><span style="font-size:12.5px">Devin Park</span></div><div style="height:4px;background:#fbe7de;border-radius:2px;overflow:hidden"><div style="width:28%;height:100%;background:#8b6fd6"></div></div></div>
+        <div style="margin-bottom:16px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="width:22px;height:22px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 10px/22px 'Space Grotesk';text-align:center">SL</div><span style="font-size:12.5px">Sarah Liu</span></div><div style="height:4px;background:#fbe7de;border-radius:2px;overflow:hidden"><div style="width:21%;height:100%;background:#ffb24d"></div></div></div>
+        <div style="margin-top:26px;font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#a99cb5;margin-bottom:10px">CHAPTERS</div>
+        <div style="font-size:12px;color:#8c7f9a;line-height:2"><div>00:00 · Intros</div><div>06:12 · Q3 status</div><div style="color:#f0714e">21:40 · Roadmap tradeoffs</div></div>
+      </div>
+      <div style="padding:24px 26px;overflow:hidden">
+        <div style="display:flex;gap:12px;margin-bottom:20px"><div style="width:28px;height:28px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 10px/28px 'Space Grotesk';text-align:center;flex:none">MC</div><div><div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="font-weight:600;font-size:13px">Maya Chen</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">24:02</span></div><div style="font-size:14.5px;line-height:1.6;color:#574a63;max-width:560px">If we ship the export feature in August, that pushes the mobile redesign to Q4. Are we all aligned on that tradeoff?</div></div></div>
+        <div style="display:flex;gap:12px;margin-bottom:20px"><div style="width:28px;height:28px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 10px/28px 'Space Grotesk';text-align:center;flex:none">DP</div><div><div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="font-weight:600;font-size:13px">Devin Park</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">24:09</span></div><div style="font-size:14.5px;line-height:1.6;color:#574a63;max-width:560px">I'd rather protect the mobile work. Export can slip two weeks without hurting the enterprise deals on the table.</div></div></div>
+        <div style="display:flex;gap:12px"><div style="width:28px;height:28px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 10px/28px 'Space Grotesk';text-align:center;flex:none">SL</div><div style="flex:1"><div style="display:flex;align-items:baseline;gap:8px;margin-bottom:4px"><span style="font-weight:600;font-size:13px">Sarah Liu</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">24:15</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e">● speaking</span></div><div style="font-size:14.5px;line-height:1.6;color:#2b1f33;max-width:560px">From a support standpoint, export is the number-one request this quarter, so I'd push back a little on letting it slip<span style="display:inline-block;width:2px;height:16px;background:#f0714e;margin-left:2px;vertical-align:-2px;animation:blink 1s step-start infinite"></span></div></div></div>
+      </div>
+      <div style="border-left:1px solid #efe1d8;background:#fffaf6;padding:20px 18px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:16px"><span style="width:6px;height:6px;border-radius:50%;background:#f0714e;display:block;box-shadow:0 0 8px #f0714e;animation:pulse 1.6s infinite"></span><span style="font:500 11px 'JetBrains Mono';letter-spacing:.1em;color:#8c7f9a">AI COPILOT · LIVE</span></div>
+        <div style="border:1px solid #f7d6cc;background:#fdeee9;border-radius:8px;padding:13px;margin-bottom:11px"><div style="font:600 10px 'JetBrains Mono';letter-spacing:.08em;color:#f0714e;margin-bottom:6px">⌁ ACTION DETECTED</div><div style="font-size:13px;line-height:1.45;color:#2b1f33">Devin to scope a 2-week export delay impact <span style="color:#a99cb5">· @devin</span></div></div>
+        <div style="border:1px solid #e6d6ca;background:#fbf2ec;border-radius:8px;padding:13px;margin-bottom:11px"><div style="font:600 10px 'JetBrains Mono';letter-spacing:.08em;color:#ffb24d;margin-bottom:6px">? OPEN QUESTION</div><div style="font-size:13px;line-height:1.45;color:#2b1f33">Does an export delay risk any signed enterprise commitments?</div></div>
+        <div style="border:1px solid #e6d6ca;background:#fbf2ec;border-radius:8px;padding:13px;margin-bottom:18px"><div style="font:600 10px 'JetBrains Mono';letter-spacing:.08em;color:#8b6fd6;margin-bottom:6px">✓ DECISION LOGGED</div><div style="font-size:13px;line-height:1.45;color:#2b1f33">Mobile redesign keeps its Q3 priority slot.</div></div>
+        <div style="font:500 10px 'JetBrains Mono';letter-spacing:.1em;color:#a99cb5;margin-bottom:9px">SENTIMENT</div>
+        <div style="display:flex;gap:6px;align-items:center"><div style="flex:1;height:6px;border-radius:3px;background:linear-gradient(90deg,#f0714e 0 64%,#ffb24d 64% 86%,#f0506e 86% 100%)"></div></div>
+        <div style="display:flex;justify-content:space-between;font:500 10px 'JetBrains Mono';color:#a99cb5;margin-top:6px"><span>aligned 64%</span><span>tension 14%</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============ BAND 2 HEADER ============ -->
+<div style="position:absolute;left:80px;top:1062px;font:700 22px 'Space Grotesk',sans-serif;color:#2b2824;letter-spacing:-.01em">02 — Key screens</div>
+<div style="position:absolute;left:80px;top:1096px;font:400 13px 'JetBrains Mono',monospace;color:rgba(43,40,36,.55)">Built in the sunrise theme — warm cream with coral and gold. Recap, library, and search.</div>
+
+<!-- ===== SUMMARY / RECAP (desktop) ===== -->
+<div style="position:absolute;left:80px;top:1156px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Meeting recap — AI summary, decisions, action items</div>
+  <div data-screen-label="Recap · desktop" style="height:840px;overflow:hidden;background:#fbf4ef;border:1px solid #efe1d8;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#2b1f33">
+    <div style="display:flex;align-items:center;gap:16px;height:66px;padding:0 24px;border-bottom:1px solid #efe1d8">
+      <div style="width:22px;height:22px;border-radius:6px;background:#f0714e;flex:none"></div>
+      <div><div style="font-weight:600;font-size:15px">Q3 Roadmap Sync</div><div style="font:500 11px 'JetBrains Mono';color:#a99cb5;margin-top:2px">Jun 24, 2026 · 31 min · 5 people</div></div>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center">
+        <div style="width:26px;height:26px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 10px/26px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">MC</div>
+        <div style="width:26px;height:26px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 10px/26px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef;margin-left:-7px">DP</div>
+        <div style="width:26px;height:26px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 10px/26px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef;margin-left:-7px">SL</div>
+      </div>
+      <button style="font:600 13px 'Space Grotesk';color:#574a63;background:transparent;border:1px solid #e6d6ca;padding:7px 13px;border-radius:7px;cursor:pointer">Share</button>
+      <button style="font:600 13px 'Space Grotesk';color:#2a1006;background:#f0714e;border:none;padding:8px 14px;border-radius:7px;cursor:pointer">Export notes</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 348px;height:774px">
+      <div style="padding:26px 30px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:7px;margin-bottom:12px"><span style="font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#f0714e">⌁ AI SUMMARY</span><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">· auto-generated</span></div>
+        <div style="font-size:16px;line-height:1.66;color:#574a63;max-width:640px;margin-bottom:28px">The team debated sequencing the <strong style="color:#2b1f33;font-weight:600">export feature</strong> against the <strong style="color:#2b1f33;font-weight:600">mobile redesign</strong> for Q3. Support data shows export is the top customer request, but the group agreed mobile keeps its priority slot. Export will likely slip ~2 weeks, pending an impact review on signed enterprise deals.</div>
+        <div style="font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#a99cb5;margin-bottom:14px">KEY DECISIONS · 2</div>
+        <div style="display:flex;gap:11px;margin-bottom:12px"><span style="width:18px;height:18px;border-radius:5px;background:#fdeee9;border:1px solid #f7d6cc;color:#f0714e;font:600 11px/18px 'Space Grotesk';text-align:center;flex:none">✓</span><div style="font-size:14.5px;line-height:1.5;color:#2b1f33">Mobile redesign retains its Q3 priority slot.</div></div>
+        <div style="display:flex;gap:11px;margin-bottom:28px"><span style="width:18px;height:18px;border-radius:5px;background:#fdeee9;border:1px solid #f7d6cc;color:#f0714e;font:600 11px/18px 'Space Grotesk';text-align:center;flex:none">✓</span><div style="font-size:14.5px;line-height:1.5;color:#2b1f33">Export ships after mobile, contingent on enterprise impact review.</div></div>
+        <div style="font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#a99cb5;margin-bottom:14px">ACTION ITEMS · 3</div>
+        <div style="border:1px solid #efe1d8;border-radius:9px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid #f1e6dd"><span style="width:16px;height:16px;border:1.5px solid #3a4047;border-radius:4px;flex:none"></span><span style="flex:1;font-size:14px">Scope the 2-week export delay impact</span><div style="width:22px;height:22px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 9px/22px 'Space Grotesk';text-align:center">DP</div><span style="font:500 11px 'JetBrains Mono';color:#ffb24d;border:1px solid #3a3320;background:#1c1810;padding:3px 8px;border-radius:999px">Jun 27</span></div>
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 15px;border-bottom:1px solid #f1e6dd"><span style="width:16px;height:16px;border:1.5px solid #3a4047;border-radius:4px;flex:none"></span><span style="flex:1;font-size:14px">Pull top support requests for Q3</span><div style="width:22px;height:22px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 9px/22px 'Space Grotesk';text-align:center">SL</div><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:3px 8px;border-radius:999px">Jul 1</span></div>
+          <div style="display:flex;align-items:center;gap:12px;padding:13px 15px"><span style="width:16px;height:16px;border:1.5px solid #3a4047;border-radius:4px;flex:none"></span><span style="flex:1;font-size:14px">Confirm enterprise commitments with sales</span><div style="width:22px;height:22px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 9px/22px 'Space Grotesk';text-align:center">MC</div><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:3px 8px;border-radius:999px">Jul 3</span></div>
+        </div>
+      </div>
+      <div style="border-left:1px solid #efe1d8;background:#fffaf6;padding:22px 20px;overflow:hidden">
+        <div style="border:1px solid #f7d6cc;background:#fdeee9;border-radius:10px;padding:14px;margin-bottom:24px">
+          <div style="font:600 11px 'JetBrains Mono';letter-spacing:.06em;color:#f0714e;margin-bottom:10px">⌁ ASK THIS MEETING</div>
+          <div style="display:flex;align-items:center;gap:9px;background:#0a0f0d;border:1px solid #f7d6cc;border-radius:8px;padding:9px 11px"><span style="font-size:13px;color:#a99cb5;flex:1">What did we decide about export?</span><span style="width:24px;height:24px;border-radius:6px;background:#f0714e;color:#2a1006;font:700 13px/24px 'Space Grotesk';text-align:center">↑</span></div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px"><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:4px 9px;border-radius:999px">Summarize for Slack</span><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:4px 9px;border-radius:999px">Draft follow-up email</span></div>
+        </div>
+        <div style="font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#a99cb5;margin-bottom:12px">CHAPTERS</div>
+        <div style="margin-bottom:24px">
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f1e6dd"><span style="font-size:13px;color:#574a63">Intros &amp; agenda</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">00:00</span></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f1e6dd"><span style="font-size:13px;color:#574a63">Q3 status check</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">06:12</span></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid #f1e6dd"><span style="font-size:13px;color:#574a63">Roadmap tradeoffs</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">21:40</span></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0"><span style="font-size:13px;color:#574a63">Wrap-up &amp; owners</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">28:55</span></div>
+        </div>
+        <div style="font:500 10px 'JetBrains Mono';letter-spacing:.12em;color:#a99cb5;margin-bottom:12px">HIGHLIGHT</div>
+        <div style="font:500 14px/1.55 'Space Grotesk';color:#2b1f33;border-left:2px solid #f0714e;padding-left:13px">"Export is the number-one request this quarter."</div>
+        <div style="font:500 11px 'JetBrains Mono';color:#a99cb5;margin-top:8px;padding-left:15px">— Sarah Liu · 24:15</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== LIBRARY (desktop) ===== -->
+<div style="position:absolute;left:1480px;top:1156px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Library — past meetings</div>
+  <div data-screen-label="Library · desktop" style="height:840px;overflow:hidden;background:#fbf4ef;border:1px solid #efe1d8;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#2b1f33;display:flex">
+    <div style="width:204px;border-right:1px solid #efe1d8;padding:20px 16px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:26px;padding:0 6px"><div style="width:22px;height:22px;border-radius:6px;background:#f0714e"></div><span style="font-weight:700;font-size:15px">Candor</span></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#8c7f9a;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#a99cb5"></span>Home</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#2b1f33;background:#fbe7de;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#f0714e"></span>Meetings</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#8c7f9a;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#a99cb5"></span>Action items</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#8c7f9a;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#a99cb5"></span>Search</div>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center;gap:9px;padding:8px 6px;border-top:1px solid #efe1d8;padding-top:14px"><div style="width:26px;height:26px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 10px/26px 'Space Grotesk';text-align:center">MC</div><div><div style="font-size:12.5px">Maya Chen</div><div style="font:500 10px 'JetBrains Mono';color:#a99cb5">Workspace</div></div></div>
+    </div>
+    <div style="flex:1;padding:24px 28px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:14px;margin-bottom:20px"><span style="font-weight:700;font-size:21px;letter-spacing:-.01em">Meetings</span><div style="flex:1"></div><div style="display:flex;align-items:center;gap:8px;background:#fbf2ec;border:1px solid #e6d6ca;border-radius:8px;padding:8px 12px;width:230px"><span style="color:#a99cb5;font-size:13px">⌕</span><span style="color:#a99cb5;font-size:13px">Search transcripts…</span></div><button onClick="{{ startRec }}" style="display:inline-flex;align-items:center;gap:7px;font:600 13px 'Space Grotesk';color:#fff;background:#f0714e;border:none;padding:9px 15px;border-radius:8px;cursor:pointer"><span style="width:8px;height:8px;border-radius:50%;background:#fff;animation:pulse 1.3s infinite"></span>Start recording</button></div>
+      <div style="display:flex;gap:8px;margin-bottom:20px"><span style="font:500 12px 'JetBrains Mono';color:#2a1006;background:#f0714e;padding:5px 11px;border-radius:999px">All</span><span style="font:500 12px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:5px 11px;border-radius:999px">This week</span><span style="font:500 12px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:5px 11px;border-radius:999px">My meetings</span><span style="font:500 12px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:5px 11px;border-radius:999px">Has action items</span></div>
+      <div style="border:1px solid #efe1d8;border-radius:11px;overflow:hidden">
+        <div style="display:flex;gap:16px;padding:18px 20px;border-bottom:1px solid #f1e6dd"><div style="flex:1"><div style="display:flex;align-items:center;gap:9px;margin-bottom:6px"><span style="font-weight:600;font-size:15px">Q3 Roadmap Sync</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;background:#fdeee9;padding:2px 7px;border-radius:999px">3 actions</span></div><div style="font-size:13px;line-height:1.5;color:#8c7f9a;max-width:600px">Team agreed mobile keeps Q3 priority; export slips ~2 weeks pending enterprise impact review.</div><div style="display:flex;gap:6px;margin-top:9px"><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">roadmap</span><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">export</span></div></div><div style="text-align:right;flex:none"><div style="font:500 11px 'JetBrains Mono';color:#a99cb5;margin-bottom:8px">Today · 31 min</div><div style="display:flex;justify-content:flex-end"><div style="width:24px;height:24px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">MC</div><div style="width:24px;height:24px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef;margin-left:-7px">DP</div><div style="width:24px;height:24px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef;margin-left:-7px">SL</div></div></div></div>
+        <div style="display:flex;gap:16px;padding:18px 20px;border-bottom:1px solid #f1e6dd"><div style="flex:1"><div style="display:flex;align-items:center;gap:9px;margin-bottom:6px"><span style="font-weight:600;font-size:15px">Design Critique — Onboarding</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;background:#fdeee9;padding:2px 7px;border-radius:999px">5 actions</span></div><div style="font-size:13px;line-height:1.5;color:#8c7f9a;max-width:600px">Reviewed v3 of the signup flow. Cut the welcome modal; ship progressive profiling instead.</div><div style="display:flex;gap:6px;margin-top:9px"><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">design</span><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">onboarding</span></div></div><div style="text-align:right;flex:none"><div style="font:500 11px 'JetBrains Mono';color:#a99cb5;margin-bottom:8px">Yesterday · 47 min</div><div style="display:flex;justify-content:flex-end"><div style="width:24px;height:24px;border-radius:50%;background:#8b5cf6;color:#fff;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">RK</div><div style="width:24px;height:24px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef;margin-left:-7px">MC</div></div></div></div>
+        <div style="display:flex;gap:16px;padding:18px 20px;border-bottom:1px solid #f1e6dd"><div style="flex:1"><div style="display:flex;align-items:center;gap:9px;margin-bottom:6px"><span style="font-weight:600;font-size:15px">Customer Call — Northwind</span><span style="font:500 10px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:2px 7px;border-radius:999px">1 action</span></div><div style="font-size:13px;line-height:1.5;color:#8c7f9a;max-width:600px">Renewal looks healthy. They want SSO and an audit log before expanding seats next quarter.</div><div style="display:flex;gap:6px;margin-top:9px"><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">sales</span><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">renewal</span></div></div><div style="text-align:right;flex:none"><div style="font:500 11px 'JetBrains Mono';color:#a99cb5;margin-bottom:8px">Mon · 28 min</div><div style="display:flex;justify-content:flex-end"><div style="width:24px;height:24px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">DP</div></div></div></div>
+        <div style="display:flex;gap:16px;padding:18px 20px"><div style="flex:1"><div style="display:flex;align-items:center;gap:9px;margin-bottom:6px"><span style="font-weight:600;font-size:15px">Weekly Eng Standup</span></div><div style="font-size:13px;line-height:1.5;color:#8c7f9a;max-width:600px">Search indexing is unblocked. Two PRs in review; deploy freeze lifts Thursday.</div><div style="display:flex;gap:6px;margin-top:9px"><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">eng</span><span style="font:500 11px 'JetBrains Mono';color:#8c7f9a;background:#fbe7de;padding:3px 8px;border-radius:5px">standup</span></div></div><div style="text-align:right;flex:none"><div style="font:500 11px 'JetBrains Mono';color:#a99cb5;margin-bottom:8px">Mon · 15 min</div><div style="display:flex;justify-content:flex-end"><div style="width:24px;height:24px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 9px/24px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">+6</div></div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== SEARCH (desktop) ===== -->
+<div style="position:absolute;left:2880px;top:1156px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Search — across every transcript</div>
+  <div data-screen-label="Search · desktop" style="height:840px;overflow:hidden;background:#fbf4ef;border:1px solid #efe1d8;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#2b1f33;display:flex">
+    <div style="width:204px;border-right:1px solid #efe1d8;padding:20px 16px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:9px;margin-bottom:26px;padding:0 6px"><div style="width:22px;height:22px;border-radius:6px;background:#f0714e"></div><span style="font-weight:700;font-size:15px">Candor</span></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#8c7f9a;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#a99cb5"></span>Home</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#8c7f9a;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#a99cb5"></span>Meetings</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#8c7f9a;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#a99cb5"></span>Action items</div>
+      <div style="display:flex;align-items:center;gap:10px;padding:9px 11px;border-radius:8px;font-size:13.5px;color:#2b1f33;background:#fbe7de;margin-bottom:3px"><span style="width:7px;height:7px;border-radius:2px;background:#f0714e"></span>Search</div>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center;gap:9px;padding:8px 6px;border-top:1px solid #efe1d8;padding-top:14px"><div style="width:26px;height:26px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 10px/26px 'Space Grotesk';text-align:center">MC</div><div><div style="font-size:12.5px">Maya Chen</div><div style="font:500 10px 'JetBrains Mono';color:#a99cb5">Workspace</div></div></div>
+    </div>
+    <div style="flex:1;padding:24px 28px;overflow:hidden">
+      <div style="display:flex;align-items:center;gap:11px;background:#fbf2ec;border:1px solid #e6d6ca;border-radius:10px;padding:13px 16px;margin-bottom:14px"><span style="color:#f0714e;font-size:16px">⌕</span><span style="flex:1;font-size:16px;color:#2b1f33">export delay</span><span style="display:inline-block;width:2px;height:18px;background:#f0714e;animation:blink 1s step-start infinite"></span></div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:22px"><span style="font:500 12px 'JetBrains Mono';color:#a99cb5">12 results across 4 meetings</span><div style="flex:1"></div><span style="font:500 12px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:5px 11px;border-radius:999px">Anyone ▾</span><span style="font:500 12px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:5px 11px;border-radius:999px">Any date ▾</span><span style="font:500 12px 'JetBrains Mono';color:#2a1006;background:#f0714e;padding:5px 11px;border-radius:999px">Transcript</span></div>
+      <div style="display:flex;flex-direction:column;gap:12px">
+        <div style="border:1px solid #efe1d8;border-radius:10px;padding:16px 18px"><div style="display:flex;align-items:center;gap:9px;margin-bottom:10px"><span style="font:600 13px 'Space Grotesk'">Q3 Roadmap Sync</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">Today</span><div style="flex:1"></div><span style="font:500 11px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;padding:4px 9px;border-radius:7px;cursor:pointer">Jump to 24:09 →</span></div><div style="display:flex;gap:11px"><div style="width:24px;height:24px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 9px/24px 'Space Grotesk';text-align:center;flex:none">DP</div><div style="font-size:14px;line-height:1.55;color:#574a63">"Export can <mark style="background:#f0714e;color:#2a1006;border-radius:3px;padding:0 3px">slip two weeks</mark> without hurting the enterprise deals on the table."</div></div></div>
+        <div style="border:1px solid #efe1d8;border-radius:10px;padding:16px 18px"><div style="display:flex;align-items:center;gap:9px;margin-bottom:10px"><span style="font:600 13px 'Space Grotesk'">Q3 Roadmap Sync</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">Today</span><div style="flex:1"></div><span style="font:500 11px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;padding:4px 9px;border-radius:7px;cursor:pointer">Jump to 24:15 →</span></div><div style="display:flex;gap:11px"><div style="width:24px;height:24px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 9px/24px 'Space Grotesk';text-align:center;flex:none">SL</div><div style="font-size:14px;line-height:1.55;color:#574a63">"Export is the number-one request this quarter, so I'd push back on letting it <mark style="background:#f0714e;color:#2a1006;border-radius:3px;padding:0 3px">slip</mark>."</div></div></div>
+        <div style="border:1px solid #efe1d8;border-radius:10px;padding:16px 18px"><div style="display:flex;align-items:center;gap:9px;margin-bottom:10px"><span style="font:600 13px 'Space Grotesk'">Customer Call — Northwind</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">Mon</span><div style="flex:1"></div><span style="font:500 11px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;padding:4px 9px;border-radius:7px;cursor:pointer">Jump to 11:32 →</span></div><div style="display:flex;gap:11px"><div style="width:24px;height:24px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 9px/24px 'Space Grotesk';text-align:center;flex:none">DP</div><div style="font-size:14px;line-height:1.55;color:#574a63">"If the <mark style="background:#f0714e;color:#2a1006;border-radius:3px;padding:0 3px">export delay</mark> hits us, we'd need a heads-up before the renewal call."</div></div></div>
+        <div style="border:1px solid #efe1d8;border-radius:10px;padding:16px 18px"><div style="display:flex;align-items:center;gap:9px;margin-bottom:10px"><span style="font:600 13px 'Space Grotesk'">Weekly Eng Standup</span><span style="font:500 11px 'JetBrains Mono';color:#a99cb5">Mon</span><div style="flex:1"></div><span style="font:500 11px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;padding:4px 9px;border-radius:7px;cursor:pointer">Jump to 04:50 →</span></div><div style="display:flex;gap:11px"><div style="width:24px;height:24px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 9px/24px 'Space Grotesk';text-align:center;flex:none">JO</div><div style="font-size:14px;line-height:1.55;color:#574a63">"The CSV <mark style="background:#f0714e;color:#2a1006;border-radius:3px;padding:0 3px">export</mark> endpoint is done — only the UI is gating the <mark style="background:#f0714e;color:#2a1006;border-radius:3px;padding:0 3px">delay</mark>."</div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ BAND 3 HEADER ============ -->
+<div style="position:absolute;left:80px;top:2074px;font:700 22px 'Space Grotesk',sans-serif;color:#2b2824;letter-spacing:-.01em">03 — Mobile</div>
+<div style="position:absolute;left:80px;top:2108px;font:400 13px 'JetBrains Mono',monospace;color:rgba(43,40,36,.55)">The same three screens, pocket-sized.</div>
+
+<!-- ===== MOBILE: LIVE ===== -->
+<div style="position:absolute;left:80px;top:2168px;width:392px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Live transcription</div>
+  <div data-screen-label="Live · mobile" style="height:812px;width:392px;background:#fbf4ef;border:1px solid #efe1d8;border-radius:42px;box-shadow:0 1px 3px rgba(0,0,0,.1);font-family:'Space Grotesk',sans-serif;color:#2b1f33;overflow:hidden;padding:0">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 26px 6px;font:600 13px 'Space Grotesk'"><span>9:41</span><div style="display:flex;gap:5px;align-items:center"><span style="width:16px;height:9px;border:1px solid #8c7f9a;border-radius:2px;display:inline-block"></span></div></div>
+    <div style="display:flex;align-items:center;gap:11px;padding:10px 22px 14px;border-bottom:1px solid #efe1d8"><span style="font-size:18px;color:#8c7f9a">‹</span><div style="flex:1"><div style="font-weight:600;font-size:15px">Q3 Roadmap Sync</div><div style="font:500 10px 'JetBrains Mono';color:#a99cb5;margin-top:1px">5 people</div></div><div style="display:flex;align-items:center;gap:6px;background:#1c1014;border:1px solid #3a2027;padding:5px 9px;border-radius:999px"><span style="width:7px;height:7px;border-radius:50%;background:#f0506e;animation:pulse 1.4s infinite"></span><span style="font:500 11px 'JetBrains Mono';color:#f0506e">24:18</span></div></div>
+    <div style="padding:18px 22px;height:420px;overflow:hidden">
+      <div style="display:flex;gap:11px;margin-bottom:18px"><div style="width:26px;height:26px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 10px/26px 'Space Grotesk';text-align:center;flex:none">MC</div><div><div style="display:flex;gap:7px;align-items:baseline;margin-bottom:3px"><span style="font-weight:600;font-size:12.5px">Maya Chen</span><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">24:02</span></div><div style="font-size:14px;line-height:1.55;color:#574a63">Shipping export in August pushes the mobile redesign to Q4. Are we aligned on that?</div></div></div>
+      <div style="display:flex;gap:11px;margin-bottom:18px"><div style="width:26px;height:26px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 10px/26px 'Space Grotesk';text-align:center;flex:none">DP</div><div><div style="display:flex;gap:7px;align-items:baseline;margin-bottom:3px"><span style="font-weight:600;font-size:12.5px">Devin Park</span><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">24:09</span></div><div style="font-size:14px;line-height:1.55;color:#574a63">I'd protect the mobile work. Export can slip two weeks.</div></div></div>
+      <div style="display:flex;gap:11px"><div style="width:26px;height:26px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 10px/26px 'Space Grotesk';text-align:center;flex:none">SL</div><div><div style="display:flex;gap:7px;align-items:baseline;margin-bottom:3px"><span style="font-weight:600;font-size:12.5px">Sarah Liu</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e">● speaking</span></div><div style="font-size:14px;line-height:1.55;color:#2b1f33">Export is the top support request this quarter, so I'd push back<span style="display:inline-block;width:2px;height:15px;background:#f0714e;margin-left:2px;vertical-align:-2px;animation:blink 1s step-start infinite"></span></div></div></div>
+    </div>
+    <div style="position:absolute;left:0;bottom:0;width:100%;padding:16px 22px 26px;border-top:1px solid #efe1d8;background:#fffaf6">
+      <div style="border:1px solid #f7d6cc;background:#fdeee9;border-radius:10px;padding:12px 13px;margin-bottom:16px"><div style="font:600 10px 'JetBrains Mono';letter-spacing:.06em;color:#f0714e;margin-bottom:5px">⌁ ACTION DETECTED</div><div style="font-size:13px;color:#2b1f33;line-height:1.4">Devin to scope a 2-week export delay <span style="color:#a99cb5">· @devin</span></div></div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:16px"><div style="width:46px;height:46px;border-radius:50%;border:1px solid #e6d6ca;display:flex;align-items:center;justify-content:center;font-size:18px;color:#8c7f9a">⏸</div><div style="width:58px;height:58px;border-radius:50%;background:#f0506e;display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px;font-weight:600"><span style="width:18px;height:18px;background:#fff;border-radius:4px"></span></div><div style="width:46px;height:46px;border-radius:50%;border:1px solid #e6d6ca;display:flex;align-items:center;justify-content:center;font-size:16px;color:#8c7f9a">⌁</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== MOBILE: SUMMARY ===== -->
+<div style="position:absolute;left:540px;top:2168px;width:392px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Recap</div>
+  <div data-screen-label="Recap · mobile" style="height:812px;width:392px;background:#fbf4ef;border:1px solid #efe1d8;border-radius:42px;box-shadow:0 1px 3px rgba(0,0,0,.1);font-family:'Space Grotesk',sans-serif;color:#2b1f33;overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 26px 6px;font:600 13px 'Space Grotesk'"><span>9:41</span><span style="width:16px;height:9px;border:1px solid #8c7f9a;border-radius:2px;display:inline-block"></span></div>
+    <div style="display:flex;align-items:center;gap:11px;padding:10px 22px 14px;border-bottom:1px solid #efe1d8"><span style="font-size:18px;color:#8c7f9a">‹</span><div style="flex:1"><div style="font-weight:600;font-size:15px">Q3 Roadmap Sync</div><div style="font:500 10px 'JetBrains Mono';color:#a99cb5;margin-top:1px">Jun 24 · 31 min · 5 people</div></div></div>
+    <div style="padding:18px 22px;overflow:hidden">
+      <div style="font:500 10px 'JetBrains Mono';letter-spacing:.1em;color:#f0714e;margin-bottom:9px">⌁ AI SUMMARY</div>
+      <div style="font-size:14.5px;line-height:1.62;color:#574a63;margin-bottom:22px">The team weighed export vs. the mobile redesign. Mobile keeps its Q3 slot; export slips ~2 weeks pending an enterprise impact review.</div>
+      <div style="font:500 10px 'JetBrains Mono';letter-spacing:.1em;color:#a99cb5;margin-bottom:11px">ACTION ITEMS · 3</div>
+      <div style="border:1px solid #efe1d8;border-radius:10px;overflow:hidden;margin-bottom:22px">
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 13px;border-bottom:1px solid #f1e6dd"><span style="width:15px;height:15px;border:1.5px solid #3a4047;border-radius:4px;flex:none"></span><span style="flex:1;font-size:13.5px">Scope export delay impact</span><div style="width:20px;height:20px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 8px/20px 'Space Grotesk';text-align:center">DP</div></div>
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 13px;border-bottom:1px solid #f1e6dd"><span style="width:15px;height:15px;border:1.5px solid #3a4047;border-radius:4px;flex:none"></span><span style="flex:1;font-size:13.5px">Pull top support requests</span><div style="width:20px;height:20px;border-radius:50%;background:#ffb24d;color:#1a1204;font:600 8px/20px 'Space Grotesk';text-align:center">SL</div></div>
+        <div style="display:flex;align-items:center;gap:10px;padding:12px 13px"><span style="width:15px;height:15px;border:1.5px solid #3a4047;border-radius:4px;flex:none"></span><span style="flex:1;font-size:13.5px">Confirm enterprise commitments</span><div style="width:20px;height:20px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 8px/20px 'Space Grotesk';text-align:center">MC</div></div>
+      </div>
+      <div style="font:500 10px 'JetBrains Mono';letter-spacing:.1em;color:#a99cb5;margin-bottom:11px">CHAPTERS</div>
+      <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f1e6dd"><span style="font-size:13px;color:#574a63">Intros &amp; agenda</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">00:00</span></div>
+      <div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #f1e6dd"><span style="font-size:13px;color:#574a63">Q3 status check</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">06:12</span></div>
+      <div style="display:flex;justify-content:space-between;padding:7px 0"><span style="font-size:13px;color:#574a63">Roadmap tradeoffs</span><span style="font:500 11px 'JetBrains Mono';color:#f0714e">21:40</span></div>
+    </div>
+    <div style="position:absolute;left:0;bottom:0;width:100%;padding:14px 22px 26px;border-top:1px solid #efe1d8;background:#fffaf6"><div style="display:flex;align-items:center;gap:9px;background:#0a0f0d;border:1px solid #f7d6cc;border-radius:10px;padding:11px 13px"><span style="font:600 10px 'JetBrains Mono';color:#f0714e">⌁</span><span style="flex:1;font-size:13px;color:#a99cb5">Ask this meeting…</span><span style="width:24px;height:24px;border-radius:6px;background:#f0714e;color:#2a1006;font:700 13px/24px 'Space Grotesk';text-align:center">↑</span></div></div>
+  </div>
+</div>
+
+<!-- ===== MOBILE: LIBRARY ===== -->
+<div style="position:absolute;left:1000px;top:2168px;width:392px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Library</div>
+  <div data-screen-label="Library · mobile" style="height:812px;width:392px;background:#fbf4ef;border:1px solid #efe1d8;border-radius:42px;box-shadow:0 1px 3px rgba(0,0,0,.1);font-family:'Space Grotesk',sans-serif;color:#2b1f33;overflow:hidden">
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:14px 26px 6px;font:600 13px 'Space Grotesk'"><span>9:41</span><span style="width:16px;height:9px;border:1px solid #8c7f9a;border-radius:2px;display:inline-block"></span></div>
+    <div style="padding:12px 22px 14px"><div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><span style="font-weight:700;font-size:21px;letter-spacing:-.01em;flex:1">Meetings</span><div style="width:32px;height:32px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 11px/32px 'Space Grotesk';text-align:center">MC</div></div><div style="display:flex;align-items:center;gap:9px;background:#fbf2ec;border:1px solid #e6d6ca;border-radius:10px;padding:10px 13px"><span style="color:#a99cb5">⌕</span><span style="color:#a99cb5;font-size:13px">Search transcripts…</span></div></div>
+    <div style="padding:0 22px;overflow:hidden">
+      <div style="border:1px solid #efe1d8;border-radius:12px;padding:15px;margin-bottom:11px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:7px"><span style="font-weight:600;font-size:14.5px;flex:1">Q3 Roadmap Sync</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;background:#fdeee9;padding:2px 6px;border-radius:999px">3</span></div><div style="font-size:12.5px;line-height:1.5;color:#8c7f9a;margin-bottom:9px">Mobile keeps Q3 priority; export slips ~2 weeks pending review.</div><div style="display:flex;align-items:center"><div style="width:22px;height:22px;border-radius:50%;background:#f0714e;color:#2a1006;font:600 8px/22px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">MC</div><div style="width:22px;height:22px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 8px/22px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef;margin-left:-6px">DP</div><div style="flex:1"></div><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">Today · 31 min</span></div></div>
+      <div style="border:1px solid #efe1d8;border-radius:12px;padding:15px;margin-bottom:11px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:7px"><span style="font-weight:600;font-size:14.5px;flex:1">Design Critique — Onboarding</span><span style="font:500 10px 'JetBrains Mono';color:#f0714e;border:1px solid #f7d6cc;background:#fdeee9;padding:2px 6px;border-radius:999px">5</span></div><div style="font-size:12.5px;line-height:1.5;color:#8c7f9a;margin-bottom:9px">Cut the welcome modal; ship progressive profiling instead.</div><div style="display:flex;align-items:center"><div style="width:22px;height:22px;border-radius:50%;background:#8b5cf6;color:#fff;font:600 8px/22px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">RK</div><div style="flex:1"></div><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">Yesterday · 47 min</span></div></div>
+      <div style="border:1px solid #efe1d8;border-radius:12px;padding:15px"><div style="display:flex;align-items:center;gap:8px;margin-bottom:7px"><span style="font-weight:600;font-size:14.5px;flex:1">Customer Call — Northwind</span><span style="font:500 10px 'JetBrains Mono';color:#8c7f9a;border:1px solid #e6d6ca;padding:2px 6px;border-radius:999px">1</span></div><div style="font-size:12.5px;line-height:1.5;color:#8c7f9a;margin-bottom:9px">Renewal healthy. Wants SSO and audit log before expanding.</div><div style="display:flex;align-items:center"><div style="width:22px;height:22px;border-radius:50%;background:#8b6fd6;color:#fff;font:600 8px/22px 'Space Grotesk';text-align:center;border:2px solid #fbf4ef">DP</div><div style="flex:1"></div><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">Mon · 28 min</span></div></div>
+    </div>
+    <div style="position:absolute;left:0;bottom:0;width:100%;padding:12px 30px 24px;border-top:1px solid #efe1d8;background:#fffaf6;display:flex;align-items:center;justify-content:space-between">
+      <div style="text-align:center"><div style="width:7px;height:7px;border-radius:2px;background:#f0714e;margin:0 auto 5px"></div><span style="font:500 10px 'JetBrains Mono';color:#f0714e">Meetings</span></div>
+      <div style="text-align:center"><div style="width:7px;height:7px;border-radius:2px;background:#a99cb5;margin:0 auto 5px"></div><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">Search</span></div>
+      <div onClick="{{ startRec }}" style="cursor:pointer;width:50px;height:50px;border-radius:50%;background:#f0506e;display:flex;align-items:center;justify-content:center;margin-top:-26px;box-shadow:0 4px 14px rgba(240,80,110,.4)"><span style="width:16px;height:16px;background:#fff;border-radius:50%"></span></div>
+      <div style="text-align:center"><div style="width:7px;height:7px;border-radius:2px;background:#a99cb5;margin:0 auto 5px"></div><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">Tasks</span></div>
+      <div style="text-align:center"><div style="width:7px;height:7px;border-radius:2px;background:#a99cb5;margin:0 auto 5px"></div><span style="font:500 10px 'JetBrains Mono';color:#a99cb5">You</span></div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ BAND 4 HEADER — MORE DIRECTIONS ============ -->
+<div style="position:absolute;left:80px;top:3072px;font:700 22px 'Space Grotesk',sans-serif;color:#2b2824;letter-spacing:-.01em">01b — More directions</div>
+<div style="position:absolute;left:80px;top:3106px;font:400 13px 'JetBrains Mono',monospace;color:rgba(43,40,36,.55)">Three fresh takes on live transcription — softer, more structured, more spatial.</div>
+
+<!-- ===== D: SOFT & HUMAN ===== -->
+<div style="position:absolute;left:80px;top:3166px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">D · Soft &amp; Human — warm, rounded, conversational</div>
+  <div data-screen-label="Live · Soft Human" style="height:840px;overflow:hidden;background:#fdf9f4;border:1px solid #ece2d4;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Public Sans',sans-serif;color:#2c241d">
+    <div style="display:flex;align-items:center;gap:14px;height:62px;padding:0 24px;border-bottom:1px solid #f0e7da">
+      <div style="display:flex;align-items:center;gap:10px"><div style="width:26px;height:26px;border-radius:50%;background:#f0705a"></div><span style="font-weight:700;font-size:15px">Candor</span></div>
+      <div style="flex:1"></div>
+      <span style="font-weight:600;font-size:14px;background:#fff;border:1px solid #f0e7da;padding:7px 14px;border-radius:999px">Q3 Roadmap Sync</span>
+      <div style="display:flex;align-items:center;gap:7px;background:#fdeeeb;border:1px solid #f7d6cf;padding:6px 12px;border-radius:999px"><span style="width:8px;height:8px;border-radius:50%;background:#f0705a;animation:pulse 1.4s infinite"></span><span style="font-weight:600;font-size:12px;color:#d24a35">Recording 24:18</span></div>
+      <button style="font:600 13px 'Public Sans';color:#fff;background:#f0705a;border:none;padding:9px 16px;border-radius:999px;cursor:pointer">Wrap up</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 332px;height:778px">
+      <div style="padding:28px 32px;overflow:hidden">
+        <div style="display:flex;gap:12px;margin-bottom:22px;align-items:flex-start"><div style="width:34px;height:34px;border-radius:50%;background:#f0705a;color:#fff;font:600 12px/34px 'Public Sans';text-align:center;flex:none">MC</div><div style="max-width:560px"><div style="font-weight:600;font-size:13px;margin-bottom:5px;color:#6e6056">Maya Chen <span style="font-weight:500;color:#b3a596;margin-left:4px">24:02</span></div><div style="background:#fff;border:1px solid #f0e7da;border-radius:4px 18px 18px 18px;padding:13px 16px;font-size:15px;line-height:1.55">If we ship export in August, that pushes the mobile redesign to Q4. Are we aligned on that tradeoff?</div></div></div>
+        <div style="display:flex;gap:12px;margin-bottom:22px;align-items:flex-start"><div style="width:34px;height:34px;border-radius:50%;background:#8b7fd6;color:#fff;font:600 12px/34px 'Public Sans';text-align:center;flex:none">DP</div><div style="max-width:560px"><div style="font-weight:600;font-size:13px;margin-bottom:5px;color:#6e6056">Devin Park <span style="font-weight:500;color:#b3a596;margin-left:4px">24:09</span></div><div style="background:#fff;border:1px solid #f0e7da;border-radius:4px 18px 18px 18px;padding:13px 16px;font-size:15px;line-height:1.55">I'd rather protect the mobile work. Export can slip two weeks without hurting the enterprise deals.</div></div></div>
+        <div style="display:flex;gap:12px;align-items:flex-start"><div style="width:34px;height:34px;border-radius:50%;background:#e0a23b;color:#fff;font:600 12px/34px 'Public Sans';text-align:center;flex:none">SL</div><div style="max-width:560px"><div style="font-weight:600;font-size:13px;margin-bottom:5px;color:#6e6056">Sarah Liu <span style="font-weight:600;color:#f0705a;margin-left:4px">speaking…</span></div><div style="background:#fdeeeb;border:1px solid #f7d6cf;border-radius:4px 18px 18px 18px;padding:13px 16px;font-size:15px;line-height:1.55">Export is the number-one support request this quarter, so I'd push back a little on letting it slip<span style="display:inline-block;width:2px;height:16px;background:#f0705a;margin-left:2px;vertical-align:-2px;animation:blink 1s step-start infinite"></span></div></div></div>
+      </div>
+      <div style="padding:26px 24px;overflow:hidden">
+        <div style="background:#f4eefb;border:1px solid #e6d9f5;border-radius:18px;padding:18px;margin-bottom:18px"><div style="display:flex;align-items:center;gap:7px;margin-bottom:11px"><span style="width:7px;height:7px;border-radius:50%;background:#8b7fd6;animation:pulse 1.6s infinite"></span><span style="font-weight:700;font-size:12px;color:#6b5bb0">Following along</span></div><div style="font-size:14px;line-height:1.55;color:#5a4f63">The team is weighing export timing against the mobile redesign. Mobile looks set to keep priority.</div></div>
+        <div style="font-weight:700;font-size:12px;color:#a89684;margin-bottom:12px;text-transform:uppercase;letter-spacing:.05em">To do · 2</div>
+        <div style="display:flex;gap:10px;align-items:flex-start;background:#fff;border:1px solid #f0e7da;border-radius:14px;padding:12px 14px;margin-bottom:9px"><span style="width:18px;height:18px;border:2px solid #e0d4c4;border-radius:50%;flex:none;margin-top:1px"></span><div style="font-size:13.5px;line-height:1.4">Scope a 2-week export delay <span style="display:block;font-size:12px;color:#b3a596;margin-top:2px">Devin</span></div></div>
+        <div style="display:flex;gap:10px;align-items:flex-start;background:#fff;border:1px solid #f0e7da;border-radius:14px;padding:12px 14px;margin-bottom:20px"><span style="width:18px;height:18px;border:2px solid #e0d4c4;border-radius:50%;flex:none;margin-top:1px"></span><div style="font-size:13.5px;line-height:1.4">Pull top support requests <span style="display:block;font-size:12px;color:#b3a596;margin-top:2px">Sarah</span></div></div>
+        <div style="font-weight:700;font-size:12px;color:#a89684;margin-bottom:12px;text-transform:uppercase;letter-spacing:.05em">Topics</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px"><span style="font-size:13px;padding:6px 13px;background:#fdeeeb;color:#d24a35;border-radius:999px;font-weight:500">Roadmap</span><span style="font-size:13px;padding:6px 13px;background:#fdeeeb;color:#d24a35;border-radius:999px;font-weight:500">Export</span><span style="font-size:13px;padding:6px 13px;background:#f4eefb;color:#6b5bb0;border-radius:999px;font-weight:500">Mobile</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== E: MONO TERMINAL ===== -->
+<div style="position:absolute;left:1480px;top:3166px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">E · Mono Terminal — structured, monospace, hairline grid</div>
+  <div data-screen-label="Live · Mono Terminal" style="height:840px;overflow:hidden;background:#fbfbf8;border:1px solid #d8d6cf;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'JetBrains Mono',monospace;color:#1a1a17">
+    <div style="display:flex;align-items:center;gap:12px;height:54px;padding:0 22px;border-bottom:1px solid #d8d6cf">
+      <span style="font-weight:500;font-size:13px">▌cadence</span>
+      <span style="font-size:13px;color:#8a8478">/ q3-roadmap-sync</span>
+      <div style="flex:1"></div>
+      <span style="font-size:12px;color:#157f3c">5 connected</span>
+      <span style="font-size:12px;border:1px solid #d8d6cf;padding:5px 10px;border-radius:3px">[ ● REC 24:18 ]</span>
+      <span style="font-size:12px;border:1px solid #1a1a17;background:#1a1a17;color:#fbfbf8;padding:5px 10px;border-radius:3px;cursor:pointer">[ stop ]</span>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 300px;height:786px">
+      <div style="padding:8px 0;overflow:hidden;border-right:1px solid #d8d6cf">
+        <div style="display:grid;grid-template-columns:118px 1fr;gap:0;padding:16px 22px;border-bottom:1px solid #ebe9e1"><div><div style="font-size:13px;font-weight:500">maya.chen</div><div style="font-size:11px;color:#a8a294;margin-top:2px">24:02</div></div><div style="font-size:14px;line-height:1.6;color:#33312a"><span style="color:#157f3c">&gt;</span> If we ship export in August, that pushes the mobile redesign to Q4. Are we aligned on that tradeoff?</div></div>
+        <div style="display:grid;grid-template-columns:118px 1fr;gap:0;padding:16px 22px;border-bottom:1px solid #ebe9e1"><div><div style="font-size:13px;font-weight:500">devin.park</div><div style="font-size:11px;color:#a8a294;margin-top:2px">24:09</div></div><div style="font-size:14px;line-height:1.6;color:#33312a"><span style="color:#157f3c">&gt;</span> I'd rather protect the mobile work. Export can slip two weeks without hurting the enterprise deals.</div></div>
+        <div style="display:grid;grid-template-columns:118px 1fr;gap:0;padding:16px 22px;background:#f4f4ee"><div><div style="font-size:13px;font-weight:500">sarah.liu</div><div style="font-size:11px;color:#157f3c;margin-top:2px">● live</div></div><div style="font-size:14px;line-height:1.6;color:#1a1a17"><span style="color:#157f3c">&gt;</span> Export is the number-one support request this quarter, so I'd push back on letting it slip<span style="display:inline-block;width:7px;height:15px;background:#1a1a17;margin-left:2px;vertical-align:-2px;animation:blink 1s step-start infinite"></span></div></div>
+      </div>
+      <div style="padding:18px 18px;overflow:hidden">
+        <div style="font-size:11px;color:#8a8478;margin-bottom:16px">[ LIVE_INSIGHTS ]</div>
+        <div style="font-size:11px;color:#9a6b00;margin-bottom:9px">◆ actions</div>
+        <div style="font-size:13px;line-height:1.5;margin-bottom:7px;padding-left:14px;text-indent:-14px">- scope 2wk export delay <span style="color:#a8a294">@devin</span></div>
+        <div style="font-size:13px;line-height:1.5;margin-bottom:20px;padding-left:14px;text-indent:-14px">- pull q3 support reqs <span style="color:#a8a294">@sarah</span></div>
+        <div style="font-size:11px;color:#157f3c;margin-bottom:9px">■ decision</div>
+        <div style="font-size:13px;line-height:1.5;margin-bottom:20px;border:1px solid #d8d6cf;padding:10px 12px;border-radius:3px">mobile redesign holds Q3 priority</div>
+        <div style="font-size:11px;color:#8a8478;margin-bottom:9px"># topics</div>
+        <div style="font-size:13px;line-height:1.8;color:#33312a">roadmap · export · mobile · enterprise</div>
+        <div style="font-size:11px;color:#8a8478;margin:22px 0 9px">~ talk_time</div>
+        <div style="font-size:12px;line-height:1.9;color:#33312a"><div>maya  <span style="color:#157f3c">████████</span>░░ 42%</div><div>devin <span style="color:#157f3c">█████</span>░░░░░ 28%</div><div>sarah <span style="color:#157f3c">████</span>░░░░░░ 21%</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== F: TIMELINE-FIRST ===== -->
+<div style="position:absolute;left:2880px;top:3166px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">F · Timeline-first — playback spine, moments pinned in time</div>
+  <div data-screen-label="Live · Timeline" style="height:840px;overflow:hidden;background:#f4f5f8;border:1px solid #e2e4ea;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#232733">
+    <div style="display:flex;align-items:center;gap:16px;height:60px;padding:0 24px;border-bottom:1px solid #e2e4ea;background:#fff">
+      <div style="width:24px;height:24px;border-radius:6px;background:#5b5bd6"></div>
+      <span style="font-weight:600;font-size:14px">Q3 Roadmap Sync</span>
+      <div style="flex:1;display:flex;align-items:center;gap:10px"><span style="font:500 11px 'JetBrains Mono';color:#8c92a3">21:40</span><div style="flex:1;height:5px;background:#e2e4ea;border-radius:3px;position:relative"><div style="position:absolute;left:0;top:0;height:100%;width:78%;background:#5b5bd6;border-radius:3px"></div><div style="position:absolute;left:78%;top:50%;transform:translate(-50%,-50%);width:13px;height:13px;border-radius:50%;background:#fff;border:3px solid #5b5bd6"></div></div><span style="font:500 11px 'JetBrains Mono';color:#8c92a3">31:00</span></div>
+      <div style="display:flex;align-items:center;gap:6px;background:#fdecef;border:1px solid #f6cdd5;padding:5px 11px;border-radius:999px"><span style="width:7px;height:7px;border-radius:50%;background:#e23d5c;animation:pulse 1.4s infinite"></span><span style="font:600 11px 'Space Grotesk';color:#c52d49">Live</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 296px;height:780px">
+      <div style="position:relative;padding:26px 28px 26px 0;overflow:hidden">
+        <div style="position:absolute;left:96px;top:0;bottom:0;width:2px;background:#e2e4ea"></div>
+        <div style="display:grid;grid-template-columns:96px 1fr;gap:18px;margin-bottom:20px;position:relative"><div style="text-align:right;padding-right:18px;position:relative"><span style="font:500 11px 'JetBrains Mono';color:#8c92a3">24:02</span><span style="position:absolute;right:-7px;top:1px;width:12px;height:12px;border-radius:50%;background:#5b5bd6;border:2px solid #fff"></span></div><div style="background:#fff;border:1px solid #e2e4ea;border-radius:12px;padding:13px 15px;max-width:520px"><div style="font-weight:600;font-size:12.5px;color:#5b5bd6;margin-bottom:4px">Maya Chen</div><div style="font-size:14.5px;line-height:1.55;color:#3a3f4c">If we ship export in August, that pushes the mobile redesign to Q4. Are we aligned on that tradeoff?</div></div></div>
+        <div style="display:grid;grid-template-columns:96px 1fr;gap:18px;margin-bottom:20px;position:relative"><div style="text-align:right;padding-right:18px;position:relative"><span style="font:500 11px 'JetBrains Mono';color:#8c92a3">24:09</span><span style="position:absolute;right:-7px;top:1px;width:12px;height:12px;border-radius:50%;background:#2bb673;border:2px solid #fff"></span></div><div style="background:#fff;border:1px solid #e2e4ea;border-radius:12px;padding:13px 15px;max-width:520px"><div style="font-weight:600;font-size:12.5px;color:#2bb673;margin-bottom:4px">Devin Park</div><div style="font-size:14.5px;line-height:1.55;color:#3a3f4c">I'd rather protect the mobile work. Export can slip two weeks without hurting the enterprise deals.</div></div></div>
+        <div style="display:grid;grid-template-columns:96px 1fr;gap:18px;position:relative"><div style="text-align:right;padding-right:18px;position:relative"><span style="font:500 11px 'JetBrains Mono';color:#e23d5c">24:15</span><span style="position:absolute;right:-8px;top:0;width:14px;height:14px;border-radius:50%;background:#e23d5c;border:2px solid #fff;box-shadow:0 0 0 4px rgba(226,61,92,.15)"></span></div><div style="background:#fff;border:1px solid #f6cdd5;border-radius:12px;padding:13px 15px;max-width:520px"><div style="font-weight:600;font-size:12.5px;color:#d8a200;margin-bottom:4px">Sarah Liu</div><div style="font-size:14.5px;line-height:1.55;color:#232733">Export is the number-one support request this quarter, so I'd push back on letting it slip<span style="display:inline-block;width:2px;height:15px;background:#e23d5c;margin-left:2px;vertical-align:-2px;animation:blink 1s step-start infinite"></span></div></div></div>
+      </div>
+      <div style="border-left:1px solid #e2e4ea;background:#fff;padding:24px 20px;overflow:hidden">
+        <div style="font:600 11px 'JetBrains Mono';letter-spacing:.08em;color:#8c92a3;margin-bottom:16px">PINNED MOMENTS</div>
+        <div style="display:flex;gap:11px;margin-bottom:16px"><div style="display:flex;flex-direction:column;align-items:center;flex:none"><span style="width:9px;height:9px;border-radius:50%;background:#5b5bd6"></span><span style="font:500 10px 'JetBrains Mono';color:#8c92a3;margin-top:4px;writing-mode:initial">23:10</span></div><div><div style="font-weight:600;font-size:12.5px;color:#5b5bd6;margin-bottom:3px">Action</div><div style="font-size:13px;line-height:1.45;color:#3a3f4c">Devin to scope a 2-week export delay impact</div></div></div>
+        <div style="display:flex;gap:11px;margin-bottom:16px"><div style="display:flex;flex-direction:column;align-items:center;flex:none"><span style="width:9px;height:9px;border-radius:50%;background:#d8a200"></span><span style="font:500 10px 'JetBrains Mono';color:#8c92a3;margin-top:4px">24:15</span></div><div><div style="font-weight:600;font-size:12.5px;color:#d8a200;margin-bottom:3px">Question</div><div style="font-size:13px;line-height:1.45;color:#3a3f4c">Does an export delay risk signed enterprise deals?</div></div></div>
+        <div style="display:flex;gap:11px;margin-bottom:24px"><div style="display:flex;flex-direction:column;align-items:center;flex:none"><span style="width:9px;height:9px;border-radius:50%;background:#2bb673"></span><span style="font:500 10px 'JetBrains Mono';color:#8c92a3;margin-top:4px">21:40</span></div><div><div style="font-weight:600;font-size:12.5px;color:#2bb673;margin-bottom:3px">Decision</div><div style="font-size:13px;line-height:1.45;color:#3a3f4c">Mobile redesign keeps its Q3 priority slot</div></div></div>
+        <div style="font:600 11px 'JetBrains Mono';letter-spacing:.08em;color:#8c92a3;margin-bottom:12px">SPEAKER LANES</div>
+        <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px"><span style="width:9px;height:9px;border-radius:50%;background:#5b5bd6;flex:none"></span><span style="font-size:12.5px;flex:1">Maya Chen</span><div style="width:84px;height:5px;background:#eef0f4;border-radius:3px;overflow:hidden"><div style="width:42%;height:100%;background:#5b5bd6"></div></div></div>
+        <div style="display:flex;align-items:center;gap:9px;margin-bottom:9px"><span style="width:9px;height:9px;border-radius:50%;background:#2bb673;flex:none"></span><span style="font-size:12.5px;flex:1">Devin Park</span><div style="width:84px;height:5px;background:#eef0f4;border-radius:3px;overflow:hidden"><div style="width:28%;height:100%;background:#2bb673"></div></div></div>
+        <div style="display:flex;align-items:center;gap:9px"><span style="width:9px;height:9px;border-radius:50%;background:#d8a200;flex:none"></span><span style="font-size:12.5px;flex:1">Sarah Liu</span><div style="width:84px;height:5px;background:#eef0f4;border-radius:3px;overflow:hidden"><div style="width:21%;height:100%;background:#d8a200"></div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ BAND 5 HEADER — BOLD ============ -->
+<div style="position:absolute;left:80px;top:4088px;font:700 22px 'Space Grotesk',sans-serif;color:#2b2824;letter-spacing:-.01em">01c — Bold &amp; loud</div>
+<div style="position:absolute;left:80px;top:4122px;font:400 13px 'JetBrains Mono',monospace;color:rgba(43,40,36,.55)">Big type, color blocking, high energy — a transcriber with attitude. Live + recap.</div>
+
+<!-- ===== G: SPOTLIGHT — LIVE ===== -->
+<div style="position:absolute;left:80px;top:4182px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">G · Spotlight — live transcription</div>
+  <div data-screen-label="Live · Spotlight" style="height:840px;overflow:hidden;background:#161020;border:1px solid #2a2140;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#f4f1fb">
+    <div style="display:flex;align-items:center;gap:18px;height:78px;padding:0 28px;background:#7c5cff">
+      <div style="display:flex;align-items:center;gap:11px"><div style="width:30px;height:30px;border-radius:8px;background:#161020"></div><span style="font-weight:700;font-size:17px;letter-spacing:.06em;color:#fff">CADENCE</span></div>
+      <div style="width:1px;height:30px;background:rgba(255,255,255,.3)"></div>
+      <span style="font-weight:700;font-size:24px;letter-spacing:-.01em;color:#fff;text-transform:uppercase">Q3 Roadmap Sync</span>
+      <div style="flex:1"></div>
+      <div style="display:flex;align-items:center;gap:8px;background:#c8f24a;padding:7px 14px;border-radius:8px"><span style="width:9px;height:9px;border-radius:50%;background:#161020;animation:pulse 1.3s infinite"></span><span style="font:700 22px 'JetBrains Mono';color:#161020;letter-spacing:.02em">24:18</span></div>
+      <button style="font:700 14px 'Space Grotesk';color:#7c5cff;background:#fff;border:none;padding:11px 18px;border-radius:8px;cursor:pointer;text-transform:uppercase;letter-spacing:.03em">Stop</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 360px;height:762px">
+      <div style="padding:30px 34px;overflow:hidden">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:18px"><span style="width:8px;height:8px;border-radius:50%;background:#c8f24a;animation:pulse 1.3s infinite"></span><span style="font:700 13px 'JetBrains Mono';letter-spacing:.18em;color:#c8f24a">NOW SPEAKING</span></div>
+        <div style="display:flex;align-items:center;gap:16px;margin-bottom:14px"><div style="width:52px;height:52px;border-radius:14px;background:#c8f24a;color:#161020;font:700 18px/52px 'Space Grotesk';text-align:center;flex:none">SL</div><div><div style="font-weight:700;font-size:30px;letter-spacing:-.02em;line-height:1">Sarah Liu</div><div style="font:500 12px 'JetBrains Mono';color:#9b91b8;margin-top:5px">SUPPORT LEAD · 24:15</div></div></div>
+        <div style="font-size:23px;line-height:1.45;font-weight:500;max-width:600px;margin-bottom:26px">Export is the number-one support request this quarter, so I'd push back on letting it slip<span style="display:inline-block;width:3px;height:23px;background:#c8f24a;margin-left:3px;vertical-align:-3px;animation:blink 1s step-start infinite"></span></div>
+        <div style="display:flex;align-items:flex-end;gap:3px;height:48px;margin-bottom:30px">
+          <span style="flex:1;height:40%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:70%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:95%;background:#c8f24a;border-radius:2px"></span><span style="flex:1;height:55%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:80%;background:#c8f24a;border-radius:2px"></span><span style="flex:1;height:35%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:65%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:100%;background:#c8f24a;border-radius:2px"></span><span style="flex:1;height:48%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:75%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:90%;background:#c8f24a;border-radius:2px"></span><span style="flex:1;height:30%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:60%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:85%;background:#c8f24a;border-radius:2px"></span><span style="flex:1;height:45%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:72%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:98%;background:#c8f24a;border-radius:2px"></span><span style="flex:1;height:38%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:68%;background:#7c5cff;border-radius:2px"></span><span style="flex:1;height:52%;background:#7c5cff;border-radius:2px"></span>
+        </div>
+        <div style="border-top:1px solid #2a2140;padding-top:20px">
+          <div style="display:flex;gap:13px;margin-bottom:15px"><div style="width:30px;height:30px;border-radius:9px;background:#7c5cff;color:#fff;font:700 11px/30px 'Space Grotesk';text-align:center;flex:none">MC</div><div><span style="font-weight:700;font-size:14px">Maya Chen</span> <span style="font:500 11px 'JetBrains Mono';color:#6b6388;margin-left:5px">24:02</span><div style="font-size:15px;line-height:1.5;color:#b8b0d4;margin-top:3px;max-width:560px">Shipping export in August pushes the mobile redesign to Q4. Are we aligned on that?</div></div></div>
+          <div style="display:flex;gap:13px"><div style="width:30px;height:30px;border-radius:9px;background:#2bb673;color:#fff;font:700 11px/30px 'Space Grotesk';text-align:center;flex:none">DP</div><div><span style="font-weight:700;font-size:14px">Devin Park</span> <span style="font:500 11px 'JetBrains Mono';color:#6b6388;margin-left:5px">24:09</span><div style="font-size:15px;line-height:1.5;color:#b8b0d4;margin-top:3px;max-width:560px">I'd protect the mobile work. Export can slip two weeks.</div></div></div>
+        </div>
+      </div>
+      <div style="background:#1e1630;padding:26px 24px;overflow:hidden">
+        <div style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#9b91b8;margin-bottom:18px">AI COPILOT</div>
+        <div style="background:#c8f24a;border-radius:14px;padding:16px;margin-bottom:13px"><div style="font:700 12px 'JetBrains Mono';letter-spacing:.1em;color:#161020;margin-bottom:8px">⚡ ACTION</div><div style="font-size:16px;line-height:1.4;font-weight:600;color:#161020">Devin to scope a 2-week export delay impact</div><div style="font:600 11px 'JetBrains Mono';color:#4a5a14;margin-top:8px">@devin</div></div>
+        <div style="background:#7c5cff;border-radius:14px;padding:16px;margin-bottom:13px"><div style="font:700 12px 'JetBrains Mono';letter-spacing:.1em;color:#fff;margin-bottom:8px;opacity:.8">✓ DECISION</div><div style="font-size:16px;line-height:1.4;font-weight:600;color:#fff">Mobile redesign keeps its Q3 priority slot</div></div>
+        <div style="border:2px solid #2a2140;border-radius:14px;padding:16px;margin-bottom:22px"><div style="font:700 12px 'JetBrains Mono';letter-spacing:.1em;color:#9b91b8;margin-bottom:8px">? OPEN QUESTION</div><div style="font-size:15px;line-height:1.4;font-weight:500;color:#f4f1fb">Does the delay risk signed enterprise deals?</div></div>
+        <div style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#9b91b8;margin-bottom:14px">WHO'S TALKING</div>
+        <div style="display:flex;align-items:flex-end;gap:14px"><div><div style="font-weight:700;font-size:34px;line-height:1;color:#c8f24a">42<span style="font-size:16px">%</span></div><div style="font:500 11px 'JetBrains Mono';color:#9b91b8;margin-top:5px">Maya</div></div><div><div style="font-weight:700;font-size:34px;line-height:1;color:#7c5cff">28<span style="font-size:16px">%</span></div><div style="font:500 11px 'JetBrains Mono';color:#9b91b8;margin-top:5px">Devin</div></div><div><div style="font-weight:700;font-size:34px;line-height:1;color:#f4f1fb">21<span style="font-size:16px">%</span></div><div style="font:500 11px 'JetBrains Mono';color:#9b91b8;margin-top:5px">Sarah</div></div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== G: SPOTLIGHT — RECAP ===== -->
+<div style="position:absolute;left:1480px;top:4182px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">G · Spotlight — recap</div>
+  <div data-screen-label="Recap · Spotlight" style="height:840px;overflow:hidden;background:#161020;border:1px solid #2a2140;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#f4f1fb">
+    <div style="background:#7c5cff;padding:30px 34px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:14px"><span style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#c8f24a">RECAP</span><span style="font:600 12px 'JetBrains Mono';color:rgba(255,255,255,.8)">JUN 24, 2026</span></div>
+      <div style="font-weight:700;font-size:42px;letter-spacing:-.02em;line-height:1;color:#fff;text-transform:uppercase;margin-bottom:20px">Q3 Roadmap Sync</div>
+      <div style="display:flex;gap:40px"><div><div style="font-weight:700;font-size:30px;line-height:1;color:#fff">31<span style="font-size:15px;margin-left:2px">MIN</span></div></div><div><div style="font-weight:700;font-size:30px;line-height:1;color:#fff">5<span style="font-size:15px;margin-left:4px">PEOPLE</span></div></div><div><div style="font-weight:700;font-size:30px;line-height:1;color:#c8f24a">3<span style="font-size:15px;margin-left:4px">ACTIONS</span></div></div><div><div style="font-weight:700;font-size:30px;line-height:1;color:#c8f24a">2<span style="font-size:15px;margin-left:4px">DECISIONS</span></div></div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 372px;height:618px">
+      <div style="padding:28px 34px;overflow:hidden">
+        <div style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#c8f24a;margin-bottom:14px">⚡ THE GIST</div>
+        <div style="font-size:21px;line-height:1.5;font-weight:500;max-width:600px;margin-bottom:30px">The team weighed <span style="color:#c8f24a">export</span> against the <span style="color:#c8f24a">mobile redesign</span>. Mobile keeps its Q3 slot; export slips ~2 weeks pending an enterprise impact review.</div>
+        <div style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#9b91b8;margin-bottom:14px">ACTION ITEMS</div>
+        <div style="display:flex;align-items:center;gap:13px;background:#1e1630;border-radius:12px;padding:15px 17px;margin-bottom:10px"><span style="width:22px;height:22px;border-radius:7px;background:#c8f24a;color:#161020;font:700 13px/22px 'Space Grotesk';text-align:center;flex:none">→</span><span style="flex:1;font-size:16px;font-weight:600">Scope the 2-week export delay impact</span><div style="width:26px;height:26px;border-radius:8px;background:#2bb673;color:#fff;font:700 10px/26px 'Space Grotesk';text-align:center">DP</div></div>
+        <div style="display:flex;align-items:center;gap:13px;background:#1e1630;border-radius:12px;padding:15px 17px;margin-bottom:10px"><span style="width:22px;height:22px;border-radius:7px;background:#c8f24a;color:#161020;font:700 13px/22px 'Space Grotesk';text-align:center;flex:none">→</span><span style="flex:1;font-size:16px;font-weight:600">Pull top support requests for Q3</span><div style="width:26px;height:26px;border-radius:8px;background:#e0a23b;color:#161020;font:700 10px/26px 'Space Grotesk';text-align:center">SL</div></div>
+        <div style="display:flex;align-items:center;gap:13px;background:#1e1630;border-radius:12px;padding:15px 17px"><span style="width:22px;height:22px;border-radius:7px;background:#c8f24a;color:#161020;font:700 13px/22px 'Space Grotesk';text-align:center;flex:none">→</span><span style="flex:1;font-size:16px;font-weight:600">Confirm enterprise commitments</span><div style="width:26px;height:26px;border-radius:8px;background:#7c5cff;color:#fff;font:700 10px/26px 'Space Grotesk';text-align:center">MC</div></div>
+      </div>
+      <div style="background:#1e1630;padding:28px 24px;overflow:hidden">
+        <div style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#9b91b8;margin-bottom:14px">ASK THIS MEETING</div>
+        <div style="background:#161020;border:2px solid #7c5cff;border-radius:13px;padding:14px;margin-bottom:26px"><div style="display:flex;align-items:center;gap:10px"><span style="flex:1;font-size:14px;color:#9b91b8">What did we decide on export?</span><span style="width:30px;height:30px;border-radius:9px;background:#c8f24a;color:#161020;font:700 16px/30px 'Space Grotesk';text-align:center">↑</span></div></div>
+        <div style="font:700 13px 'JetBrains Mono';letter-spacing:.16em;color:#9b91b8;margin-bottom:14px">CHAPTERS</div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid #2a2140"><span style="font-size:15px;font-weight:500">Intros &amp; agenda</span><span style="font:700 13px 'JetBrains Mono';color:#c8f24a">00:00</span></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid #2a2140"><span style="font-size:15px;font-weight:500">Q3 status check</span><span style="font:700 13px 'JetBrains Mono';color:#c8f24a">06:12</span></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:11px 0;border-bottom:1px solid #2a2140"><span style="font-size:15px;font-weight:500">Roadmap tradeoffs</span><span style="font:700 13px 'JetBrains Mono';color:#c8f24a">21:40</span></div>
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:11px 0"><span style="font-size:15px;font-weight:500">Wrap-up &amp; owners</span><span style="font:700 13px 'JetBrains Mono';color:#c8f24a">28:55</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ BAND 6 HEADER — LANDING ============ -->
+<div style="position:absolute;left:80px;top:5104px;font:700 22px 'Space Grotesk',sans-serif;color:#2b2824;letter-spacing:-.01em">02b — Landing</div>
+<div style="position:absolute;left:80px;top:5138px;font:400 13px 'JetBrains Mono',monospace;color:rgba(43,40,36,.55)">Entry screen — symbolic image + app name + the three ways in. Drop your own photo into the slot.</div>
+
+<!-- ===== LANDING — SUNRISE ===== -->
+<div style="position:absolute;left:1480px;top:5198px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Candor — landing (sunrise)</div>
+  <div data-screen-label="Landing · Candor Sunrise" style="height:860px;overflow:hidden;background:linear-gradient(160deg,#33245e 0%,#9c3f7e 32%,#f0714e 66%,#ffc36b 100%);border:1px solid #f0a96b;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#ffffff;display:flex">
+    <div style="width:528px;flex:none;position:relative;background:radial-gradient(circle at 50% 40%, rgba(255,236,200,.30), rgba(255,236,200,0) 62%)">
+      <canvas id="candor3d" style="position:absolute;inset:0;width:100%;height:100%;display:block"></canvas>
+      <div style="position:absolute;left:30px;bottom:28px;font:500 11px 'JetBrains Mono';letter-spacing:.14em;color:rgba(255,255,255,.7);background:rgba(40,20,30,.5);padding:6px 11px;border-radius:6px;backdrop-filter:blur(4px)">CANDOR · NOTHING LEFT UNSAID</div>
+    </div>
+    <div style="flex:1;padding:48px 52px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:13px">
+        <div style="width:34px;height:34px;border-radius:9px;background:#fff"></div>
+        <span style="font-weight:700;font-size:24px;letter-spacing:.04em;color:#fff">CANDOR</span>
+        <div style="flex:1"></div>
+        <span style="font:500 11px 'JetBrains Mono';letter-spacing:.14em;color:rgba(255,255,255,.85)">AI MEETING TRANSCRIPTION</span>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:36px 0">
+        <div style="font-weight:700;font-size:52px;line-height:1.04;letter-spacing:-.025em;max-width:540px;color:#fff">Every word,<br>on the <span style="color:#ffd98a">record.</span></div>
+        <div style="font-size:17px;line-height:1.55;color:rgba(255,255,255,.92);max-width:460px;margin-top:22px">Honest, searchable transcripts of every meeting — captured, summarized, and organized the moment you stop talking.</div>
+        <button onClick="{{ startRec }}" style="display:inline-flex;align-items:center;gap:11px;align-self:flex-start;margin-top:30px;background:linear-gradient(90deg,#f0714e,#ff9e5b);color:#fff;border:none;padding:15px 28px;border-radius:999px;cursor:pointer;font:700 16px 'Space Grotesk';box-shadow:0 12px 30px rgba(240,113,78,.5)"><span style="width:11px;height:11px;border-radius:50%;background:#fff;animation:pulse 1.3s infinite"></span>Start recording</button>
+      </div>
+      <div>
+        <div style="font:700 12px 'JetBrains Mono';letter-spacing:.16em;color:rgba(255,255,255,.85);margin-bottom:16px">JUMP IN</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;align-items:center;gap:18px;background:#ffffff;border-radius:14px;padding:20px 24px;cursor:pointer;box-shadow:0 6px 20px rgba(60,25,40,.2)">
+            <div style="width:42px;height:42px;border-radius:11px;background:#f0714e;display:flex;align-items:center;justify-content:center;flex:none"><div style="width:20px;height:15px;border-radius:3px;border:2px solid #fff;border-top-width:6px"></div></div>
+            <div style="flex:1"><div style="font-weight:700;font-size:20px;color:#3a2240">Folders</div><div style="font-size:13.5px;color:#9a7488;margin-top:2px">Projects, teams &amp; spaces — everything in its place</div></div>
+            <span style="font-size:24px;font-weight:700;color:#f0714e">→</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:18px;background:rgba(255,255,255,.18);border:1.5px solid rgba(255,255,255,.55);border-radius:14px;padding:20px 24px;cursor:pointer">
+            <div style="width:42px;height:42px;border-radius:11px;background:rgba(255,255,255,.28);display:flex;align-items:center;justify-content:center;flex:none"><div style="width:18px;height:20px;display:flex;flex-direction:column;justify-content:center;gap:3px"><span style="height:2px;background:#fff;border-radius:2px"></span><span style="height:2px;background:#fff;border-radius:2px"></span><span style="height:2px;width:60%;background:#fff;border-radius:2px"></span></div></div>
+            <div style="flex:1"><div style="font-weight:700;font-size:20px;color:#fff">Notes</div><div style="font-size:13.5px;color:rgba(255,255,255,.85);margin-top:2px">AI summaries, decisions &amp; action items</div></div>
+            <span style="font-size:24px;font-weight:700;color:#fff">→</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:18px;background:#ffffff;border-radius:14px;padding:20px 24px;cursor:pointer;box-shadow:0 6px 20px rgba(60,25,40,.2)">
+            <div style="width:42px;height:42px;border-radius:11px;background:#ffb24d;display:flex;align-items:flex-end;justify-content:center;gap:2.5px;padding:11px 0;flex:none"><span style="width:3px;height:8px;background:#fff;border-radius:2px"></span><span style="width:3px;height:14px;background:#fff;border-radius:2px"></span><span style="width:3px;height:20px;background:#fff;border-radius:2px"></span><span style="width:3px;height:11px;background:#fff;border-radius:2px"></span></div>
+            <div style="flex:1"><div style="font-weight:700;font-size:20px;color:#3a2240">Transcriptions</div><div style="font-size:13.5px;color:#9a7488;margin-top:2px">Full word-for-word records, speaker by speaker</div></div>
+            <span style="font-size:24px;font-weight:700;color:#e8932f">→</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div style="position:absolute;left:80px;top:5198px;width:1320px">
+  <div data-drags-parent="1" style="position:absolute;top:-26px;left:2px;font:500 12px 'JetBrains Mono',monospace;color:rgba(40,38,34,.7)">Candor — landing</div>
+  <div data-screen-label="Landing · Candor" style="height:860px;overflow:hidden;background:linear-gradient(108deg,#D58D8D 0%,#bd8dc4 50%,#A78BFA 100%);border:1px solid #c9a9e8;border-radius:7px;box-shadow:0 1px 3px rgba(0,0,0,.08);font-family:'Space Grotesk',sans-serif;color:#ffffff;display:flex">
+    <div style="width:528px;flex:none;position:relative;background:rgba(255,255,255,.14)">
+      <x-import component-from-global-scope="image-slot" from="./image-slot.js" id="candor-hero" shape="rect" placeholder="Drop something symbolic for candor — an open hand, clear glass of water, an open door, sunlight" hint-size="528px,860px" style="display:block;width:528px;height:860px"></x-import>
+      <div style="position:absolute;left:30px;bottom:28px;font:500 11px 'JetBrains Mono';letter-spacing:.14em;color:rgba(255,255,255,.55);background:rgba(22,16,32,.55);padding:6px 11px;border-radius:6px;backdrop-filter:blur(4px)">CANDOR · NOTHING LEFT UNSAID</div>
+    </div>
+    <div style="flex:1;padding:48px 52px;display:flex;flex-direction:column">
+      <div style="display:flex;align-items:center;gap:13px">
+        <div style="width:34px;height:34px;border-radius:9px;background:#fff"></div>
+        <span style="font-weight:700;font-size:24px;letter-spacing:.04em;color:#fff">CANDOR</span>
+        <div style="flex:1"></div>
+        <span style="font:500 11px 'JetBrains Mono';letter-spacing:.14em;color:rgba(255,255,255,.85)">AI MEETING TRANSCRIPTION</span>
+      </div>
+      <div style="flex:1;display:flex;flex-direction:column;justify-content:center;padding:36px 0">
+        <div style="font-weight:700;font-size:52px;line-height:1.04;letter-spacing:-.025em;max-width:540px;color:#fff">Every word,<br>on the <span style="color:#4a2768">record.</span></div>
+        <div style="font-size:17px;line-height:1.55;color:rgba(255,255,255,.9);max-width:460px;margin-top:22px">Honest, searchable transcripts of every meeting — captured, summarized, and organized the moment you stop talking.</div>
+      </div>
+      <div>
+        <div style="font:700 12px 'JetBrains Mono';letter-spacing:.16em;color:rgba(255,255,255,.85);margin-bottom:16px">JUMP IN</div>
+        <div style="display:flex;flex-direction:column;gap:12px">
+          <div style="display:flex;align-items:center;gap:18px;background:#ffffff;border-radius:14px;padding:20px 24px;cursor:pointer;box-shadow:0 6px 20px rgba(74,39,104,.16)">
+            <div style="width:42px;height:42px;border-radius:11px;background:#A78BFA;display:flex;align-items:center;justify-content:center;flex:none"><div style="width:20px;height:15px;border-radius:3px;border:2px solid #fff;border-top-width:6px"></div></div>
+            <div style="flex:1"><div style="font-weight:700;font-size:20px;color:#3a2552">Folders</div><div style="font-size:13.5px;color:#8a76a4;margin-top:2px">Projects, teams &amp; spaces — everything in its place</div></div>
+            <span style="font-size:24px;font-weight:700;color:#A78BFA">→</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:18px;background:rgba(255,255,255,.16);border:1.5px solid rgba(255,255,255,.55);border-radius:14px;padding:20px 24px;cursor:pointer">
+            <div style="width:42px;height:42px;border-radius:11px;background:rgba(255,255,255,.25);display:flex;align-items:center;justify-content:center;flex:none"><div style="width:18px;height:20px;display:flex;flex-direction:column;justify-content:center;gap:3px"><span style="height:2px;background:#fff;border-radius:2px"></span><span style="height:2px;background:#fff;border-radius:2px"></span><span style="height:2px;width:60%;background:#fff;border-radius:2px"></span></div></div>
+            <div style="flex:1"><div style="font-weight:700;font-size:20px;color:#fff">Notes</div><div style="font-size:13.5px;color:rgba(255,255,255,.85);margin-top:2px">AI summaries, decisions &amp; action items</div></div>
+            <span style="font-size:24px;font-weight:700;color:#fff">→</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:18px;background:#ffffff;border-radius:14px;padding:20px 24px;cursor:pointer;box-shadow:0 6px 20px rgba(74,39,104,.16)">
+            <div style="width:42px;height:42px;border-radius:11px;background:#D58D8D;display:flex;align-items:flex-end;justify-content:center;gap:2.5px;padding:11px 0;flex:none"><span style="width:3px;height:8px;background:#fff;border-radius:2px"></span><span style="width:3px;height:14px;background:#fff;border-radius:2px"></span><span style="width:3px;height:20px;background:#fff;border-radius:2px"></span><span style="width:3px;height:11px;background:#fff;border-radius:2px"></span></div>
+            <div style="flex:1"><div style="font-weight:700;font-size:20px;color:#3a2552">Transcriptions</div><div style="font-size:13.5px;color:#8a76a4;margin-top:2px">Full word-for-word records, speaker by speaker</div></div>
+            <span style="font-size:24px;font-weight:700;color:#D58D8D">→</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===== RECORDING OVERLAY (wired to Start recording) ===== -->
+<sc-if value="{{ recOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:fixed;inset:0;z-index:100000;background:rgba(26,12,20,.5);backdrop-filter:blur(7px);display:flex;align-items:center;justify-content:center;font-family:'Space Grotesk',sans-serif">
+    <div style="width:440px;background:linear-gradient(158deg,#33245e 0%,#9c3f7e 42%,#f0714e 100%);border-radius:24px;padding:46px 40px;text-align:center;color:#fff;box-shadow:0 30px 90px rgba(20,8,30,.5)">
+      <sc-if value="{{ isCountdown }}" hint-placeholder-val="{{ false }}">
+        <div>
+          <div style="font:500 12px 'JetBrains Mono',monospace;letter-spacing:.24em;opacity:.85;margin-bottom:26px">GET READY</div>
+          <div style="font-weight:700;font-size:118px;line-height:1">{{ countLabel }}</div>
+          <div style="margin-top:24px;font-size:15px;opacity:.85">Recording starts in a moment…</div>
+        </div>
+      </sc-if>
+      <sc-if value="{{ isRecording }}" hint-placeholder-val="{{ false }}">
+        <div>
+          <div style="display:inline-flex;align-items:center;gap:9px;background:rgba(255,255,255,.18);padding:8px 16px;border-radius:999px;margin-bottom:24px"><span style="width:10px;height:10px;border-radius:50%;background:#fff;animation:pulse 1.2s infinite"></span><span style="font:600 12px 'JetBrains Mono',monospace;letter-spacing:.14em">RECORDING</span></div>
+          <div style="font-weight:700;font-size:66px;line-height:1;font-family:'JetBrains Mono',monospace;letter-spacing:.02em">{{ timeLabel }}</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:4px;height:40px;margin:28px 0">
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:0s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.12s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.24s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.36s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.48s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.6s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.72s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.84s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.6s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.42s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.3s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.18s"></span>
+            <span style="width:4px;height:100%;background:#fff;border-radius:2px;animation:eq .9s ease-in-out infinite;animation-delay:.06s"></span>
+          </div>
+          <div style="font-size:15px;opacity:.88;margin-bottom:26px">Candor is transcribing live.</div>
+          <button onClick="{{ stopRec }}" style="background:#fff;color:#d23b1e;border:none;padding:13px 30px;border-radius:999px;font:700 15px 'Space Grotesk';cursor:pointer">Stop recording</button>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+</sc-if></x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = { phase: null, count: 3, elapsed: 0 };
+
+  startRec() {
+    if (this.state.phase) return;
+    clearInterval(this._cd); clearInterval(this._tmr);
+    this.setState({ phase: 'countdown', count: 3, elapsed: 0 });
+    this._cd = setInterval(() => {
+      this.setState(s => {
+        if (s.count <= 1) {
+          clearInterval(this._cd);
+          clearInterval(this._tmr);
+          this._tmr = setInterval(() => this.setState(p => ({ elapsed: p.elapsed + 1 })), 1000);
+          return { phase: 'recording', count: 0 };
+        }
+        return { count: s.count - 1 };
+      });
+    }, 850);
+  }
+
+  stopRec() {
+    clearInterval(this._cd); clearInterval(this._tmr);
+    this.setState({ phase: null });
+  }
+
+  renderVals() {
+    const p = this.state.phase, e = this.state.elapsed;
+    const mm = String(Math.floor(e / 60)).padStart(2, '0');
+    const ss = String(e % 60).padStart(2, '0');
+    return {
+      startRec: () => this.startRec(),
+      stopRec: () => this.stopRec(),
+      recOpen: !!p,
+      isCountdown: p === 'countdown',
+      isRecording: p === 'recording',
+      countLabel: String(this.state.count),
+      timeLabel: mm + ':' + ss,
+    };
+  }
+
+  componentDidMount() {
+    const fix = () => {
+      const slots = document.querySelectorAll('image-slot');
+      if (slots.length) {
+        slots.forEach(el => {
+          el.style.display = 'block';
+          el.style.width = '100%';
+          el.style.height = '100%';
+        });
+      }
+      setTimeout(fix, 200);
+    };
+    fix();
+    this.initThree();
+  }
+
+  initThree() {
+    const canvas = document.querySelector('#candor3d');
+    const THREE = window.THREE;
+    if (!canvas || !THREE) { setTimeout(() => this.initThree(), 120); return; }
+    if (this._three) return;
+    this._three = true;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setClearColor(0x000000, 0);
+    renderer.setPixelRatio(Math.min(2.5, window.devicePixelRatio || 1));
+    renderer.outputEncoding = THREE.sRGBEncoding;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.18;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(35, 0.6, 0.1, 100);
+    camera.position.set(0, 0, 8.1);
+
+    // procedural sunrise sky -> PMREM env map, so the metal reflects a real scene
+    const envCanvas = document.createElement('canvas');
+    envCanvas.width = 512; envCanvas.height = 256;
+    const ex = envCanvas.getContext('2d');
+    const grad = ex.createLinearGradient(0, 0, 0, 256);
+    grad.addColorStop(0.0, '#1d1547');
+    grad.addColorStop(0.42, '#9c3f7e');
+    grad.addColorStop(0.68, '#f0714e');
+    grad.addColorStop(1.0, '#ffd98a');
+    ex.fillStyle = grad; ex.fillRect(0, 0, 512, 256);
+    const sun = ex.createRadialGradient(372, 92, 3, 372, 92, 78);
+    sun.addColorStop(0, 'rgba(255,252,240,1)');
+    sun.addColorStop(0.5, 'rgba(255,238,196,0.6)');
+    sun.addColorStop(1, 'rgba(255,230,180,0)');
+    ex.fillStyle = sun; ex.fillRect(280, 0, 184, 184);
+    const envTex = new THREE.CanvasTexture(envCanvas);
+    envTex.mapping = THREE.EquirectangularReflectionMapping;
+    envTex.encoding = THREE.sRGBEncoding;
+    const pmrem = new THREE.PMREMGenerator(renderer);
+    pmrem.compileEquirectangularShader();
+    scene.environment = pmrem.fromEquirectangular(envTex).texture;
+    envTex.dispose();
+
+    // sunrise-toned key/fill/rim on top of the env reflections
+    scene.add(new THREE.HemisphereLight(0xffe8c4, 0x3a2060, 0.45));
+    const key = new THREE.DirectionalLight(0xffe6b8, 1.3); key.position.set(3, 5, 4); scene.add(key);
+    const fill = new THREE.DirectionalLight(0xd081d8, 0.55); fill.position.set(-5, 0, 2); scene.add(fill);
+    const rim = new THREE.DirectionalLight(0xff7a4d, 0.85); rim.position.set(-2, -2, -5); scene.add(rim);
+
+    const mat = new THREE.MeshPhysicalMaterial({ color: 0xc98a44, metalness: 1.0, roughness: 0.25, clearcoat: 0.5, clearcoatRoughness: 0.2, envMapIntensity: 1.3 });
+
+    const link = (a, b, r) => {
+      const dir = new THREE.Vector3().subVectors(b, a);
+      const len = dir.length();
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 18), mat);
+      m.position.copy(a).addScaledVector(dir, 0.5);
+      m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.clone().normalize());
+      return m;
+    };
+
+    const emblem = new THREE.Group();
+
+    // outer ring
+    emblem.add(new THREE.Mesh(new THREE.TorusGeometry(1.72, 0.085, 64, 256), mat));
+    // --- pedestal base ---
+    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.58, 0.66, 0.09, 96), mat);
+    foot.position.y = -1.34; emblem.add(foot);
+    const step = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.46, 0.1, 96), mat);
+    step.position.y = -1.22; emblem.add(step);
+    const dome = new THREE.Mesh(new THREE.SphereGeometry(0.27, 64, 48, 0, Math.PI * 2, 0, Math.PI / 2), mat);
+    dome.position.y = -1.15; emblem.add(dome);
+
+    // --- central column (slight taper + collar) ---
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.085, 1.95, 64), mat);
+    post.position.y = -0.1; emblem.add(post);
+    const collar = new THREE.Mesh(new THREE.TorusGeometry(0.085, 0.03, 32, 96), mat);
+    collar.rotation.x = Math.PI / 2; collar.position.y = 0.74; emblem.add(collar);
+
+    // --- fulcrum / pivot + finial ---
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.12, 0.12, 64), mat);
+    cap.position.y = 0.9; emblem.add(cap);
+    const pivot = new THREE.Mesh(new THREE.SphereGeometry(0.13, 64, 64), mat);
+    pivot.position.y = 1.0; emblem.add(pivot);
+    const finBall = new THREE.Mesh(new THREE.SphereGeometry(0.075, 48, 48), mat);
+    finBall.position.y = 1.14; emblem.add(finBall);
+    const finTip = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 48), mat);
+    finTip.position.y = 1.27; emblem.add(finTip);
+
+    // --- balance pointer needle hanging from the pivot ---
+    const needle = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.032, 0.5, 32), mat);
+    needle.position.y = 0.68; emblem.add(needle);
+
+    // --- balance beam with end knobs + suspension rings ---
+    const beam = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 2.12, 48), mat);
+    beam.rotation.z = Math.PI / 2; beam.position.y = 1.02; emblem.add(beam);
+    [-1.04, 1.04].forEach(bx => {
+      const knob = new THREE.Mesh(new THREE.SphereGeometry(0.07, 48, 48), mat);
+      knob.position.set(bx, 1.02, 0); emblem.add(knob);
+      const eyelet = new THREE.Mesh(new THREE.TorusGeometry(0.05, 0.016, 24, 64), mat);
+      eyelet.position.set(bx, 0.95, 0); emblem.add(eyelet);
+    });
+
+    // hanging pans
+    // hanging dish pans
+    const dishMat = mat.clone(); dishMat.side = THREE.DoubleSide;
+    const makePan = (x) => {
+      const g = new THREE.Group();
+      const top = new THREE.Vector3(0, 0, 0);
+      const rimY = -0.66, rimR = 0.4;
+      // suspension ring where the three chains meet
+      const sus = new THREE.Mesh(new THREE.TorusGeometry(0.045, 0.014, 20, 48), mat);
+      sus.rotation.x = Math.PI / 2; g.add(sus);
+      const angles = [Math.PI / 2, Math.PI / 2 + (2 * Math.PI / 3), Math.PI / 2 + (4 * Math.PI / 3)];
+      angles.forEach(a => {
+        const p = new THREE.Vector3(Math.cos(a) * rimR, rimY, Math.sin(a) * rimR);
+        g.add(link(top, p, 0.011));
+      });
+      // shallow dish turned on a lathe
+      const prof = [
+        new THREE.Vector2(0.0, 0.0),
+        new THREE.Vector2(0.12, 0.006),
+        new THREE.Vector2(0.26, 0.032),
+        new THREE.Vector2(0.37, 0.078),
+        new THREE.Vector2(0.435, 0.125),
+        new THREE.Vector2(0.45, 0.14)
+      ];
+      const dish = new THREE.Mesh(new THREE.LatheGeometry(prof, 120), dishMat);
+      dish.position.y = rimY - 0.13; g.add(dish);
+      g.position.set(x, 0.95, 0);
+      return g;
+    };
+    emblem.add(makePan(-1.04));
+    emblem.add(makePan(1.04));
+
+    emblem.scale.setScalar(0.74);
+    emblem.position.y = 0.14;
+    scene.add(emblem);
+
+    const setSize = () => {
+      const w = canvas.clientWidth || 528, h = canvas.clientHeight || 860;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h; camera.updateProjectionMatrix();
+    };
+    setSize();
+    if (window.ResizeObserver) { new ResizeObserver(setSize).observe(canvas); }
+
+    const start = performance.now();
+    const loop = () => {
+      const t = (performance.now() - start) / 1000;
+      emblem.rotation.y = Math.sin(t * 0.45) * 0.55;
+      emblem.rotation.x = -0.06 + Math.sin(t * 0.7) * 0.04;
+      emblem.position.y = 0.14 + Math.sin(t * 0.9) * 0.035;
+      renderer.render(scene, camera);
+      requestAnimationFrame(loop);
+    };
+    loop();
+  }
+}
+</script>
+</body>
+</html>
