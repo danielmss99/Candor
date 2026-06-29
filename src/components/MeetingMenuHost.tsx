@@ -23,6 +23,7 @@ interface MeetingMenuHostProps {
   onRefreshSaved: () => void;
   onOpenSaved: (id: string) => void;
   onRecord: () => void;
+  onRecordEvent?: (event: import("../App").CalendarEvent) => void;
   pendingEdit?: MeetingTarget | null;
   onPendingEditHandled?: () => void;
   onSavedMeetingUpdated?: (id: string) => void;
@@ -35,6 +36,7 @@ export function MeetingMenuHost({
   onRefreshSaved,
   onOpenSaved,
   onRecord,
+  onRecordEvent,
   pendingEdit,
   onPendingEditHandled,
   onSavedMeetingUpdated,
@@ -61,7 +63,8 @@ export function MeetingMenuHost({
         {
           id: "record",
           label: "Record this meeting",
-          onClick: () => onRecord(),
+          onClick: () =>
+            onRecordEvent ? onRecordEvent(target.event) : onRecord(),
         },
         {
           id: "delete",
@@ -149,7 +152,7 @@ export function MeetingMenuHost({
         },
       },
     ];
-  }, [menu, folders, meetingFolders, onOpenSaved, onRecord, onRefreshCalendar, onRefreshSaved]);
+  }, [menu, folders, meetingFolders, onOpenSaved, onRecord, onRecordEvent, onRefreshCalendar, onRefreshSaved]);
 
   useEffect(() => {
     if (pendingEdit) {

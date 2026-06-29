@@ -934,6 +934,7 @@ function App() {
         onRefreshSaved={() => setMeetingsRefreshKey((k) => k + 1)}
         onOpenSaved={openMeeting}
         onRecord={startRecording}
+        onRecordEvent={startRecordingFromEvent}
         pendingEdit={pendingMeetingEdit}
         onPendingEditHandled={clearPendingMeetingEdit}
         onSavedMeetingUpdated={handleSavedMeetingUpdated}
