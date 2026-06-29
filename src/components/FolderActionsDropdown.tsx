@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { promptCreateFolder } from "../utils/folderActions";
+import { createFolderForEdit } from "../utils/folderActions";
 
 interface FolderActionsDropdownProps {
   /** Parent for “New subfolder”; defaults to inbox when omitted. */
   selectedFolderId?: string;
-  onCreated?: (folderId: string | null) => void;
+  folderNames?: string[];
+  onCreated?: (folderId: string | null, parentId?: string | null) => void;
   /** Compact icon-only trigger (sidebar). */
   compact?: boolean;
   className?: string;
@@ -12,6 +13,7 @@ interface FolderActionsDropdownProps {
 
 export function FolderActionsDropdown({
   selectedFolderId = "inbox",
+  folderNames = [],
   onCreated,
   compact = false,
   className = "",
@@ -35,10 +37,10 @@ export function FolderActionsDropdown({
     };
   }, [open]);
 
-  const run = async (fn: () => Promise<string | null>) => {
+  const run = async (parentId: string | null) => {
     setOpen(false);
-    const id = await fn();
-    onCreated?.(id);
+    const id = await createFolderForEdit(parentId, folderNames);
+    onCreated?.(id, parentId);
   };
 
   return (
@@ -62,7 +64,7 @@ export function FolderActionsDropdown({
             type="button"
             className="folder-actions-item"
             role="menuitem"
-            onClick={() => run(() => promptCreateFolder(null))}
+            onClick={() => run(null)}
           >
             New folder
           </button>
@@ -70,7 +72,7 @@ export function FolderActionsDropdown({
             type="button"
             className="folder-actions-item"
             role="menuitem"
-            onClick={() => run(() => promptCreateFolder(selectedFolderId))}
+            onClick={() => run(selectedFolderId)}
           >
             New subfolder
           </button>

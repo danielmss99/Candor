@@ -26,14 +26,18 @@ interface SidebarProps {
   onNavigate: (view: View) => void;
   /** Selected folder when Files view is open — used by the Files + menu. */
   filesSelectedFolderId?: string;
+  folderNames?: string[];
   onFilesFolderChange?: () => void;
+  onFolderCreated?: (folderId: string | null, parentId?: string | null) => void;
 }
 
 export function Sidebar({
   active,
   onNavigate,
   filesSelectedFolderId,
+  folderNames,
   onFilesFolderChange,
+  onFolderCreated,
 }: SidebarProps) {
   const {
     name,
@@ -134,7 +138,9 @@ export function Sidebar({
           <FolderActionsDropdown
             compact
             selectedFolderId={filesSelectedFolderId ?? "inbox"}
-            onCreated={() => {
+            folderNames={folderNames}
+            onCreated={(id, parentId) => {
+              if (id) onFolderCreated?.(id, parentId);
               onFilesFolderChange?.();
               if (!isFilesActive) onNavigate("files");
             }}

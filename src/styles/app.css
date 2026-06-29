@@ -2491,6 +2491,21 @@ button.chip {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.folder-tree-rename-input {
+  flex: 1;
+  min-width: 0;
+  margin: -2px 0;
+  padding: 2px 6px;
+  font: 500 13px var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg);
+  border: 1px solid var(--coral, #f0714e);
+  border-radius: 4px;
+  outline: none;
+}
+.folder-tree-row--selected .folder-tree-rename-input {
+  background: var(--bg);
+}
 .folder-tree-count {
   font-size: 11px;
   font-weight: 500;
@@ -2812,6 +2827,7 @@ button.chip {
   inset: 0;
   z-index: 0;
   opacity: 0.9;
+  background: linear-gradient(160deg, #33245e 0%, #9c3f7e 32%, #f0714e 66%, #ffc36b 100%);
 }
 
 .landing-visual-glow {

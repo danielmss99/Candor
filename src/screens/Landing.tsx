@@ -1,6 +1,4 @@
 import type { View } from "../App";
-import landingSunriseGradient from "../assets/landing-sunrise-gradient.svg";
-import { GridDistortion } from "../components/GridDistortion";
 import { ScalesOfJustice } from "../components/ScalesOfJustice";
 
 interface LandingProps {
@@ -64,15 +62,7 @@ export function Landing({ onNavigate, onStartRecording }: LandingProps) {
   return (
     <div className="landing">
       <aside className="landing-visual" aria-hidden>
-        <div className="landing-visual-distortion">
-          <GridDistortion
-            imageSrc={landingSunriseGradient}
-            grid={12}
-            mouse={0.1}
-            strength={0.15}
-            relaxation={0.9}
-          />
-        </div>
+        <div className="landing-visual-distortion" />
         <div className="landing-visual-glow" />
         <div className="landing-scales-frame">
           <ScalesOfJustice />

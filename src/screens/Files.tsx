@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { View } from "../App";
 import { Sidebar } from "../components/Sidebar";
-import { FolderTree } from "../components/FolderTree";
+import { FolderTree, type EditingFolderState } from "../components/FolderTree";
 import { FolderActionsDropdown } from "../components/FolderActionsDropdown";
 import { FileEditor } from "../components/FileEditor";
 import {
@@ -13,7 +13,7 @@ import {
   type FolderTreeNode,
   type SavedMeeting,
 } from "../api/local";
-import { directItemCounts, formatItemCount } from "../utils/folderActions";
+import { directItemCounts, formatItemCount, takePendingFolderEdit } from "../utils/folderActions";
 import { meetingContextHandler } from "../components/ContextMenu";
 import type { ContextMenuState } from "../meetingEdit";
 
@@ -59,13 +59,18 @@ function flattenFolders(tree: FolderTreeNode[]): FolderTreeNode[] {
 }
 
 export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextMenu }: FilesProps) {
+  const initialPendingFolderId = takePendingFolderEdit();
   const [meetings, setMeetings] = useState<SavedMeeting[]>([]);
   const [tree, setTree] = useState<FolderTreeNode[]>([]);
-  const [selectedFolderId, setSelectedFolderId] = useState<string>("inbox");
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(initialPendingFolderId ?? "inbox");
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
   const [candorPath, setCandorPath] = useState("");
   const [loading, setLoading] = useState(true);
   const [dragMeetingId, setDragMeetingId] = useState<string | null>(null);
+  const [editingFolder, setEditingFolder] = useState<EditingFolderState | null>(
+    initialPendingFolderId ? { id: initialPendingFolderId, isNew: true } : null,
+  );
+  const [expandFolderId, setExpandFolderId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -93,7 +98,19 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
   }, [meetings, tree, selectedFolderId]);
 
   const flatFolders = useMemo(() => flattenFolders(tree), [tree]);
+  const folderNames = useMemo(() => flatFolders.map((f) => f.name), [flatFolders]);
   const selectedFolder = flatFolders.find((f) => f.id === selectedFolderId);
+
+  const handleFolderCreated = useCallback(
+    (folderId: string | null, parentId?: string | null) => {
+      if (!folderId) return;
+      setEditingFolder({ id: folderId, isNew: true });
+      setSelectedFolderId(folderId);
+      if (parentId) setExpandFolderId(parentId);
+      refresh();
+    },
+    [refresh],
+  );
 
   const handleDropOnFolder = async (folderId: string) => {
     if (!dragMeetingId) return;
@@ -113,7 +130,9 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
         active="Files"
         onNavigate={onNavigate}
         filesSelectedFolderId={selectedFolderId}
+        folderNames={folderNames}
         onFilesFolderChange={refresh}
+        onFolderCreated={handleFolderCreated}
       />
 
       <div className="main main--scroll files-layout">
@@ -125,7 +144,8 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
           <div className="spacer" />
           <FolderActionsDropdown
             selectedFolderId={selectedFolderId}
-            onCreated={() => refresh()}
+            folderNames={folderNames}
+            onCreated={handleFolderCreated}
           />
           <button type="button" className="btn-ghost" onClick={() => openCandorFolder().catch(() => {})}>
             Open in Explorer
@@ -154,6 +174,10 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
               onChange={refresh}
               meetings={meetings}
               itemCounts={itemCounts}
+              editingFolder={editingFolder}
+              onEditingFolderChange={setEditingFolder}
+              expandFolderId={expandFolderId}
+              onExpandFolderIdConsumed={() => setExpandFolderId(null)}
             />
           </aside>
 

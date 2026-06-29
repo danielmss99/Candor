@@ -55,11 +55,40 @@ export function formatItemCount(n: number): string {
   return n === 1 ? "1 item" : `${n} items`;
 }
 
-export async function promptCreateFolder(parentId?: string | null): Promise<string | null> {
-  const name = window.prompt(parentId ? "New subfolder name" : "New folder name");
-  if (!name?.trim()) return null;
+export const DEFAULT_NEW_FOLDER_NAME = "New folder";
+
+let pendingFolderEditId: string | null = null;
+
+export function setPendingFolderEdit(id: string): void {
+  pendingFolderEditId = id;
+}
+
+export function takePendingFolderEdit(): string | null {
+  const id = pendingFolderEditId;
+  pendingFolderEditId = null;
+  return id;
+}
+
+export function isDefaultNewFolderName(name: string): boolean {
+  return name === DEFAULT_NEW_FOLDER_NAME || /^New folder \d+$/.test(name);
+}
+
+export function defaultNewFolderName(existingNames: Iterable<string>): string {
+  const names = new Set(existingNames);
+  if (!names.has(DEFAULT_NEW_FOLDER_NAME)) return DEFAULT_NEW_FOLDER_NAME;
+  let i = 2;
+  while (names.has(`${DEFAULT_NEW_FOLDER_NAME} ${i}`)) i++;
+  return `${DEFAULT_NEW_FOLDER_NAME} ${i}`;
+}
+
+export async function createFolderForEdit(
+  parentId?: string | null,
+  existingNames?: Iterable<string>,
+): Promise<string | null> {
+  const name = defaultNewFolderName(existingNames ?? []);
   try {
-    const folder = await createOrgFolder(name.trim(), parentId ?? null);
+    const folder = await createOrgFolder(name, parentId ?? null);
+    setPendingFolderEdit(folder.id);
     return folder.id;
   } catch (e) {
     window.alert(String(e));
