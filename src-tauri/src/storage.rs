@@ -39,6 +39,9 @@ pub struct MeetingDetail {
     pub duration_seconds: u32,
     pub user_notes: String,
     pub transcript: Vec<Segment>,
+    pub audio_path: Option<String>,
+    pub folder_id: Option<String>,
+    pub calendar_event_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,9 +146,19 @@ fn parse_transcript(body: &str) -> Vec<Segment> {
             if let Some((time, text)) = rest.split_once('`') {
                 let text = text.trim();
                 if !text.is_empty() {
+                    let (speaker, body) = if let Some(stripped) = text.strip_prefix('[') {
+                        if let Some((spk, rest)) = stripped.split_once("] ") {
+                            (Some(spk.to_string()), rest.to_string())
+                        } else {
+                            (None, text.to_string())
+                        }
+                    } else {
+                        (None, text.to_string())
+                    };
                     segs.push(Segment {
                         time: time.to_string(),
-                        text: text.to_string(),
+                        text: body,
+                        speaker,
                     });
                 }
             }
@@ -200,23 +213,33 @@ fn relative_when(iso: &str) -> String {
         .unwrap_or_else(|_| "Saved".to_string())
 }
 
+pub struct SaveNoteOptions<'a> {
+    pub meeting_id: Option<String>,
+    pub title_override: Option<&'a str>,
+    pub audio_path: Option<&'a str>,
+    pub calendar_event_id: Option<&'a str>,
+    pub folder_id: Option<&'a str>,
+}
+
 pub fn save_note_file(
     app: &AppHandle,
     segs: &[Segment],
     user_notes: Option<&str>,
     duration_seconds: u32,
+    opts: SaveNoteOptions<'_>,
 ) -> Result<(PathBuf, String), String> {
     let dir = notes_dir(app)?;
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let now = Local::now();
-    let id = Uuid::new_v4().to_string();
-    let filename = format!("{}-{}.md", now.format("%Y-%m-%d-%H%M%S"), &id[..8]);
+    let id = opts
+        .meeting_id
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    let filename = format!("{}-{}.md", now.format("%Y-%m-%d-%H%M%S"), &id[..8.min(id.len())]);
     let path = dir.join(filename);
 
-    let title = segs
-        .first()
-        .map(|s| {
+    let title = opts.title_override.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).or_else(|| {
+        segs.first().map(|s| {
             let t = s.text.trim();
             if t.len() > 60 {
                 format!("{}…", &t[..57])
@@ -224,7 +247,7 @@ pub fn save_note_file(
                 t.to_string()
             }
         })
-        .unwrap_or_else(|| format!("Recording {}", now.format("%b %-d, %Y")));
+    }).unwrap_or_else(|| format!("Recording {}", now.format("%b %-d, %Y")));
 
     let mut md = String::new();
     md.push_str("---\n");
@@ -232,6 +255,15 @@ pub fn save_note_file(
     md.push_str(&format!("title: {title}\n"));
     md.push_str(&format!("date: {}\n", now.to_rfc3339()));
     md.push_str(&format!("duration_seconds: {duration_seconds}\n"));
+    if let Some(ap) = opts.audio_path {
+        md.push_str(&format!("audio_path: {ap}\n"));
+    }
+    if let Some(fid) = opts.folder_id {
+        md.push_str(&format!("folder_id: {fid}\n"));
+    }
+    if let Some(eid) = opts.calendar_event_id {
+        md.push_str(&format!("calendar_event_id: {eid}\n"));
+    }
     md.push_str("---\n\n");
 
     if let Some(notes) = user_notes.filter(|n| !n.trim().is_empty()) {
@@ -242,7 +274,12 @@ pub fn save_note_file(
 
     md.push_str("# Transcript\n\n");
     for s in segs {
-        md.push_str(&format!("`{}` {}\n\n", s.time, s.text));
+        let line = if let Some(ref spk) = s.speaker {
+            format!("`{}` [{}] {}\n\n", s.time, spk, s.text)
+        } else {
+            format!("`{}` {}\n\n", s.time, s.text)
+        };
+        md.push_str(&line);
     }
     fs::write(&path, md).map_err(|e| e.to_string())?;
     Ok((path, id))
@@ -357,6 +394,19 @@ pub fn read_meeting(app: AppHandle, id: String) -> Result<MeetingDetail, String>
             duration_seconds,
             user_notes: parse_user_notes(&body),
             transcript: parse_transcript(&body),
+            audio_path: meta
+                .get("audio_path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .filter(|p| Path::new(p).exists()),
+            folder_id: meta
+                .get("folder_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            calendar_event_id: meta
+                .get("calendar_event_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         });
     }
     Err("Meeting not found".into())
@@ -404,6 +454,7 @@ pub struct UpdateSavedMeetingPayload {
     id: String,
     title: Option<String>,
     date: Option<String>,
+    folder_id: Option<String>,
 }
 
 #[tauri::command]
@@ -423,6 +474,16 @@ pub fn update_saved_meeting(app: AppHandle, payload: UpdateSavedMeetingPayload) 
             "date".into(),
             serde_json::Value::String(date.trim().to_string()),
         );
+    }
+    if let Some(folder) = &payload.folder_id {
+        if folder.is_empty() {
+            meta.remove("folder_id");
+        } else {
+            meta.insert(
+                "folder_id".into(),
+                serde_json::Value::String(folder.clone()),
+            );
+        }
     }
     fs::write(&path, write_frontmatter(&meta, &body)).map_err(|e| e.to_string())
 }
@@ -512,6 +573,12 @@ pub fn list_storage_folders(app: AppHandle) -> Result<Vec<StorageFolder>, String
 
     Ok(vec![
         StorageFolder {
+            id: "audio".into(),
+            label: "Meeting audio".into(),
+            description: "WAV recordings linked to transcripts".into(),
+            path: app_data(&app)?.join("audio").to_string_lossy().into_owned(),
+        },
+        StorageFolder {
             id: "notes".into(),
             label: "Meeting notes".into(),
             description: "Transcripts and recaps saved from your recordings".into(),
@@ -541,6 +608,11 @@ pub fn list_storage_folders(app: AppHandle) -> Result<Vec<StorageFolder>, String
 #[tauri::command]
 pub fn open_storage_folder(app: AppHandle, folder_id: String) -> Result<(), String> {
     let path = match folder_id.as_str() {
+        "audio" => {
+            let dir = app_data(&app)?.join("audio");
+            fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+            dir
+        }
         "notes" => notes_dir(&app)?,
         "completed" => completed_dir(&app)?,
         "models" => models_dir(&app)?,
@@ -550,4 +622,16 @@ pub fn open_storage_folder(app: AppHandle, folder_id: String) -> Result<(), Stri
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     tauri_plugin_opener::open_path(path.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+pub fn meeting_audio_path(app: &AppHandle, id: &str) -> Result<Option<String>, String> {
+    let dir = notes_dir(app)?;
+    let path = meeting_path_by_id(&dir, id)?;
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let (meta, _) = parse_frontmatter(&raw);
+    Ok(meta
+        .get("audio_path")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|p| Path::new(p).exists()))
 }

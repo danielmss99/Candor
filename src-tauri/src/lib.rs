@@ -5,7 +5,9 @@
 // (via whisper-rs) to produce a transcript, which is also saved as a markdown
 // note. The Whisper model (ggml-base.en) is downloaded on first use.
 
+mod audio;
 mod calendar;
+mod privacy;
 mod storage;
 
 use std::io::{Read, Write};
@@ -28,6 +30,8 @@ pub struct Segment {
     /// mm:ss start offset.
     pub time: String,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
 }
 
 /// Result returned after stopping a recording.
@@ -52,6 +56,9 @@ struct AudioState {
     samples: Arc<Mutex<Vec<f32>>>,
     /// (sample_rate, channels) captured when recording started.
     config: Arc<Mutex<Option<(u32, u16)>>>,
+    system_samples: Arc<Mutex<Vec<f32>>>,
+    system_config: Arc<Mutex<Option<(u32, u16)>>>,
+    system_active: Arc<AtomicBool>,
 }
 
 // ---------- Settings ----------
@@ -189,7 +196,21 @@ async fn ensure_model(app: AppHandle) -> Result<String, String> {
 // ---------- Audio capture ----------
 
 #[tauri::command]
-fn start_recording(app: AppHandle, state: State<AudioState>) -> Result<(), String> {
+fn get_privacy_settings(app: AppHandle) -> Result<privacy::PrivacySettings, String> {
+    Ok(privacy::load_privacy(&app))
+}
+
+#[tauri::command]
+fn set_privacy_settings(app: AppHandle, settings: privacy::PrivacySettings) -> Result<(), String> {
+    privacy::save_privacy(&app, &settings)
+}
+
+#[tauri::command]
+fn start_recording(
+    app: AppHandle,
+    state: State<AudioState>,
+    capture_system_audio: Option<bool>,
+) -> Result<(), String> {
     if state.recording.load(Ordering::SeqCst) {
         return Err("Already recording".into());
     }
@@ -207,7 +228,24 @@ fn start_recording(app: AppHandle, state: State<AudioState>) -> Result<(), Strin
     let config: cpal::StreamConfig = supported.into();
 
     state.samples.lock().unwrap().clear();
+    state.system_samples.lock().unwrap().clear();
     *state.config.lock().unwrap() = Some((sample_rate, channels));
+    *state.system_config.lock().unwrap() = None;
+    state.system_active.store(false, Ordering::SeqCst);
+
+    let want_system = capture_system_audio.unwrap_or_else(|| privacy::load_privacy(&app).capture_system_audio);
+    if want_system {
+        if let Ok(()) = audio::start_loopback_capture(
+            state.recording.clone(),
+            state.system_samples.clone(),
+            app.clone(),
+        ) {
+            state.system_active.store(true, Ordering::SeqCst);
+            // Loopback config is read inside the thread; approximate from default output rate.
+            *state.system_config.lock().unwrap() = Some((sample_rate, 2));
+        }
+    }
+
     state.recording.store(true, Ordering::SeqCst);
 
     let recording = state.recording.clone();
@@ -320,6 +358,9 @@ async fn stop_recording(
     state: State<'_, AudioState>,
     user_notes: Option<String>,
     duration_seconds: u32,
+    title_override: Option<String>,
+    calendar_event_id: Option<String>,
+    folder_id: Option<String>,
 ) -> Result<StopRecordingResult, String> {
     if !state.recording.load(Ordering::SeqCst) {
         return Err("Not recording".into());
@@ -335,18 +376,68 @@ async fn stop_recording(
         return Err("No audio captured — check microphone permissions".into());
     }
 
-    let audio = to_mono_16k(&raw, sr, ch);
+    let mut mono_mic = audio::resample_to_16k_mono(&raw, sr, ch);
+    if state.system_active.load(Ordering::SeqCst) {
+        let sys_raw = state.system_samples.lock().unwrap().clone();
+        if !sys_raw.is_empty() {
+            let (sys_sr, sys_ch) = state
+                .system_config
+                .lock()
+                .unwrap()
+                .unwrap_or((sr, ch));
+            let mono_sys = audio::resample_to_16k_mono(&sys_raw, sys_sr, sys_ch);
+            mono_mic = audio::mix_mono(&mono_mic, &mono_sys);
+        }
+    }
+
+    let audio = audio::preprocess_audio(&mono_mic);
     let model = model_path(&app)?;
     if !model.exists() {
         return Err("Model not downloaded yet".into());
     }
 
-    let segs = tauri::async_runtime::spawn_blocking(move || transcribe(&model, &audio))
+    let audio_for_transcribe = audio.clone();
+    let mut segs = tauri::async_runtime::spawn_blocking(move || transcribe(&model, &audio_for_transcribe))
         .await
         .map_err(|e| e.to_string())??;
 
-    let (_path, meeting_id) =
-        storage::save_note_file(&app, &segs, user_notes.as_deref(), duration_seconds)?;
+    audio::diarize_segments(&mut segs);
+
+    let privacy = privacy::load_privacy(&app);
+    let audio_dir = audio::audio_dir(&app)?;
+    let meeting_id = uuid::Uuid::new_v4().to_string();
+    let wav_path = audio_dir.join(format!("{}.wav", &meeting_id[..8]));
+    let audio_saved = if privacy.delete_audio_after_transcribe {
+        None
+    } else {
+        audio::save_wav(&wav_path, &audio, WHISPER_SAMPLE_RATE).ok();
+        Some(wav_path.to_string_lossy().into_owned())
+    };
+
+    let (_path, meeting_id) = storage::save_note_file(
+        &app,
+        &segs,
+        user_notes.as_deref(),
+        duration_seconds,
+        storage::SaveNoteOptions {
+            meeting_id: Some(meeting_id),
+            title_override: title_override.as_deref(),
+            audio_path: audio_saved.as_deref(),
+            calendar_event_id: calendar_event_id.as_deref(),
+            folder_id: folder_id.as_deref(),
+        },
+    )?;
+
+    if let Some(url) = privacy.webhook_url.filter(|u| !u.trim().is_empty()) {
+        let payload = serde_json::json!({
+            "event": "meeting_saved",
+            "meetingId": meeting_id,
+            "durationSeconds": duration_seconds,
+            "segmentCount": segs.len(),
+        });
+        privacy::fire_webhook(&url, &payload);
+    }
+
     Ok(StopRecordingResult {
         segments: segs,
         meeting_id,
@@ -419,6 +510,7 @@ pub fn transcribe(model_path: &Path, audio: &[f32]) -> Result<Vec<Segment>, Stri
             out.push(Segment {
                 time: fmt_centiseconds(seg.start_timestamp()),
                 text,
+                speaker: None,
             });
         }
     }
@@ -428,6 +520,101 @@ pub fn transcribe(model_path: &Path, audio: &[f32]) -> Result<Vec<Segment>, Stri
 fn fmt_centiseconds(cs: i64) -> String {
     let secs = (cs / 100).max(0);
     format!("{:02}:{:02}", secs / 60, secs % 60)
+}
+
+#[tauri::command]
+async fn import_audio_file(
+    app: AppHandle,
+    path: String,
+    title: Option<String>,
+) -> Result<StopRecordingResult, String> {
+    let src = PathBuf::from(&path);
+    if !src.exists() {
+        return Err("File not found".into());
+    }
+    let default_title = src
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::to_string);
+    let app2 = app.clone();
+    let title2 = title.clone();
+    let (pcm, sr) = tauri::async_runtime::spawn_blocking(move || audio::decode_audio_file(&src))
+        .await
+        .map_err(|e| e.to_string())??;
+    let audio = audio::preprocess_audio(&audio::resample_to_16k_mono(&pcm, sr, 1));
+    if audio.is_empty() {
+        return Err("No audio decoded from file".into());
+    }
+    let duration_seconds = (audio.len() as u32).saturating_div(WHISPER_SAMPLE_RATE);
+    let model = model_path(&app2)?;
+    let audio_for_transcribe = audio.clone();
+    let mut segs = tauri::async_runtime::spawn_blocking(move || transcribe(&model, &audio_for_transcribe))
+        .await
+        .map_err(|e| e.to_string())??;
+    audio::diarize_segments(&mut segs);
+    let privacy = privacy::load_privacy(&app2);
+    let audio_dir = audio::audio_dir(&app2)?;
+    let meeting_id = uuid::Uuid::new_v4().to_string();
+    let wav_path = audio_dir.join(format!("{}.wav", &meeting_id[..8]));
+    let audio_saved = if privacy.delete_audio_after_transcribe {
+        None
+    } else {
+        audio::save_wav(&wav_path, &audio, WHISPER_SAMPLE_RATE).ok();
+        Some(wav_path.to_string_lossy().into_owned())
+    };
+    let (_path, meeting_id) = storage::save_note_file(
+        &app2,
+        &segs,
+        None,
+        duration_seconds,
+        storage::SaveNoteOptions {
+            meeting_id: Some(meeting_id),
+            title_override: title2.as_deref().or(default_title.as_deref()),
+            audio_path: audio_saved.as_deref(),
+            calendar_event_id: None,
+            folder_id: None,
+        },
+    )?;
+    Ok(StopRecordingResult {
+        segments: segs,
+        meeting_id,
+    })
+}
+
+#[tauri::command]
+fn get_meeting_audio_path(app: AppHandle, id: String) -> Result<Option<String>, String> {
+    storage::meeting_audio_path(&app, &id)
+}
+
+#[tauri::command]
+fn pick_audio_file() -> Result<Option<String>, String> {
+    Ok(rfd::FileDialog::new()
+        .add_filter("Audio", &["wav", "mp3", "m4a", "aac", "flac", "ogg"])
+        .pick_file()
+        .map(|p| p.to_string_lossy().into_owned()))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExportClipArgs {
+    meeting_id: String,
+    start_seconds: f32,
+    end_seconds: f32,
+    dest_path: String,
+}
+
+#[tauri::command]
+fn export_audio_clip(
+    app: AppHandle,
+    meeting_id: String,
+    start_seconds: f32,
+    end_seconds: f32,
+    dest_path: String,
+) -> Result<String, String> {
+    let src = storage::meeting_audio_path(&app, &meeting_id)?
+        .ok_or("No audio file for this meeting")?;
+    audio::export_clip(Path::new(&src), start_seconds, end_seconds, Path::new(&dest_path))?;
+    Ok(dest_path)
 }
 
 // ---------- Note storage (legacy helper removed — see storage.rs) ----------
@@ -441,6 +628,12 @@ pub fn run() {
             ensure_model,
             start_recording,
             stop_recording,
+            import_audio_file,
+            pick_audio_file,
+            get_meeting_audio_path,
+            export_audio_clip,
+            get_privacy_settings,
+            set_privacy_settings,
             get_settings,
             set_model,
             open_notes_folder,

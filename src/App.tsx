@@ -17,7 +17,7 @@ import { RecordingBar } from "./components/RecordingBar";
 import { ConnectCalendarModal } from "./components/ConnectCalendarModal";
 import { NamePrompt } from "./components/NamePrompt";
 import { SettingsModal, type Theme } from "./components/SettingsModal";
-import { loadMeetingDetail, stopRecordingWithNotes } from "./api/local";
+import { loadMeetingDetail, loadPrivacySettings, stopRecordingWithNotes } from "./api/local";
 import { invokeError } from "./api/calendar";
 import {
   loadCompletedActions,
@@ -45,7 +45,8 @@ import {
   type OnboardingState,
 } from "./v2/metadata";
 import { resolveActionId } from "./api/actions";
-import { loadSavedMeetings } from "./api/local";
+import { loadSavedMeetings, pickAndImportAudio } from "./api/local";
+import { loadSummaryTemplate } from "./v2/summaryTemplates";
 
 export type View =
   | "landing"
@@ -60,6 +61,7 @@ export type View =
 export interface TranscriptSegment {
   time: string;
   text: string;
+  speaker?: string;
 }
 export interface CalendarEvent {
   id: string;
@@ -110,6 +112,11 @@ function App() {
   const [onboarding, setOnboarding] = useState<OnboardingState>(() => loadOnboarding());
   const [liveMoments, setLiveMoments] = useState<MeetingMoments>({ bookmarks: [], highlights: [] });
   const [recapTranscript, setRecapTranscript] = useState<TranscriptSegment[] | null>(null);
+  const [recordingEvent, setRecordingEvent] = useState<CalendarEvent | null>(null);
+  const [showConsent, setShowConsent] = useState(false);
+  const [pendingRecord, setPendingRecord] = useState<(() => void) | null>(null);
+  const [calendarToast, setCalendarToast] = useState<CalendarEvent | null>(null);
+  const [captureSystemAudio, setCaptureSystemAudio] = useState(false);
 
   // Navigation context for search + recap
   const [searchQuery, setSearchQuery] = useState("");
@@ -215,10 +222,46 @@ function App() {
   }, [calConnected]);
 
   useEffect(() => {
+    loadPrivacySettings().then((p) => setCaptureSystemAudio(p.captureSystemAudio)).catch(() => {});
+  }, [showSettings]);
+
+  // Notify when a calendar meeting starts within 2 minutes.
+  useEffect(() => {
+    if (!calConnected || events.length === 0) return;
+    const tick = () => {
+      const now = Date.now();
+      const soon = events.find((ev) => {
+        const start = Date.parse(ev.start);
+        const diff = start - now;
+        return diff > 0 && diff <= 2 * 60 * 1000;
+      });
+      if (soon) setCalendarToast(soon);
+    };
+    tick();
+    const id = window.setInterval(tick, 30_000);
+    return () => window.clearInterval(id);
+  }, [calConnected, events]);
+
+  useEffect(() => {
     loadSavedMeetings().then((m) =>
       setPaletteMeetings(m.map((x) => ({ id: x.id, title: x.title }))),
     );
   }, [meetingsRefreshKey]);
+
+  const recapCtx = useCallback(
+    (partial: {
+      transcript: TranscriptSegment[];
+      sessionNotes: string;
+      durationSeconds: number;
+      recordedAt: Date;
+      titleOverride?: string;
+    }) => ({
+      ...partial,
+      userInitials: deriveUser(userName).initials,
+      template: loadSummaryTemplate(),
+    }),
+    [userName],
+  );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -308,16 +351,16 @@ function App() {
       if (selectedMeetingId !== id) return;
       const detail = await loadMeetingDetail(id);
       if (!detail) return;
-      const { initials } = deriveUser(userName);
       setActiveRecap(
-        generateRecapFromRecording({
-          transcript: detail.transcript,
-          sessionNotes: detail.userNotes,
-          durationSeconds: detail.durationSeconds,
-          recordedAt: detail.date ? new Date(detail.date) : new Date(),
-          userInitials: initials,
-          titleOverride: detail.title,
-        }),
+        generateRecapFromRecording(
+          recapCtx({
+            transcript: detail.transcript,
+            sessionNotes: detail.userNotes,
+            durationSeconds: detail.durationSeconds,
+            recordedAt: detail.date ? new Date(detail.date) : new Date(),
+            titleOverride: detail.title,
+          }),
+        ),
       );
       setRecapTranscript(detail.transcript);
       setRecapRenameTarget({
@@ -333,7 +376,7 @@ function App() {
         },
       });
     },
-    [selectedMeetingId, userName],
+    [selectedMeetingId, recapCtx],
   );
 
   const timerRef = useRef<number | undefined>(undefined);
@@ -363,16 +406,16 @@ function App() {
 
   const openSavedRecap = useCallback(
     (id: string, detail: NonNullable<Awaited<ReturnType<typeof loadMeetingDetail>>>) => {
-      const { initials } = deriveUser(userName);
       setActiveRecap(
-        generateRecapFromRecording({
-          transcript: detail.transcript,
-          sessionNotes: detail.userNotes,
-          durationSeconds: detail.durationSeconds,
-          recordedAt: detail.date ? new Date(detail.date) : new Date(),
-          userInitials: initials,
-          titleOverride: detail.title,
-        }),
+        generateRecapFromRecording(
+          recapCtx({
+            transcript: detail.transcript,
+            sessionNotes: detail.userNotes,
+            durationSeconds: detail.durationSeconds,
+            recordedAt: detail.date ? new Date(detail.date) : new Date(),
+            titleOverride: detail.title,
+          }),
+        ),
       );
       setRecapTranscript(detail.transcript);
       setRecapRenameTarget({
@@ -443,15 +486,16 @@ function App() {
           return;
         }
       }
-      const { initials } = deriveUser(userName);
       setActiveRecap(
-        generateRecapFromRecording({
-          transcript: segments,
-          sessionNotes: notes,
-          durationSeconds: duration,
-          recordedAt: new Date(),
-          userInitials: initials,
-        }),
+        generateRecapFromRecording(
+          recapCtx({
+            transcript: segments,
+            sessionNotes: notes,
+            durationSeconds: duration,
+            recordedAt: new Date(),
+            titleOverride: recordingEvent?.title,
+          }),
+        ),
       );
       setRecapTranscript(segments);
       setSelectedMeetingId(meetingId ?? `recording-${Date.now()}`);
@@ -459,7 +503,7 @@ function App() {
       setJumpTimestamp(null);
       setView("recap");
     },
-    [userName, openSavedRecap],
+    [openSavedRecap, recapCtx, recordingEvent?.title],
   );
 
   const wrapUpRecording = useCallback(() => {
@@ -478,7 +522,7 @@ function App() {
   ]);
 
   // Start: ensure model → countdown → begin mic capture.
-  const startRecording = useCallback(async () => {
+  const runRecording = useCallback(async () => {
     if (rec !== "idle") return;
     setError(null);
     cancelRef.current = false;
@@ -506,9 +550,13 @@ function App() {
       }
       if (cancelRef.current) return;
 
-      await invoke("start_recording");
+      await invoke("start_recording", { captureSystemAudio });
       setTranscript(null);
-      setSessionNotes("");
+      setSessionNotes(
+        recordingEvent
+          ? `Meeting: ${recordingEvent.title}\n${recordingEvent.attendees.length ? `Attendees: ${recordingEvent.attendees.join(", ")}\n` : ""}`
+          : "",
+      );
       setLiveMoments({ bookmarks: [], highlights: [] });
       setElapsed(0);
       setRec("recording");
@@ -518,7 +566,36 @@ function App() {
       setRec("idle");
       setView("live");
     }
-  }, [rec]);
+  }, [rec, captureSystemAudio, recordingEvent]);
+
+  const startRecording = useCallback(async () => {
+    setRecordingEvent(null);
+    const privacy = await loadPrivacySettings().catch(() => null);
+    const sys = privacy?.captureSystemAudio ?? false;
+    setCaptureSystemAudio(sys);
+    if (sys) {
+      setPendingRecord(() => runRecording);
+      setShowConsent(true);
+      return;
+    }
+    await runRecording();
+  }, [runRecording]);
+
+  const startRecordingFromEvent = useCallback(
+    async (ev: CalendarEvent) => {
+      setRecordingEvent(ev);
+      const privacy = await loadPrivacySettings().catch(() => null);
+      const sys = privacy?.captureSystemAudio ?? false;
+      setCaptureSystemAudio(sys);
+      if (sys) {
+        setPendingRecord(() => runRecording);
+        setShowConsent(true);
+        return;
+      }
+      await runRecording();
+    },
+    [runRecording],
+  );
 
   // Stop: end capture, transcribe, save, and open the recap automatically.
   const stopRecording = useCallback(async () => {
@@ -527,18 +604,23 @@ function App() {
     const duration = elapsed;
     const notes = sessionNotes;
     try {
-      const result = await stopRecordingWithNotes(notes.trim() || null, duration);
+      const result = await stopRecordingWithNotes(notes.trim() || null, duration, {
+        titleOverride: recordingEvent?.title,
+        calendarEventId: recordingEvent?.id,
+      });
       setTranscript(result.segments);
       setLastSavedMeetingId(result.meetingId);
       if (result.meetingId) {
         saveMoments(result.meetingId, liveMoments);
-        const recap = generateRecapFromRecording({
-          transcript: result.segments,
-          sessionNotes: notes,
-          durationSeconds: duration,
-          recordedAt: new Date(),
-          userInitials: deriveUser(userName).initials,
-        });
+        const recap = generateRecapFromRecording(
+          recapCtx({
+            transcript: result.segments,
+            sessionNotes: notes,
+            durationSeconds: duration,
+            recordedAt: new Date(),
+            titleOverride: recordingEvent?.title,
+          }),
+        );
         addPendingTasks(
           recap.actions.map((a, i) => ({
             id: resolveActionId(result.meetingId, i, a.text, recap.title),
@@ -566,8 +648,9 @@ function App() {
       setView("live");
     } finally {
       setRec("idle");
+      setRecordingEvent(null);
     }
-  }, [stopTimer, sessionNotes, elapsed, navigateToRecapAfterRecording, liveMoments, userName]);
+  }, [stopTimer, sessionNotes, elapsed, navigateToRecapAfterRecording, liveMoments, userName, recordingEvent, recapCtx]);
 
   // Cancel the pre-roll (preparing/countdown) and unblock the UI.
   const cancelPreroll = useCallback(() => {
@@ -585,6 +668,22 @@ function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [rec, cancelPreroll]);
+
+  const importAudio = useCallback(async () => {
+    try {
+      const result = await pickAndImportAudio();
+      if (!result) return;
+      setMeetingsRefreshKey((k) => k + 1);
+      await navigateToRecapAfterRecording({
+        meetingId: result.meetingId,
+        segments: result.segments,
+        notes: "",
+        duration: 0,
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [navigateToRecapAfterRecording]);
 
   const timeLabel = format(elapsed);
 
@@ -608,6 +707,8 @@ function App() {
       {view === "landing" && (
         <Landing onNavigate={navigate} onStartRecording={startRecording} />
       )}
+      {view !== "landing" && (
+        <div key={view} className="workspace-view">
       {view === "home" && (
         <Home
           onNavigate={navigate}
@@ -616,7 +717,7 @@ function App() {
           calendarConnected={calConnected}
           events={events}
           onConnectCalendar={() => setShowConnect(true)}
-          onRecordEvent={startRecording}
+          onRecordEvent={startRecordingFromEvent}
           completedIds={completedIds}
           onCompleteAction={completeAction}
           userTasks={userTasks}
@@ -634,9 +735,10 @@ function App() {
           calendarConnected={calConnected}
           events={events}
           onConnectCalendar={() => setShowConnect(true)}
-          onRecordEvent={startRecording}
+          onRecordEvent={startRecordingFromEvent}
           meetingsRefreshKey={meetingsRefreshKey}
           onMeetingContextMenu={openMeetingContextMenu}
+          onImportAudio={importAudio}
         />
       )}
       {view === "people" && <People onNavigate={navigate} onOpenMeeting={openMeeting} />}
@@ -705,6 +807,8 @@ function App() {
           onRename={() => recapRenameTarget && setPendingMeetingEdit(recapRenameTarget)}
         />
       )}
+        </div>
+      )}
 
       {rec !== "idle" && (
         <RecordingBar
@@ -752,6 +856,67 @@ function App() {
           onSubmit={saveName}
           onCancel={() => setEditingName(false)}
         />
+      )}
+
+      {showConsent && (
+        <div className="modal-backdrop">
+          <div className="modal-card consent-card">
+            <div className="modal-head">
+              <span className="modal-title">Recording consent</span>
+            </div>
+            <div className="modal-body">
+              <p>
+                System audio capture records sound from your computer, including other meeting
+                participants. Ensure you have consent from everyone on the call and follow your
+                local laws and company policy.
+              </p>
+              <div className="consent-actions">
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  onClick={() => {
+                    setShowConsent(false);
+                    setPendingRecord(null);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => {
+                    setShowConsent(false);
+                    pendingRecord?.();
+                    setPendingRecord(null);
+                  }}
+                >
+                  I have consent — start recording
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {calendarToast && rec === "idle" && (
+        <div className="calendar-toast" role="status">
+          <span>
+            <strong>{calendarToast.title}</strong> starts soon
+          </span>
+          <button
+            type="button"
+            className="btn-record-sm"
+            onClick={() => {
+              void startRecordingFromEvent(calendarToast);
+              setCalendarToast(null);
+            }}
+          >
+            Record
+          </button>
+          <button type="button" className="rec-error-dismiss" onClick={() => setCalendarToast(null)}>
+            ×
+          </button>
+        </div>
       )}
 
       {showSettings && (

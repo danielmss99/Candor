@@ -37,20 +37,83 @@ export function recapToMarkdown(recap: RecapData): string {
   return lines.join("\n");
 }
 
-/** Download recap as a markdown file in the browser/Tauri webview. */
-export function downloadRecapMarkdown(recap: RecapData): void {
-  const md = recapToMarkdown(recap);
-  const slug = recap.title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-  const blob = new Blob([md], { type: "text/markdown;charset=utf-8" });
+export type ExportPreset = "markdown" | "slack" | "email" | "pdf";
+
+export function recapToSlack(recap: RecapData): string {
+  return `*${recap.title}* (${recap.meta.split(" · ")[0]})\n\n${recap.summary.replace(/\*\*/g, "*")}\n\n${
+    recap.decisions.length
+      ? `*Decisions*\n${recap.decisions.map((d) => `• ${d}`).join("\n")}\n\n`
+      : ""
+  }${
+    recap.actions.length
+      ? `*Actions*\n${recap.actions.map((a) => `• ${a.text} — ${a.owner}`).join("\n")}`
+      : ""
+  }`.trim();
+}
+
+export function recapToEmail(recap: RecapData): string {
+  return `Subject: Follow-up — ${recap.title}\n\nHi team,\n\nThanks for the discussion. ${recap.summary.replace(/\*\*/g, "")}\n\nNext steps:\n${
+    recap.actions.map((a) => `• ${a.text} (${a.owner}, due ${a.due})`).join("\n") || "None captured."
+  }\n\nBest`;
+}
+
+export function recapToHtml(recap: RecapData): string {
+  const esc = (s: string) =>
+    s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${esc(recap.title)}</title>
+<style>body{font-family:system-ui,sans-serif;max-width:720px;margin:2rem auto;line-height:1.5;color:#222}
+h1{font-size:1.5rem}h2{font-size:1rem;margin-top:1.5rem;color:#666}</style></head><body>
+<h1>${esc(recap.title)}</h1><p>${esc(recap.meta)}</p>
+<h2>Summary</h2><p>${esc(recap.summary.replace(/\*\*/g, ""))}</p>
+${
+  recap.decisions.length
+    ? `<h2>Decisions</h2><ul>${recap.decisions.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>`
+    : ""
+}
+${
+  recap.actions.length
+    ? `<h2>Action items</h2><ul>${recap.actions.map((a) => `<li>${esc(a.text)} (${esc(a.owner)})</li>`).join("")}</ul>`
+    : ""
+}
+</body></html>`;
+}
+
+function downloadBlob(content: string, filename: string, mime: string): void {
+  const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `${slug || "meeting-notes"}.md`;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function slug(title: string): string {
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "meeting-notes";
+}
+
+/** Download recap using a preset format. */
+export function downloadRecapPreset(recap: RecapData, preset: ExportPreset): void {
+  const base = slug(recap.title);
+  switch (preset) {
+    case "markdown":
+      downloadBlob(recapToMarkdown(recap), `${base}.md`, "text/markdown;charset=utf-8");
+      break;
+    case "slack":
+      downloadBlob(recapToSlack(recap), `${base}-slack.txt`, "text/plain;charset=utf-8");
+      break;
+    case "email":
+      downloadBlob(recapToEmail(recap), `${base}-email.txt`, "text/plain;charset=utf-8");
+      break;
+    case "pdf":
+      downloadBlob(recapToHtml(recap), `${base}.html`, "text/html;charset=utf-8");
+      break;
+  }
+}
+
+/** @deprecated Use downloadRecapPreset(recap, "markdown") */
+export function downloadRecapMarkdown(recap: RecapData): void {
+  downloadRecapPreset(recap, "markdown");
 }
 
 /** Copy recap summary to clipboard for sharing. */
@@ -64,39 +127,14 @@ export async function shareRecapSummary(recap: RecapData): Promise<boolean> {
   }
 }
 
-/** Mock Q&A responses for the "Ask this meeting" feature. */
+/** @deprecated Use askMeeting from v2/askMeeting.ts */
 export function answerMeetingQuestion(recap: RecapData, question: string): string {
   const q = question.trim().toLowerCase();
   if (!q) return "Ask a question about this meeting.";
-
-  if (q.includes("slack") || q.includes("summarize")) {
-    return `*${recap.title}* (${recap.meta.split(" · ")[0]})\n\n${recap.summary.replace(/\*\*/g, "*")}\n\nKey decisions:\n${recap.decisions.map((d) => `• ${d}`).join("\n")}`;
-  }
-
-  if (q.includes("email") || q.includes("follow-up") || q.includes("follow up")) {
-    return `Subject: Follow-up — ${recap.title}\n\nHi team,\n\nThanks for the discussion today. ${recap.summary.replace(/\*\*/g, "")}\n\nNext steps:\n${recap.actions.map((a) => `• ${a.text} (${a.owner}, due ${a.due})`).join("\n") || "None captured."}\n\nBest`;
-  }
-
-  if (q.includes("export") || q.includes("delay")) {
-    const hit = recap.decisions.find((d) => d.toLowerCase().includes("export"));
-    return hit ?? recap.summary.replace(/\*\*/g, "");
-  }
-
+  if (q.includes("slack")) return recapToSlack(recap);
+  if (q.includes("email")) return recapToEmail(recap);
   if (q.includes("decision")) {
-    return recap.decisions.length > 0
-      ? recap.decisions.join(" ")
-      : "No formal decisions were logged for this meeting.";
+    return recap.decisions.length ? recap.decisions.join(" ") : "No formal decisions were logged.";
   }
-
-  if (q.includes("action") || q.includes("todo") || q.includes("task")) {
-    return recap.actions.length > 0
-      ? recap.actions.map((a) => `${a.text} (${a.owner}, due ${a.due})`).join("\n")
-      : "No action items were captured for this meeting.";
-  }
-
-  if (recap.summary.toLowerCase().includes(q)) {
-    return recap.summary.replace(/\*\*/g, "");
-  }
-
-  return `I couldn't find a specific answer for "${question.trim()}". Try asking about decisions, action items, or export timing.`;
+  return recap.summary.replace(/\*\*/g, "");
 }

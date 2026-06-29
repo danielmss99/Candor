@@ -12,6 +12,7 @@ import { fmtEventTime } from "../format";
 import { actionItems, people } from "../data/mock";
 import { meetingContextHandler } from "../components/ContextMenu";
 import type { ContextMenuState } from "../meetingEdit";
+import { buildCatchUpDigest } from "../v2/catchUp";
 import { loadFavorites, type OnboardingState } from "../v2/metadata";
 
 interface HomeProps {
@@ -21,7 +22,7 @@ interface HomeProps {
   calendarConnected: boolean;
   events: CalendarEvent[];
   onConnectCalendar: () => void;
-  onRecordEvent: () => void;
+  onRecordEvent: (ev: CalendarEvent) => void;
   completedIds: Set<string>;
   onCompleteAction: (item: Omit<CompletedAction, "completedAt">) => void;
   onMeetingContextMenu: (x: number, y: number, target: ContextMenuState["target"]) => void;
@@ -81,6 +82,7 @@ export function Home({
   const openActions = [...userOpen, ...mockOpen];
   const recent = savedMeetings.slice(0, 3);
   const pinned = savedMeetings.filter((m) => favorites.has(m.id)).slice(0, 2);
+  const digest = buildCatchUpDigest(savedMeetings, userTasks, completedIds);
 
   return (
     <div className="screen screen--sidebar">
@@ -150,13 +152,45 @@ export function Home({
                     {ev.onlineUrl && " · online"}
                   </span>
                 </div>
-                <button className="btn-record-sm" onClick={onRecordEvent}>
+                <button className="btn-record-sm" onClick={() => onRecordEvent(ev)}>
                   <span className="rec-dot" />
                   Record
                 </button>
               </div>
             ))
           )}
+        </section>
+
+        <section className="catch-up-digest">
+          <div className="home-col-head">
+            <span className="section-label section-label--calm">Catch up · last 7 days</span>
+          </div>
+          <div className="catch-up-card">
+            <p className="catch-up-meta">
+              {digest.meetingCount} meeting{digest.meetingCount === 1 ? "" : "s"} ·{" "}
+              {digest.openTasks.length} open task{digest.openTasks.length === 1 ? "" : "s"}
+            </p>
+            {digest.decisions.length > 0 && (
+              <ul className="catch-up-list">
+                {digest.decisions.slice(0, 3).map((d, i) => (
+                  <li key={i}>{d}</li>
+                ))}
+              </ul>
+            )}
+            {digest.openTasks.length > 0 && (
+              <div className="catch-up-tasks">
+                {digest.openTasks.slice(0, 3).map((t, i) => (
+                  <div key={i} className="catch-up-task">
+                    <span>{t.text}</span>
+                    <span className="catch-up-due">{t.due}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {digest.meetingCount === 0 && digest.openTasks.length === 0 && (
+              <div className="home-empty">Quiet week — you're caught up.</div>
+            )}
+          </div>
         </section>
 
         <div className="home-stats">

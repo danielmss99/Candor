@@ -1,5 +1,6 @@
 import type { TranscriptSegment } from "./App";
 import type { RecapData } from "./data/mock";
+import type { SummaryTemplateId } from "./v2/summaryTemplates";
 
 export interface RecordingContext {
   transcript: TranscriptSegment[];
@@ -9,6 +10,7 @@ export interface RecordingContext {
   userInitials: string;
   /** When set, use the saved meeting title instead of auto-generating one. */
   titleOverride?: string;
+  template?: SummaryTemplateId;
 }
 
 const STOP_WORDS = new Set([
@@ -77,7 +79,45 @@ function boldTopTerms(text: string, terms: string[]): string {
 function buildSummary(ctx: RecordingContext): string {
   const full = ctx.transcript.map((s) => s.text).join(" ").trim();
   const notes = ctx.sessionNotes.trim();
+  const template = ctx.template ?? "general";
 
+  let base = buildBaseSummary(full, notes);
+
+  switch (template) {
+    case "standup":
+      base = `**Standup recap.** ${base} Blockers and dependencies are called out in your notes and transcript.`;
+      break;
+    case "one_on_one":
+      base = `**1:1 notes.** ${base} Follow-ups are listed in action items.`;
+      break;
+    case "sales":
+      base = `**Sales call.** ${base} Review budget, authority, need, and timeline in the transcript.`;
+      break;
+    case "retro":
+      base = `**Retro.** ${base} Capture what to keep doing and what to change next sprint.`;
+      break;
+    case "client_call":
+      base = `**Client call.** ${base} Agreements and deliverables are summarized below.`;
+      break;
+    default:
+      break;
+  }
+
+  if (notes) {
+    const scratch = notes
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => !/^✓ Decision:|^→ Action:|^\? Question:/.test(l));
+    if (scratch.length > 0) {
+      base += ` Your scratchpad: ${scratch.slice(0, 3).join("; ").slice(0, 200)}${scratch.join("").length > 200 ? "…" : ""}.`;
+    }
+  }
+
+  return base;
+}
+
+function buildBaseSummary(full: string, notes: string): string {
   if (!full && notes) {
     const preview = notes.split("\n").filter(Boolean).slice(0, 2).join("; ");
     return boldTopTerms(
@@ -107,6 +147,13 @@ function buildSummary(ctx: RecordingContext): string {
   }
 
   return boldTopTerms(summary, topTerms(full, 5));
+}
+
+function speakerCount(ctx: RecordingContext): number {
+  const speakers = new Set(
+    ctx.transcript.map((s) => s.speaker).filter((s): s is string => Boolean(s)),
+  );
+  return Math.max(1, speakers.size || (ctx.transcript.length > 0 ? 1 : 1));
 }
 
 function extractDecisions(ctx: RecordingContext): string[] {
@@ -221,7 +268,7 @@ export function generateRecapFromRecording(ctx: RecordingContext): RecapData {
 
   return {
     title,
-    meta: `${dateLabel} · ${duration} · 1 speaker`,
+    meta: `${dateLabel} · ${duration} · ${speakerCount(ctx)} speaker${speakerCount(ctx) === 1 ? "" : "s"}`,
     summary: buildSummary(ctx),
     decisions: extractDecisions(ctx),
     actions: extractActions(ctx),

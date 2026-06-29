@@ -26,6 +26,9 @@ export interface MeetingDetail {
   durationSeconds: number;
   userNotes: string;
   transcript: TranscriptSegment[];
+  audioPath?: string | null;
+  folderId?: string | null;
+  calendarEventId?: string | null;
 }
 
 export interface StorageFolder {
@@ -115,12 +118,58 @@ export async function openStorageFolder(folderId: string): Promise<void> {
   await invoke("open_storage_folder", { folderId });
 }
 
+export interface PrivacySettings {
+  deleteAudioAfterTranscribe: boolean;
+  retentionDays: number;
+  captureSystemAudio: boolean;
+  webhookUrl: string | null;
+  mcpServerEnabled: boolean;
+}
+
+export async function loadPrivacySettings(): Promise<PrivacySettings> {
+  if (!isTauri()) {
+    return {
+      deleteAudioAfterTranscribe: false,
+      retentionDays: 0,
+      captureSystemAudio: false,
+      webhookUrl: null,
+      mcpServerEnabled: false,
+    };
+  }
+  return invoke<PrivacySettings>("get_privacy_settings");
+}
+
+export async function savePrivacySettings(settings: PrivacySettings): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("set_privacy_settings", { settings });
+}
+
+export async function getMeetingAudioPath(meetingId: string): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>("get_meeting_audio_path", { id: meetingId });
+}
+
+export async function pickAndImportAudio(): Promise<StopRecordingResult | null> {
+  if (!isTauri()) return null;
+  const path = await invoke<string | null>("pick_audio_file");
+  if (!path) return null;
+  return invoke<StopRecordingResult>("import_audio_file", { path, title: null });
+}
+
 export async function stopRecordingWithNotes(
   userNotes: string | null,
   durationSeconds: number,
+  options?: {
+    titleOverride?: string;
+    calendarEventId?: string;
+    folderId?: string;
+  },
 ): Promise<StopRecordingResult> {
   return invoke<StopRecordingResult>("stop_recording", {
     userNotes,
     durationSeconds,
+    titleOverride: options?.titleOverride ?? null,
+    calendarEventId: options?.calendarEventId ?? null,
+    folderId: options?.folderId ?? null,
   });
 }

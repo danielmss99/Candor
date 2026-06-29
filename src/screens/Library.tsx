@@ -23,7 +23,8 @@ interface LibraryProps {
   calendarConnected: boolean;
   events: CalendarEvent[];
   onConnectCalendar: () => void;
-  onRecordEvent: () => void;
+  onRecordEvent: (ev: CalendarEvent) => void;
+  onImportAudio?: () => void;
   meetingsRefreshKey: number;
   onMeetingContextMenu: (x: number, y: number, target: ContextMenuState["target"]) => void;
 }
@@ -42,6 +43,7 @@ export function Library({
   onRecordEvent,
   meetingsRefreshKey,
   onMeetingContextMenu,
+  onImportAudio,
 }: LibraryProps) {
   const [filter, setFilter] = useState<SmartFilter>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
@@ -201,6 +203,11 @@ export function Library({
             <span className="rec-dot" />
             Start recording
           </button>
+          {onImportAudio && (
+            <button type="button" className="btn-ghost" onClick={onImportAudio}>
+              Import audio
+            </button>
+          )}
         </div>
 
         {calendarConnected && events.length > 0 && (
@@ -224,7 +231,7 @@ export function Library({
                       {ev.attendees.length > 0 && ` · ${ev.attendees.length} people`}
                     </span>
                   </div>
-                  <button className="btn-record-sm" onClick={onRecordEvent}>
+                  <button className="btn-record-sm" onClick={() => onRecordEvent(ev)}>
                     <span className="rec-dot" />
                     Record
                   </button>

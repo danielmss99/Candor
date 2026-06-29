@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { isTauri } from "@tauri-apps/api/core";
 import type { TranscriptSegment, View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { AudioPlayer, parseTime } from "../components/AudioPlayer";
@@ -7,10 +9,14 @@ import { KeywordCloud } from "../components/KeywordCloud";
 import type { RecapData } from "../data/mock";
 import { getRecapForMeeting, people } from "../data/mock";
 import {
-  answerMeetingQuestion,
-  downloadRecapMarkdown,
+  downloadRecapPreset,
   shareRecapSummary,
+  type ExportPreset,
 } from "../export";
+import { askMeeting, type AskCitation } from "../v2/askMeeting";
+import { generateRecapFromRecording } from "../recapGenerate";
+import { loadSummaryTemplate } from "../v2/summaryTemplates";
+import { useUser } from "../user";
 import type { CompletedAction } from "../api/actions";
 import { resolveActionId } from "../api/actions";
 import { loadMeetingDetail } from "../api/local";
@@ -89,7 +95,11 @@ export function Recap({
   const [activeSeg, setActiveSeg] = useState<number | null>(null);
   const [askQuery, setAskQuery] = useState("");
   const [askAnswer, setAskAnswer] = useState<string | null>(null);
+  const [askCitations, setAskCitations] = useState<AskCitation[]>([]);
   const [shareStatus, setShareStatus] = useState<string | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const { initials } = useUser();
   const [activeChapter, setActiveChapter] = useState<string | null>(jumpTimestamp);
   const highlightRef = useRef<HTMLDivElement>(null);
   const sectionRefs = useRef<Record<string, HTMLElement | null>>({});
@@ -105,11 +115,27 @@ export function Recap({
     setMoments(loadMoments(meetingId));
     setAskQuery("");
     setAskAnswer(null);
+    setAskCitations([]);
+    setAudioUrl(null);
     setActiveChapter(jumpTimestamp);
     if (transcriptProp) setTranscript(transcriptProp);
     else {
       loadMeetingDetail(meetingId).then((d) => {
-        if (d?.transcript) setTranscript(d.transcript);
+        if (d?.transcript) {
+          setTranscript(d.transcript);
+          d.transcript.forEach((seg, i) => {
+            if (seg.speaker) saveSpeakerLabel(meetingId, i, seg.speaker);
+          });
+        }
+        if (d?.audioPath && isTauri()) {
+          setAudioUrl(convertFileSrc(d.audioPath));
+        } else if (isTauri()) {
+          invoke<string | null>("get_meeting_audio_path", { id: meetingId })
+            .then((p) => {
+              if (p) setAudioUrl(convertFileSrc(p));
+            })
+            .catch(() => {});
+        }
       });
     }
   }, [meetingId, recap, edits, jumpTimestamp, transcriptProp]);
@@ -161,7 +187,44 @@ export function Recap({
     const q = question.trim();
     if (!q) return;
     setAskQuery(q);
-    setAskAnswer(answerMeetingQuestion({ ...recap, summary, decisions }, q));
+    const result = askMeeting({ ...recap, summary, decisions }, transcript, q);
+    setAskAnswer(result.answer);
+    setAskCitations(result.citations);
+  };
+
+  const regenerateSummary = () => {
+    const next = generateRecapFromRecording({
+      transcript,
+      sessionNotes: "",
+      durationSeconds: 0,
+      recordedAt: new Date(),
+      userInitials: initials,
+      titleOverride: recap.title,
+      template: loadSummaryTemplate(),
+    });
+    setSummary(next.summary);
+    setDecisions(next.decisions);
+    persistEdits({ summary: next.summary, decisions: next.decisions });
+  };
+
+  const exportClip = async (h: LiveHighlight) => {
+    if (!isTauri()) return;
+    const start = parseTime(h.time);
+    const end = start + 30;
+    const dest = `${h.time.replace(/:/g, "-")}-clip.wav`;
+    try {
+      await invoke("export_audio_clip", {
+        meetingId,
+        startSeconds: start,
+        endSeconds: end,
+        destPath: dest,
+      });
+      setShareStatus(`Clip saved: ${dest}`);
+      window.setTimeout(() => setShareStatus(null), 3000);
+    } catch {
+      setShareStatus("Could not export clip");
+      window.setTimeout(() => setShareStatus(null), 2000);
+    }
   };
 
   const handleShare = async () => {
@@ -170,8 +233,9 @@ export function Recap({
     window.setTimeout(() => setShareStatus(null), 2000);
   };
 
-  const handleExport = () => {
-    downloadRecapMarkdown({ ...recap, summary, decisions });
+  const handleExport = (preset: ExportPreset = "markdown") => {
+    downloadRecapPreset({ ...recap, summary, decisions }, preset);
+    setExportMenuOpen(false);
     invoke("open_notes_folder").catch(() => {});
   };
 
@@ -239,9 +303,30 @@ export function Recap({
         <button className="btn-ghost" onClick={handleShare}>
           {shareStatus ?? "Share"}
         </button>
-        <button className="btn-primary" onClick={handleExport}>
-          Export notes
+        <button className="btn-ghost" onClick={regenerateSummary}>
+          Regenerate
         </button>
+        <div className="export-dropdown">
+          <button className="btn-primary" onClick={() => setExportMenuOpen((o) => !o)}>
+            Export ▾
+          </button>
+          {exportMenuOpen && (
+            <div className="export-menu">
+              {(
+                [
+                  ["markdown", "Markdown"],
+                  ["slack", "Slack blurb"],
+                  ["email", "Email draft"],
+                  ["pdf", "HTML (print PDF)"],
+                ] as const
+              ).map(([id, label]) => (
+                <button key={id} type="button" className="export-menu-item" onClick={() => handleExport(id)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </header>
 
       {jumpTimestamp && (
@@ -251,7 +336,7 @@ export function Recap({
       )}
 
       <AudioPlayer
-        audioUrl={null}
+        audioUrl={audioUrl}
         transcript={transcript}
         activeIndex={activeSeg}
         onActiveIndexChange={setActiveSeg}
@@ -432,7 +517,7 @@ export function Recap({
                   >
                     <input
                       className="transcript-speaker-input"
-                      value={speakerLabels[i] ?? "Speaker"}
+                      value={speakerLabels[i] ?? seg.speaker ?? "Speaker"}
                       onChange={(e) => {
                         saveSpeakerLabel(meetingId, i, e.target.value);
                         setSpeakerLabels({ ...speakerLabels, [i]: e.target.value });
@@ -487,6 +572,25 @@ export function Recap({
                 </button>
               </form>
               {askAnswer && <div className="ask-answer">{askAnswer}</div>}
+              {askCitations.length > 0 && (
+                <div className="ask-citations">
+                  {askCitations.map((c, i) => (
+                    <button
+                      key={i}
+                      type="button"
+                      className="ask-citation"
+                      onClick={() => {
+                        const idx = transcript.findIndex((s) => s.time === c.time);
+                        if (idx >= 0) seekSegment(idx);
+                      }}
+                    >
+                      <span className="ask-citation-time">{c.time}</span>
+                      {c.text.slice(0, 80)}
+                      {c.text.length > 80 ? "…" : ""}
+                    </button>
+                  ))}
+                </div>
+              )}
               <div className="ask-suggestions">
                 {recap.suggestions.map((s) => (
                   <button key={s} type="button" className="ghost-pill" onClick={() => submitAsk(s)}>
@@ -529,6 +633,11 @@ export function Recap({
                 <div key={`h-${i}`} className="moment-row">
                   <span className="moment-time">⭐ {h.time}</span>
                   <div>"{h.text}"</div>
+                  {audioUrl && (
+                    <button type="button" className="link-btn" onClick={() => exportClip(h)}>
+                      Export clip
+                    </button>
+                  )}
                 </div>
               ))}
               {moments.bookmarks.length === 0 && allMoments.length === 0 && (
