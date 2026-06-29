@@ -75,10 +75,20 @@ function transcriptResults(query: string, filters: SearchFilters): SearchResult[
     if (!matchesDate(r.when, filters.date)) return false;
     const full = r.segments.map((s) => s.t).join("").toLowerCase();
     return full.includes(q);
-  }).map((r) => ({
-    ...r,
-    segments: highlight(`"${r.segments.map((s) => s.t).join("")}"`, query),
-  }));
+  }).map((r) => {
+    const fullText = r.segments.map((s) => s.t).join("");
+    const q = query.trim().toLowerCase();
+    const idx = fullText.toLowerCase().indexOf(q.split(/\s+/)[0] ?? q);
+    const contextBefore = idx > 20 ? fullText.slice(Math.max(0, idx - 40), idx).trim() : undefined;
+    const contextAfter =
+      idx >= 0 ? fullText.slice(idx + q.length, idx + q.length + 40).trim() : undefined;
+    return {
+      ...r,
+      segments: highlight(`"${fullText}"`, query),
+      contextBefore,
+      contextAfter,
+    };
+  });
 }
 
 function summaryResults(

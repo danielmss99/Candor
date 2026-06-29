@@ -8,11 +8,13 @@ export interface CompletedAction {
   due: string;
   meeting: string;
   meetingId?: string;
+  timestamp?: string;
+  dueIso?: string;
   soon?: boolean;
   completedAt: string;
 }
 
-const COMPLETED_KEY = "candor.completedActions";
+const COMPLETED_KEY = "candor-v2.completedActions";
 
 export function recapActionId(meetingId: string, index: number): string {
   return `${meetingId}::action::${index}`;
@@ -59,7 +61,7 @@ export interface UserTask {
   createdAt: string;
 }
 
-const USER_TASKS_KEY = "candor.userTasks";
+const USER_TASKS_KEY = "candor-v2.userTasks";
 
 export function formatDueLabel(isoDate: string): string {
   const d = new Date(`${isoDate}T12:00:00`);
@@ -102,6 +104,21 @@ export async function loadUserTasks(): Promise<UserTask[]> {
   } catch {
     return [];
   }
+}
+
+export function parseDueIso(due: string): number {
+  const d = new Date(due);
+  if (!Number.isNaN(d.getTime())) return d.getTime();
+  const parsed = Date.parse(due);
+  return Number.isNaN(parsed) ? Infinity : parsed;
+}
+
+export function sortByDue<T extends { due: string; dueIso?: string }>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const da = a.dueIso ? new Date(a.dueIso).getTime() : parseDueIso(a.due);
+    const db = b.dueIso ? new Date(b.dueIso).getTime() : parseDueIso(b.due);
+    return da - db;
+  });
 }
 
 export async function persistUserTasks(tasks: UserTask[]): Promise<void> {

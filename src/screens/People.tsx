@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
+import { Skeleton } from "../components/Skeleton";
 import {
   VOICE_COLORS,
   loadPeople,
+  loadSavedMeetings,
   newPerson,
   persistPeople,
   type VoicePerson,
@@ -12,10 +14,12 @@ import {
 
 interface PeopleProps {
   onNavigate: (view: View) => void;
+  onOpenMeeting?: (id: string) => void;
 }
 
-export function People({ onNavigate }: PeopleProps) {
+export function People({ onNavigate, onOpenMeeting }: PeopleProps) {
   const [people, setPeople] = useState<VoicePerson[]>([]);
+  const [meetings, setMeetings] = useState<{ id: string; title: string }[]>([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
   const [voiceLabel, setVoiceLabel] = useState("");
@@ -24,13 +28,25 @@ export function People({ onNavigate }: PeopleProps) {
 
   const refresh = useCallback(async () => {
     setLoading(true);
-    setPeople(await loadPeople());
+    const [p, m] = await Promise.all([loadPeople(), loadSavedMeetings()]);
+    setPeople(p);
+    setMeetings(m.map((x) => ({ id: x.id, title: x.title })));
     setLoading(false);
   }, []);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const meetingsForPerson = useMemo(() => {
+    const map = new Map<string, { id: string; title: string }[]>();
+    for (const person of people) {
+      const first = person.name.split(" ")[0]?.toLowerCase() ?? "";
+      const related = meetings.filter((m) => m.title.toLowerCase().includes(first));
+      map.set(person.id, related.slice(0, 4));
+    }
+    return map;
+  }, [people, meetings]);
 
   const save = async (next: VoicePerson[]) => {
     setSaving(true);
@@ -60,14 +76,13 @@ export function People({ onNavigate }: PeopleProps) {
       <div className="main main--scroll">
         <div className="library-head">
           <span className="page-title">People</span>
-          <span className="page-sub">Voice profiles for speaker recognition</span>
+          <span className="page-sub">Voice profiles &amp; meeting connections</span>
           <div className="spacer" />
           {saving && <span className="page-sub">Saving…</span>}
         </div>
 
         <p className="people-intro">
-          Add people you meet with often. Candor stores their profile locally so future recordings
-          can match voices to names (speaker ID coming soon).
+          Add people you meet with often. Label speakers in recaps and see which meetings they appear in.
         </p>
 
         <form className="people-form" onSubmit={addPerson}>
@@ -81,7 +96,7 @@ export function People({ onNavigate }: PeopleProps) {
             />
             <input
               className="people-input people-input--wide"
-              placeholder="Voice notes (e.g. deep, fast talker, British accent)"
+              placeholder="Voice notes (e.g. deep, fast talker)"
               value={voiceLabel}
               onChange={(e) => setVoiceLabel(e.target.value)}
               aria-label="Voice description"
@@ -106,26 +121,46 @@ export function People({ onNavigate }: PeopleProps) {
           </div>
         </form>
 
-        <div className="section-label section-label--block">SAVED LOCALLY · {people.length}</div>
+        <div className="section-label section-label--calm section-label--block">
+          Saved locally · {people.length}
+        </div>
 
         {loading ? (
-          <div className="library-empty">Loading people…</div>
+          <Skeleton rows={3} />
         ) : people.length === 0 ? (
           <div className="library-empty">No people yet — add someone above.</div>
         ) : (
           <div className="people-list">
-            {people.map((p) => (
-              <div key={p.id} className="people-row">
-                <Avatar label={p.initials} bg={p.color} fg="#fff" size={36} />
-                <div className="people-row-main">
-                  <div className="people-row-name">{p.name}</div>
-                  <div className="people-row-voice">{p.voiceLabel || "No voice notes"}</div>
+            {people.map((p) => {
+              const related = meetingsForPerson.get(p.id) ?? [];
+              return (
+                <div key={p.id} className="people-row">
+                  <Avatar label={p.initials} bg={p.color} fg="#fff" size={36} />
+                  <div className="people-row-main">
+                    <div className="people-row-name">{p.name}</div>
+                    <div className="people-row-voice">{p.voiceLabel || "No voice notes"}</div>
+                    {related.length > 0 && (
+                      <div className="person-meetings">
+                        Meetings:{" "}
+                        {related.map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            className="person-meeting-link"
+                            onClick={() => onOpenMeeting?.(m.id)}
+                          >
+                            {m.title}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                  <button type="button" className="btn-ghost btn-ghost-sm" onClick={() => removePerson(p.id)}>
+                    Remove
+                  </button>
                 </div>
-                <button type="button" className="btn-ghost btn-ghost-sm" onClick={() => removePerson(p.id)}>
-                  Remove
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

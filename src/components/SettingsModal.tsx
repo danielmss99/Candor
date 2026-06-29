@@ -1,5 +1,16 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  loadPrivacySettings,
+  savePrivacySettings,
+  type PrivacySettings,
+} from "../api/local";
+import {
+  SUMMARY_TEMPLATES,
+  loadSummaryTemplate,
+  saveSummaryTemplate,
+  type SummaryTemplateId,
+} from "../v2/summaryTemplates";
 
 export type Theme = "light" | "dark";
 
@@ -18,6 +29,8 @@ const MODELS: { value: string; label: string }[] = [
 export function SettingsModal({ theme, onThemeChange, onClose }: SettingsModalProps) {
   const [model, setModel] = useState("base.en");
   const [notesDir, setNotesDir] = useState("");
+  const [privacy, setPrivacy] = useState<PrivacySettings | null>(null);
+  const [template, setTemplate] = useState<SummaryTemplateId>(() => loadSummaryTemplate());
 
   useEffect(() => {
     invoke<{ model: string; notesDir: string }>("get_settings")
@@ -26,6 +39,7 @@ export function SettingsModal({ theme, onThemeChange, onClose }: SettingsModalPr
         setNotesDir(s.notesDir);
       })
       .catch(() => {});
+    loadPrivacySettings().then(setPrivacy).catch(() => {});
   }, []);
 
   const changeModel = async (m: string) => {
@@ -37,9 +51,16 @@ export function SettingsModal({ theme, onThemeChange, onClose }: SettingsModalPr
     }
   };
 
+  const patchPrivacy = async (patch: Partial<PrivacySettings>) => {
+    if (!privacy) return;
+    const next = { ...privacy, ...patch };
+    setPrivacy(next);
+    await savePrivacySettings(next).catch(() => {});
+  };
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-card modal-card--wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <span className="modal-title">Settings</span>
           <button className="modal-x" onClick={onClose} aria-label="Close">
@@ -89,6 +110,117 @@ export function SettingsModal({ theme, onThemeChange, onClose }: SettingsModalPr
               ))}
             </select>
           </div>
+
+          <div className="setting-row">
+            <div className="setting-text">
+              <div className="setting-name">Summary template</div>
+              <div className="setting-desc">Shapes how AI recap is structured.</div>
+            </div>
+            <select
+              className="setting-select"
+              value={template}
+              onChange={(e) => {
+                const id = e.target.value as SummaryTemplateId;
+                setTemplate(id);
+                saveSummaryTemplate(id);
+              }}
+            >
+              {SUMMARY_TEMPLATES.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {privacy && (
+            <>
+              <div className="setting-section-label">Privacy & capture</div>
+
+              <div className="setting-row">
+                <div className="setting-text">
+                  <div className="setting-name">Capture system audio</div>
+                  <div className="setting-desc">
+                    Record meeting audio from your desktop (Zoom/Meet/Teams) via Windows loopback.
+                    Requires consent from all participants.
+                  </div>
+                </div>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={privacy.captureSystemAudio}
+                    onChange={(e) => patchPrivacy({ captureSystemAudio: e.target.checked })}
+                  />
+                  <span className="toggle-track" />
+                </label>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-text">
+                  <div className="setting-name">Delete audio after transcribe</div>
+                  <div className="setting-desc">
+                    Keep transcript only — WAV files are removed after Whisper finishes.
+                  </div>
+                </div>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={privacy.deleteAudioAfterTranscribe}
+                    onChange={(e) => patchPrivacy({ deleteAudioAfterTranscribe: e.target.checked })}
+                  />
+                  <span className="toggle-track" />
+                </label>
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-text">
+                  <div className="setting-name">Retention (days)</div>
+                  <div className="setting-desc">0 = keep meetings forever. Auto-cleanup coming soon.</div>
+                </div>
+                <input
+                  className="setting-input-num"
+                  type="number"
+                  min={0}
+                  max={3650}
+                  value={privacy.retentionDays}
+                  onChange={(e) =>
+                    patchPrivacy({ retentionDays: Math.max(0, Number(e.target.value) || 0) })
+                  }
+                />
+              </div>
+
+              <div className="setting-row setting-row--stack">
+                <div className="setting-text">
+                  <div className="setting-name">Webhook on meeting saved</div>
+                  <div className="setting-desc">POST JSON to this URL when a recording is saved.</div>
+                </div>
+                <input
+                  className="setting-input"
+                  type="url"
+                  placeholder="https://example.com/hooks/candor"
+                  value={privacy.webhookUrl ?? ""}
+                  onChange={(e) => patchPrivacy({ webhookUrl: e.target.value || null })}
+                />
+              </div>
+
+              <div className="setting-row">
+                <div className="setting-text">
+                  <div className="setting-name">Local MCP server</div>
+                  <div className="setting-desc">
+                    Scaffold only — see docs/mcp-server.md. Exposes meetings to Claude/Cursor.
+                  </div>
+                </div>
+                <label className="toggle">
+                  <input
+                    type="checkbox"
+                    checked={privacy.mcpServerEnabled}
+                    onChange={(e) => patchPrivacy({ mcpServerEnabled: e.target.checked })}
+                  />
+                  <span className="toggle-track" />
+                </label>
+              </div>
+            </>
+          )}
 
           <div className="setting-row">
             <div className="setting-text">

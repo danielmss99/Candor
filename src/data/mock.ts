@@ -249,6 +249,8 @@ export interface SearchResult {
   speaker: keyof typeof people;
   // text split into segments; `mark: true` highlights the term
   segments: { t: string; mark?: boolean }[];
+  contextBefore?: string;
+  contextAfter?: string;
 }
 
 export const searchQuery = "export delay";

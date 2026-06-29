@@ -15,6 +15,7 @@ export interface UpdateSavedPayload {
   id: string;
   title?: string;
   date?: string;
+  folderId?: string | null;
 }
 
 export async function updateCalendarEvent(payload: UpdateCalendarPayload): Promise<void> {

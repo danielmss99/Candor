@@ -91,6 +91,23 @@
   padding: 24px 28px;
   overflow: hidden;
   min-width: 0;
+  position: relative;
+  isolation: isolate;
+}
+.main::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 90% 70% at 95% 5%, var(--glow-coral) 0%, transparent 52%),
+    radial-gradient(ellipse 80% 60% at 5% 95%, var(--glow-gold) 0%, transparent 48%),
+    radial-gradient(ellipse 60% 50% at 50% 50%, var(--glow-purple) 0%, transparent 58%);
+  pointer-events: none;
+  z-index: 0;
+}
+.main > * {
+  position: relative;
+  z-index: 1;
 }
 
 .chip {
@@ -153,10 +170,19 @@ button.chip {
   width: 100%;
   text-align: left;
   cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
+}
+.nav-item:hover:not(.nav-item--active) {
+  background: var(--card-alt-bg);
+  color: var(--text-body);
 }
 .nav-item--active {
   color: var(--text-primary);
   background: var(--chip-bg);
+  box-shadow: inset 0 0 0 1px var(--action-border);
 }
 .nav-bullet {
   width: 7px;
@@ -370,8 +396,8 @@ button.chip {
 }
 .page-title {
   font-weight: 700;
-  font-size: 21px;
-  letter-spacing: -0.01em;
+  font-size: 24px;
+  letter-spacing: -0.02em;
 }
 .search-pill {
   display: flex;
@@ -406,11 +432,22 @@ button.chip {
   gap: 7px;
   font: 600 13px var(--font-sans);
   color: #fff;
-  background: var(--coral);
+  background: linear-gradient(135deg, var(--coral) 0%, #ff8f5c 100%);
   border: none;
   padding: 9px 15px;
   border-radius: 8px;
   cursor: pointer;
+  box-shadow: 0 2px 8px rgba(240, 113, 78, 0.35);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out);
+}
+.btn-record:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(240, 113, 78, 0.45);
+}
+.btn-record:active {
+  transform: translateY(0);
 }
 .rec-dot {
   width: 8px;
@@ -428,6 +465,8 @@ button.chip {
   border: 1px solid var(--border);
   border-radius: 11px;
   overflow: hidden;
+  box-shadow: var(--shadow-sm);
+  background: var(--bg-sidebar);
 }
 .meeting-row {
   display: flex;
@@ -438,6 +477,10 @@ button.chip {
   background: none;
   border: none;
   cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-out);
+}
+.meeting-row:hover {
+  background: var(--card-alt-bg);
 }
 .meeting-row:not(:last-child) {
   border-bottom: 1px solid var(--border-inner);
@@ -1572,6 +1615,7 @@ button.chip {
   border-radius: 11px;
   overflow: hidden;
   background: var(--bg-sidebar);
+  box-shadow: var(--shadow-sm);
 }
 .task-row {
   display: flex;
@@ -1729,8 +1773,8 @@ button.chip {
 }
 .home-greeting {
   font-weight: 700;
-  font-size: 22px;
-  letter-spacing: -0.01em;
+  font-size: 26px;
+  letter-spacing: -0.02em;
 }
 .home-date {
   font: 500 12px var(--font-mono);
@@ -1754,8 +1798,15 @@ button.chip {
   min-width: 150px;
   cursor: pointer;
   text-align: left;
+  box-shadow: var(--shadow-sm);
+  transition:
+    transform var(--duration-base) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 .stat-card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
   border-color: var(--action-border);
 }
 .stat-num {
@@ -1805,8 +1856,15 @@ button.chip {
   padding: 12px 14px;
   margin-bottom: 8px;
   cursor: pointer;
+  box-shadow: var(--shadow-xs);
+  transition:
+    transform var(--duration-base) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
 }
 .home-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
   border-color: var(--action-border);
 }
 .home-card-main {
@@ -1830,6 +1888,8 @@ button.chip {
 }
 .home-card--action:hover {
   border-color: var(--border);
+  transform: none;
+  box-shadow: var(--shadow-xs);
 }
 .home-action-check {
   width: 15px;
@@ -1876,6 +1936,16 @@ button.chip {
   border-radius: 10px;
   padding: 13px 16px;
   margin-bottom: 8px;
+  box-shadow: var(--shadow-xs);
+  transition:
+    transform var(--duration-base) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+.event-card:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-sm);
+  border-color: var(--action-border);
 }
 .event-main {
   flex: 1;
@@ -1899,12 +1969,20 @@ button.chip {
   gap: 6px;
   font: 600 12px var(--font-sans);
   color: #fff;
-  background: var(--coral);
+  background: linear-gradient(135deg, var(--coral) 0%, #ff8f5c 100%);
   border: none;
   padding: 7px 12px;
   border-radius: 7px;
   cursor: pointer;
   flex: none;
+  box-shadow: 0 2px 6px rgba(240, 113, 78, 0.3);
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-base) var(--ease-out);
+}
+.btn-record-sm:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(240, 113, 78, 0.4);
 }
 .connect-card {
   display: flex;
@@ -2335,6 +2413,13 @@ button.chip {
   text-transform: uppercase;
   color: var(--text-label);
   margin-bottom: 6px;
+}
+
+/* Workspace view transitions (sidebar shell only; landing excluded) */
+.workspace-view {
+  height: 100vh;
+  width: 100vw;
+  animation: view-fade-in var(--duration-base) var(--ease-out);
 }
 
 /* ---------- Landing (Sunrise entry screen) ---------- */

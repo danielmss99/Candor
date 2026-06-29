@@ -9,17 +9,19 @@ interface NavItem {
   target: View;
 }
 
-const NAV: NavItem[] = [
+const NAV_WORK: NavItem[] = [
   { label: "Home", target: "home" },
   { label: "Meetings", target: "library" },
-  { label: "People", target: "people" },
-  { label: "Files", target: "files" },
-  { label: "Tasks", target: "actions" },
   { label: "Search", target: "search" },
 ];
 
+const NAV_MANAGE: NavItem[] = [
+  { label: "Tasks", target: "actions" },
+  { label: "People", target: "people" },
+  { label: "Files", target: "files" },
+];
+
 interface SidebarProps {
-  /** Which nav row reads as active. */
   active: "Home" | "Meetings" | "People" | "Files" | "Tasks" | "Search";
   onNavigate: (view: View) => void;
 }
@@ -36,6 +38,8 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
     onSignOut,
   } = useUser();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [workOpen, setWorkOpen] = useState(true);
+  const [manageOpen, setManageOpen] = useState(true);
   const wrapRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -54,32 +58,58 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
     };
   }, [menuOpen]);
 
-  // Close the menu, then run the action.
   const act = (fn?: () => void) => {
     setMenuOpen(false);
     fn?.();
   };
 
+  const renderSection = (
+    title: string,
+    items: NavItem[],
+    open: boolean,
+    setOpen: (v: boolean) => void,
+  ) => (
+    <div className="nav-section">
+      <button
+        type="button"
+        className="nav-section-toggle"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+      >
+        {open ? "▾" : "▸"} {title}
+      </button>
+      {open && (
+        <div className="nav-section-items">
+          {items.map((item) => {
+            const isActive = item.label === active;
+            return (
+              <button
+                key={item.label}
+                className={`nav-item ${isActive ? "nav-item--active" : ""}`}
+                onClick={() => onNavigate(item.target)}
+              >
+                <span className="nav-bullet" />
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="sidebar">
-      <button className="brand" onClick={() => onNavigate("landing")} aria-label="Candor — go to landing">
+      <button className="brand" onClick={() => onNavigate("landing")} aria-label="Candor v2">
         <ScalesLogo size="sm" />
-        <span className="brand-name">Candor</span>
+        <span className="brand-name">
+          Candor
+          <span className="brand-v2-badge">v2</span>
+        </span>
       </button>
 
-      {NAV.map((item) => {
-        const isActive = item.label === active;
-        return (
-          <button
-            key={item.label}
-            className={`nav-item ${isActive ? "nav-item--active" : ""}`}
-            onClick={() => onNavigate(item.target)}
-          >
-            <span className="nav-bullet" />
-            {item.label}
-          </button>
-        );
-      })}
+      {renderSection("Work", NAV_WORK, workOpen, setWorkOpen)}
+      {renderSection("Manage", NAV_MANAGE, manageOpen, setManageOpen)}
 
       <div className="sidebar-spacer" />
 
@@ -96,7 +126,7 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
             </button>
 
             <div className="account-sep" />
-            <div className="account-label">CALENDARS</div>
+            <div className="account-label">Calendars</div>
 
             {calendar?.google && (
               <div className="account-cal">
@@ -125,7 +155,7 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
                 <span className="account-cal-name">iCloud</span>
                 <button
                   className="account-cal-disc"
-                  onClick={() => act(() => onDisconnect?.("apple"))}
+                  onClick={() => act(() => onDisconnect?.("microsoft"))}
                 >
                   Disconnect
                 </button>

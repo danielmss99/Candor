@@ -9,6 +9,12 @@ import {
 import type { ContextMenuState, MeetingTarget } from "../meetingEdit";
 import { ContextMenu } from "./ContextMenu";
 import { EditMeetingModal } from "./EditMeetingModal";
+import {
+  loadFolders,
+  loadMeetingFolders,
+  setMeetingFolder,
+  type MeetingFolder,
+} from "../v2/metadata";
 
 interface MeetingMenuHostProps {
   menu: ContextMenuState | null;
@@ -17,7 +23,6 @@ interface MeetingMenuHostProps {
   onRefreshSaved: () => void;
   onOpenSaved: (id: string) => void;
   onRecord: () => void;
-  /** Open the edit modal for a meeting (e.g. from Recap rename button). */
   pendingEdit?: MeetingTarget | null;
   onPendingEditHandled?: () => void;
   onSavedMeetingUpdated?: (id: string) => void;
@@ -36,13 +41,9 @@ export function MeetingMenuHost({
 }: MeetingMenuHostProps) {
   const [editTarget, setEditTarget] = useState<MeetingTarget | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    if (pendingEdit) {
-      setEditTarget(pendingEdit);
-      onPendingEditHandled?.();
-    }
-  }, [pendingEdit, onPendingEditHandled]);
+  const [folders] = useState<MeetingFolder[]>(() => loadFolders());
+  const [meetingFolders, setMeetingFolders] = useState(() => loadMeetingFolders());
+  const [showFolderPicker, setShowFolderPicker] = useState(false);
 
   const items = useMemo(() => {
     if (!menu) return [];
@@ -83,6 +84,20 @@ export function MeetingMenuHost({
       ];
     }
 
+    const folderItems = folders.map((f) => ({
+      id: `folder-${f.id}`,
+      label: `Move to ${f.name}`,
+      disabled: !desktop,
+      onClick: async () => {
+        setMeetingFolder(target.meeting.id, f.id);
+        setMeetingFolders(loadMeetingFolders());
+        if (desktop) {
+          await updateSavedMeeting({ id: target.meeting.id, folderId: f.id }).catch(() => {});
+        }
+        onRefreshSaved();
+      },
+    }));
+
     return [
       {
         id: "open",
@@ -94,6 +109,24 @@ export function MeetingMenuHost({
         label: "Rename recording…",
         disabled: !desktop,
         onClick: () => setEditTarget(target),
+      },
+      {
+        id: "folder",
+        label: "Assign folder…",
+        disabled: !desktop,
+        onClick: () => setShowFolderPicker(true),
+      },
+      ...folderItems,
+      {
+        id: "folder-clear",
+        label: "Remove from folder",
+        disabled: !desktop || !meetingFolders[target.meeting.id],
+        onClick: async () => {
+          setMeetingFolder(target.meeting.id, null);
+          setMeetingFolders(loadMeetingFolders());
+          await updateSavedMeeting({ id: target.meeting.id, folderId: null }).catch(() => {});
+          onRefreshSaved();
+        },
       },
       {
         id: "delete",
@@ -116,7 +149,14 @@ export function MeetingMenuHost({
         },
       },
     ];
-  }, [menu, onOpenSaved, onRecord, onRefreshCalendar, onRefreshSaved]);
+  }, [menu, folders, meetingFolders, onOpenSaved, onRecord, onRefreshCalendar, onRefreshSaved]);
+
+  useEffect(() => {
+    if (pendingEdit) {
+      setEditTarget(pendingEdit);
+      onPendingEditHandled?.();
+    }
+  }, [pendingEdit, onPendingEditHandled]);
 
   const saveEdit = async (fields: {
     title: string;
@@ -151,8 +191,33 @@ export function MeetingMenuHost({
 
   return (
     <>
-      {menu && !busy && (
+      {menu && !busy && !showFolderPicker && (
         <ContextMenu x={menu.x} y={menu.y} items={items} onClose={onCloseMenu} />
+      )}
+      {menu && showFolderPicker && menu.target.kind === "saved" && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={folders.map((f) => ({
+            id: f.id,
+            label: f.name,
+            onClick: async () => {
+              setMeetingFolder(menu.target.kind === "saved" ? menu.target.meeting.id : "", f.id);
+              setMeetingFolders(loadMeetingFolders());
+              await updateSavedMeeting({
+                id: menu.target.kind === "saved" ? menu.target.meeting.id : "",
+                folderId: f.id,
+              }).catch(() => {});
+              onRefreshSaved();
+              setShowFolderPicker(false);
+              onCloseMenu();
+            },
+          }))}
+          onClose={() => {
+            setShowFolderPicker(false);
+            onCloseMenu();
+          }}
+        />
       )}
       {editTarget && (
         <EditMeetingModal

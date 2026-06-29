@@ -1,24 +1,33 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
 import type { CompletedAction, UserTask } from "../api/actions";
+import { sortByDue } from "../api/actions";
 import { actionItems, people, type ActionItem } from "../data/mock";
 import { useUser } from "../user";
+import {
+  dismissPendingTask,
+  loadPendingTasks,
+  type PendingTask,
+} from "../v2/metadata";
 
 type Filter = "Open" | "Done" | "All";
+type Scope = "all" | "mine" | "meeting";
 const FILTERS: Filter[] = ["Open", "Done", "All"];
 
-type OpenItem = ActionItem | UserTask;
+type OpenItem = (ActionItem | UserTask) & { meetingId?: string; timestamp?: string };
 
 interface TasksProps {
   onNavigate: (view: View) => void;
+  onJumpToMeeting?: (meetingId: string, timestamp?: string) => void;
   completedIds: Set<string>;
   completedActions: CompletedAction[];
   onCompleteAction: (item: Omit<CompletedAction, "completedAt">) => void;
   onUncompleteAction: (id: string) => void;
   userTasks: UserTask[];
   onAddTask: (params: { text: string; owner: string; dueDate?: string; meeting?: string }) => void;
+  onTaskCompleted?: () => void;
 }
 
 function ownerAvatar(owner: string) {
@@ -35,6 +44,8 @@ function toCompleted(item: OpenItem): Omit<CompletedAction, "completedAt"> {
     owner: item.owner,
     due: item.due,
     meeting: item.meeting,
+    meetingId: item.meetingId,
+    timestamp: item.timestamp,
     soon: item.soon,
   };
 }
@@ -44,36 +55,22 @@ function openItemSortKey(item: OpenItem): string {
   return item.id;
 }
 
-function emptyMessage(filter: Filter): { title: string; hint: string } {
-  if (filter === "Done") {
-    return {
-      title: "No completed tasks yet",
-      hint: "Check off an open task to track your progress here.",
-    };
-  }
-  if (filter === "Open") {
-    return {
-      title: "All caught up",
-      hint: "Add a task above or complete items from your meeting recaps.",
-    };
-  }
-  return {
-    title: "No tasks yet",
-    hint: "Create your first task using the form above.",
-  };
-}
-
 export function Tasks({
   onNavigate,
+  onJumpToMeeting,
   completedIds,
   completedActions,
   onCompleteAction,
   onUncompleteAction,
   userTasks,
   onAddTask,
+  onTaskCompleted,
 }: TasksProps) {
   const { initials } = useUser();
   const [filter, setFilter] = useState<Filter>("Open");
+  const [scope, setScope] = useState<Scope>("all");
+  const [sortByDueDate, setSortByDueDate] = useState(true);
+  const [pending, setPending] = useState<PendingTask[]>(() => loadPendingTasks());
   const [title, setTitle] = useState("");
   const [owner, setOwner] = useState(initials);
   const [dueDate, setDueDate] = useState("");
@@ -82,39 +79,44 @@ export function Tasks({
 
   const mockOpen = actionItems.filter((a) => !completedIds.has(a.id));
   const userOpen = userTasks.filter((a) => !completedIds.has(a.id));
-  const openItems: OpenItem[] = [...userOpen, ...mockOpen].sort((a, b) =>
-    openItemSortKey(b).localeCompare(openItemSortKey(a)),
-  );
+  let openItems: OpenItem[] = [...userOpen, ...mockOpen];
+
+  if (scope === "mine") {
+    openItems = openItems.filter((a) => a.owner === initials || a.owner === "You");
+  }
+
+  if (sortByDueDate) {
+    openItems = sortByDue(openItems);
+  } else {
+    openItems = [...openItems].sort((a, b) => openItemSortKey(b).localeCompare(openItemSortKey(a)));
+  }
+
   const openCount = openItems.length;
   const doneCount = completedActions.length;
 
-  const recapOnlyDone = completedActions.filter(
-    (a) => !actionItems.some((m) => m.id === a.id),
-  );
+  const recapOnlyDone = completedActions.filter((a) => !actionItems.some((m) => m.id === a.id));
 
-  const items: Array<
-    | { kind: "open"; item: OpenItem }
-    | { kind: "done"; item: CompletedAction }
-  > = (() => {
-    if (filter === "Open") {
-      return openItems.map((item) => ({ kind: "open" as const, item }));
-    }
-    if (filter === "Done") {
-      const fromMock = actionItems
-        .filter((a) => completedIds.has(a.id))
-        .map((a) => completedActions.find((c) => c.id === a.id)!)
-        .filter(Boolean);
-      const done = [...fromMock, ...recapOnlyDone];
-      done.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
-      return done.map((item) => ({ kind: "done" as const, item }));
-    }
-    const open = openItems.map((item) => ({ kind: "open" as const, item }));
-    const done = completedActions
-      .slice()
-      .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
-      .map((item) => ({ kind: "done" as const, item }));
-    return [...open, ...done];
-  })();
+  const items: Array<{ kind: "open"; item: OpenItem } | { kind: "done"; item: CompletedAction }> =
+    (() => {
+      if (filter === "Open") {
+        return openItems.map((item) => ({ kind: "open" as const, item }));
+      }
+      if (filter === "Done") {
+        const fromMock = actionItems
+          .filter((a) => completedIds.has(a.id))
+          .map((a) => completedActions.find((c) => c.id === a.id)!)
+          .filter(Boolean);
+        const done = [...fromMock, ...recapOnlyDone];
+        done.sort((a, b) => b.completedAt.localeCompare(a.completedAt));
+        return done.map((item) => ({ kind: "done" as const, item }));
+      }
+      const open = openItems.map((item) => ({ kind: "open" as const, item }));
+      const done = completedActions
+        .slice()
+        .sort((a, b) => b.completedAt.localeCompare(a.completedAt))
+        .map((item) => ({ kind: "done" as const, item }));
+      return [...open, ...done];
+    })();
 
   const filterCount = (f: Filter) => {
     if (f === "Open") return openCount;
@@ -137,12 +139,30 @@ export function Tasks({
     setShowDetails(false);
   };
 
+  const acceptPending = (task: PendingTask) => {
+    onAddTask({
+      text: task.text,
+      owner: task.owner,
+      meeting: task.meetingTitle,
+    });
+    dismissPendingTask(task.id);
+    setPending(loadPendingTasks());
+  };
+
+  const dismissPending = (id: string) => {
+    dismissPendingTask(id);
+    setPending(loadPendingTasks());
+  };
+
   const ownerOptions = [
     { value: initials, label: `Me (${initials})` },
     ...Object.entries(people).map(([key, p]) => ({ value: key, label: p.name })),
   ];
 
-  const empty = emptyMessage(filter);
+  const overdue = useMemo(
+    () => openItems.filter((a) => a.soon && a.due !== "No date"),
+    [openItems],
+  );
 
   return (
     <div className="screen screen--sidebar">
@@ -155,13 +175,32 @@ export function Tasks({
             <p className="tasks-lead">Follow-ups from meetings and your own to-dos</p>
           </div>
           <div className="spacer" />
-          {openCount > 0 && (
-            <span className="tasks-open-badge">{openCount} open</span>
+          {openCount > 0 && <span className="tasks-open-badge">{openCount} open</span>}
+          {overdue.length > 0 && (
+            <span className="due-pill due-pill--soon">{overdue.length} due soon</span>
           )}
         </div>
 
+        {pending.length > 0 && (
+          <div className="pending-tasks-card">
+            <span className="section-label section-label--calm">Suggested from recaps</span>
+            {pending.map((t) => (
+              <div key={t.id} className="pending-task-row">
+                <span className="task-text">{t.text}</span>
+                <span className="task-meeting">{t.meetingTitle}</span>
+                <button type="button" className="btn-primary btn-ghost" onClick={() => acceptPending(t)}>
+                  Accept
+                </button>
+                <button type="button" className="btn-ghost" onClick={() => dismissPending(t.id)}>
+                  Dismiss
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         <form className="tasks-add-card" onSubmit={submitTask}>
-          <span className="section-label section-label--spaced">NEW TASK</span>
+          <span className="section-label section-label--calm section-label--spaced">New task</span>
           <div className="tasks-add-main">
             <input
               className="tasks-add-input"
@@ -175,11 +214,7 @@ export function Tasks({
             </button>
           </div>
           {!showDetails ? (
-            <button
-              type="button"
-              className="tasks-details-toggle"
-              onClick={() => setShowDetails(true)}
-            >
+            <button type="button" className="tasks-details-toggle" onClick={() => setShowDetails(true)}>
               + Assignee, due date, meeting
             </button>
           ) : (
@@ -223,6 +258,31 @@ export function Tasks({
           )}
         </form>
 
+        <div className="tasks-scope-row">
+          {(
+            [
+              ["all", "All tasks"],
+              ["mine", "My tasks"],
+            ] as const
+          ).map(([id, label]) => (
+            <button
+              key={id}
+              type="button"
+              className={`chip ${scope === id ? "chip--active" : ""}`}
+              onClick={() => setScope(id)}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={`chip ${sortByDueDate ? "chip--active" : ""}`}
+            onClick={() => setSortByDueDate((v) => !v)}
+          >
+            Sort by due date
+          </button>
+        </div>
+
         <div className="tasks-filter-row">
           {FILTERS.map((f) => (
             <button
@@ -250,12 +310,30 @@ export function Tasks({
                   <button
                     type="button"
                     className="task-check"
-                    onClick={() => onCompleteAction(toCompleted(a))}
+                    onClick={() => {
+                      onCompleteAction(toCompleted(a));
+                      onTaskCompleted?.();
+                    }}
                     aria-label="Mark done"
                   />
                   <div className="task-body">
                     <span className="task-text">{a.text}</span>
-                    {a.meeting && <span className="task-meeting">{a.meeting}</span>}
+                    {a.meeting && (
+                      <button
+                        type="button"
+                        className="task-source-link"
+                        onClick={() => {
+                          if (a.meetingId && onJumpToMeeting) {
+                            onJumpToMeeting(a.meetingId, a.timestamp);
+                          } else {
+                            onNavigate("library");
+                          }
+                        }}
+                      >
+                        {a.meeting}
+                        {a.timestamp ? ` · ${a.timestamp}` : ""}
+                      </button>
+                    )}
                   </div>
                   <Avatar {...avatar} size={22} />
                   {a.due && (
@@ -277,7 +355,15 @@ export function Tasks({
                 </button>
                 <div className="task-body">
                   <span className="task-text task-text--done">{a.text}</span>
-                  {a.meeting && <span className="task-meeting">{a.meeting}</span>}
+                  {a.meeting && (
+                    <button
+                      type="button"
+                      className="task-source-link"
+                      onClick={() => a.meetingId && onJumpToMeeting?.(a.meetingId, a.timestamp)}
+                    >
+                      {a.meeting}
+                    </button>
+                  )}
                 </div>
                 <Avatar {...ownerAvatar(a.owner)} size={22} />
                 {a.due && <span className="due-pill">{a.due}</span>}
@@ -289,8 +375,8 @@ export function Tasks({
               <span className="tasks-empty-icon" aria-hidden="true">
                 ✓
               </span>
-              <p className="tasks-empty-title">{empty.title}</p>
-              <p className="tasks-empty-hint">{empty.hint}</p>
+              <p className="tasks-empty-title">All caught up</p>
+              <p className="tasks-empty-hint">Add a task above or accept suggestions from recaps.</p>
             </div>
           )}
         </div>
@@ -298,3 +384,5 @@ export function Tasks({
     </div>
   );
 }
+
+export { addPendingTasks } from "../v2/metadata";

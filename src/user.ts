@@ -32,4 +32,4 @@ export function deriveUser(name: string): { name: string; firstName: string; ini
   return { name: trimmed, firstName, initials };
 }
 
-export const NAME_KEY = "candor.userName";
+export const NAME_KEY = "candor-v2.userName";

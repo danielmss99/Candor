@@ -15,6 +15,9 @@ import {
   type SavedSearchEntry,
   type SearchScope,
 } from "../search";
+import { loadRecentSearches, pushRecentSearch } from "../v2/metadata";
+import { answerCrossMeeting } from "../v2/crossAsk";
+import { pushCrossAsk } from "../v2/metadata";
 
 interface SearchProps {
   onNavigate: (view: View) => void;
@@ -35,6 +38,10 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
   const [date, setDate] = useState<DateFilter>("Any date");
   const [scope, setScope] = useState<SearchScope>("Transcript");
   const [savedMeetings, setSavedMeetings] = useState<SavedSearchEntry[]>([]);
+  const [recent, setRecent] = useState<string[]>(() => loadRecentSearches());
+  const [crossAskQ, setCrossAskQ] = useState("");
+  const [crossAskA, setCrossAskA] = useState<string | null>(null);
+  const [crossLoading, setCrossLoading] = useState(false);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -53,6 +60,12 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
     );
   }, [meetingsRefreshKey]);
 
+  useEffect(() => {
+    if (query.trim()) {
+      setRecent(pushRecentSearch(query));
+    }
+  }, [query]);
+
   const { results, meta } = useMemo(
     () => runSearch(query, { person, date, scope }, savedMeetings),
     [query, person, date, scope, savedMeetings],
@@ -61,11 +74,23 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
   const personLabel = person === "Anyone" ? "Anyone ▾" : `${people[person].name.split(" ")[0]} ▾`;
   const dateLabel = date === "Any date" ? "Any date ▾" : `${date} ▾`;
 
+  const submitCrossAsk = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = crossAskQ.trim();
+    if (!q) return;
+    setCrossLoading(true);
+    const meetings = await loadSavedMeetings();
+    const answer = await answerCrossMeeting(q, meetings);
+    setCrossAskA(answer);
+    pushCrossAsk(q, answer);
+    setCrossLoading(false);
+  };
+
   return (
     <div className="screen screen--sidebar">
       <Sidebar active="Search" onNavigate={onNavigate} />
 
-      <div className="main">
+      <div className="main main--scroll">
         <div className="search-bar">
           <span className="search-bar-icon">⌕</span>
           <input
@@ -88,6 +113,22 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
             </button>
           )}
         </div>
+
+        {recent.length > 0 && !query && (
+          <div className="recent-searches">
+            <span className="section-label section-label--calm">Recent</span>
+            {recent.map((r) => (
+              <button
+                key={r}
+                type="button"
+                className="recent-search-chip"
+                onClick={() => onQueryChange(r)}
+              >
+                {r}
+              </button>
+            ))}
+          </div>
+        )}
 
         <div className="search-meta-row">
           <span className="search-count">{meta}</span>
@@ -132,6 +173,9 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
               <div className="result-body">
                 <Avatar who={r.speaker} size={24} />
                 <div className="result-quote">
+                  {r.contextBefore && (
+                    <span className="result-context">…{r.contextBefore} </span>
+                  )}
                   {r.segments.map((s, j) =>
                     s.mark ? (
                       <mark key={j} className="mark">
@@ -141,13 +185,30 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
                       <span key={j}>{s.t}</span>
                     ),
                   )}
+                  {r.contextAfter && <span className="result-context"> {r.contextAfter}…</span>}
                 </div>
               </div>
             </div>
           ))}
           {query.trim() && results.length === 0 && (
-            <div className="search-empty">No matches for “{query.trim()}”.</div>
+            <div className="search-empty">No matches for "{query.trim()}".</div>
           )}
+        </div>
+
+        <div className="cross-ask-card">
+          <span className="section-label section-label--calm">Ask across meetings</span>
+          <form onSubmit={submitCrossAsk}>
+            <input
+              className="ask-input-field"
+              style={{ width: "100%", marginTop: 8 }}
+              placeholder="What did we decide about pricing across Q2 meetings?"
+              value={crossAskQ}
+              onChange={(e) => setCrossAskQ(e.target.value)}
+              aria-label="Cross-meeting question"
+            />
+          </form>
+          {crossLoading && <div className="ask-answer">Searching…</div>}
+          {crossAskA && <div className="cross-ask-answer">{crossAskA}</div>}
         </div>
       </div>
     </div>
