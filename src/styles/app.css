@@ -1010,6 +1010,19 @@ button.chip {
   border-bottom: 1px solid var(--action-border);
   padding: 8px 28px;
 }
+.recap-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  font: 500 13px var(--font-sans);
+  padding: 10px 28px;
+  border-bottom: 1px solid var(--action-border);
+}
+.recap-banner--warn {
+  color: var(--text);
+  background: var(--action-bg);
+}
 .highlight-quote--jump {
   box-shadow: 0 0 0 2px var(--coral);
   border-radius: 4px;
@@ -1349,6 +1362,13 @@ button.chip {
 }
 .transcript-state--error {
   color: var(--coral-dark);
+}
+.transcript-state--warn {
+  color: var(--text);
+  background: var(--action-bg);
+  border: 1px solid var(--action-border);
+  border-radius: 8px;
+  padding: 12px 14px;
 }
 .listening-dot {
   width: 8px;

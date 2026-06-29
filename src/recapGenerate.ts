@@ -1,6 +1,6 @@
 import type { TranscriptSegment } from "./App";
-import type { RecapData } from "./data/mock";
-import type { SummaryTemplateId } from "./v2/summaryTemplates";
+import type { RecapAction, RecapData, SummaryBullet, SummarySection } from "./data/mock";
+import { SUMMARY_TEMPLATES, type SummaryTemplateId } from "./v2/summaryTemplates";
 
 export interface RecordingContext {
   transcript: TranscriptSegment[];
@@ -24,6 +24,16 @@ function formatDate(d: Date): string {
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
+function formatDateTime(d: Date): string {
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function formatDuration(seconds: number): string {
   const m = Math.max(1, Math.round(seconds / 60));
   return `${m} min`;
@@ -37,23 +47,6 @@ function dueDate(daysFromNow: number): string {
 
 function sentences(text: string): string[] {
   return text.match(/[^.!?]+[.!?]+/g)?.map((s) => s.trim()) ?? (text.trim() ? [text.trim()] : []);
-}
-
-function titleFromRecording(ctx: RecordingContext): string {
-  const first = ctx.transcript[0]?.text?.trim();
-  if (first) {
-    const sentence = sentences(first)[0] ?? first;
-    const words = sentence.split(/\s+/).slice(0, 6).join(" ");
-    const cleaned = words.replace(/[.!?,;:]+$/, "").trim();
-    if (cleaned.length >= 12) {
-      return cleaned.length > 52 ? `${cleaned.slice(0, 49)}…` : cleaned;
-    }
-  }
-  const noteLine = ctx.sessionNotes.split("\n").map((l) => l.trim()).find(Boolean);
-  if (noteLine) {
-    return noteLine.length > 52 ? `${noteLine.slice(0, 49)}…` : noteLine;
-  }
-  return `Recording · ${formatDate(ctx.recordedAt)}`;
 }
 
 function topTerms(text: string, count: number): string[] {
@@ -76,6 +69,44 @@ function boldTopTerms(text: string, terms: string[]): string {
   return out;
 }
 
+function capitalize(s: string): string {
+  const t = s.trim();
+  return t ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
+function titleFromRecording(ctx: RecordingContext): string {
+  if (ctx.titleOverride?.trim()) {
+    return `Meeting @ ${formatDateTime(ctx.recordedAt)}`;
+  }
+  const first = ctx.transcript[0]?.text?.trim();
+  if (first) {
+    const sentence = sentences(first)[0] ?? first;
+    const words = sentence.split(/\s+/).slice(0, 6).join(" ");
+    const cleaned = words.replace(/[.!?,;:]+$/, "").trim();
+    if (cleaned.length >= 12) {
+      return `Meeting @ ${formatDateTime(ctx.recordedAt)}`;
+    }
+  }
+  return `Meeting @ ${formatDateTime(ctx.recordedAt)}`;
+}
+
+function subtitleFromRecording(ctx: RecordingContext): string {
+  if (ctx.titleOverride?.trim()) return ctx.titleOverride.trim();
+  const first = ctx.transcript[0]?.text?.trim();
+  if (first) {
+    const sentence = sentences(first)[0] ?? first;
+    const cleaned = sentence.replace(/[.!?,;:]+$/, "").trim();
+    if (cleaned.length >= 12) {
+      return cleaned.length > 90 ? `${cleaned.slice(0, 87)}…` : cleaned;
+    }
+  }
+  const noteLine = ctx.sessionNotes.split("\n").map((l) => l.trim()).find(Boolean);
+  if (noteLine) {
+    return noteLine.length > 90 ? `${noteLine.slice(0, 87)}…` : noteLine;
+  }
+  return "Meeting notes";
+}
+
 function buildSummary(ctx: RecordingContext): string {
   const full = ctx.transcript.map((s) => s.text).join(" ").trim();
   const notes = ctx.sessionNotes.trim();
@@ -85,33 +116,22 @@ function buildSummary(ctx: RecordingContext): string {
 
   switch (template) {
     case "standup":
-      base = `**Standup recap.** ${base} Blockers and dependencies are called out in your notes and transcript.`;
+      base = `**Standup recap.** ${base}`;
       break;
     case "one_on_one":
-      base = `**1:1 notes.** ${base} Follow-ups are listed in action items.`;
+      base = `**1:1 notes.** ${base}`;
       break;
     case "sales":
-      base = `**Sales call.** ${base} Review budget, authority, need, and timeline in the transcript.`;
+      base = `**Sales call.** ${base}`;
       break;
     case "retro":
-      base = `**Retro.** ${base} Capture what to keep doing and what to change next sprint.`;
+      base = `**Retro.** ${base}`;
       break;
     case "client_call":
-      base = `**Client call.** ${base} Agreements and deliverables are summarized below.`;
+      base = `**Client call.** ${base}`;
       break;
     default:
       break;
-  }
-
-  if (notes) {
-    const scratch = notes
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .filter((l) => !/^✓ Decision:|^→ Action:|^\? Question:/.test(l));
-    if (scratch.length > 0) {
-      base += ` Your scratchpad: ${scratch.slice(0, 3).join("; ").slice(0, 200)}${scratch.join("").length > 200 ? "…" : ""}.`;
-    }
   }
 
   return base;
@@ -149,6 +169,97 @@ function buildBaseSummary(full: string, notes: string): string {
   return boldTopTerms(summary, topTerms(full, 5));
 }
 
+function segmentToBullet(seg: TranscriptSegment, terms: string[]): SummaryBullet {
+  const text = capitalize(seg.text.trim());
+  const normalized = text.endsWith(".") ? text : `${text}.`;
+  return { text: boldTopTerms(normalized, terms) };
+}
+
+function splitIntoBuckets(segs: TranscriptSegment[], count: number): TranscriptSegment[][] {
+  if (segs.length === 0) return Array.from({ length: count }, () => []);
+  const size = Math.ceil(segs.length / count);
+  return Array.from({ length: count }, (_, i) => segs.slice(i * size, (i + 1) * size));
+}
+
+function segmentsToBullets(segs: TranscriptSegment[], max = 4): SummaryBullet[] {
+  if (segs.length === 0) return [];
+  const fullText = segs.map((s) => s.text).join(" ");
+  const terms = topTerms(fullText, 5);
+  const picks: TranscriptSegment[] = [];
+  if (segs.length <= max) {
+    picks.push(...segs);
+  } else {
+    const step = Math.floor(segs.length / max);
+    for (let i = 0; i < max; i++) {
+      picks.push(segs[Math.min(i * step, segs.length - 1)]);
+    }
+  }
+  return picks.map((s) => segmentToBullet(s, terms));
+}
+
+function buildSections(ctx: RecordingContext): SummarySection[] {
+  const template = ctx.template ?? "general";
+  const templateDef = SUMMARY_TEMPLATES.find((t) => t.id === template) ?? SUMMARY_TEMPLATES[0];
+  const sections: SummarySection[] = [];
+  const full = ctx.transcript.map((s) => s.text).join(" ").trim();
+  const terms = topTerms(full, 6);
+
+  // Overview from opening + middle content
+  const overviewBullets: SummaryBullet[] = [];
+  if (full) {
+    const sents = sentences(full);
+    if (sents[0]) overviewBullets.push({ text: boldTopTerms(capitalize(sents[0]), terms) });
+    if (sents.length > 2) {
+      overviewBullets.push({ text: boldTopTerms(capitalize(sents[Math.floor(sents.length / 2)]), terms) });
+    }
+  } else if (ctx.sessionNotes.trim()) {
+    ctx.sessionNotes
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .forEach((line) => {
+        overviewBullets.push({ text: boldTopTerms(capitalize(line), terms) });
+      });
+  }
+  if (overviewBullets.length > 0) {
+    sections.push({ heading: "Overview", bullets: overviewBullets });
+  }
+
+  // Template-driven content sections
+  const buckets = splitIntoBuckets(ctx.transcript, templateDef.sections.length);
+  templateDef.sections.forEach((heading, i) => {
+    const bullets = segmentsToBullets(buckets[i] ?? [], 3);
+    if (bullets.length > 0) {
+      sections.push({ heading, bullets });
+    }
+  });
+
+  const decisions = extractDecisions(ctx);
+  if (decisions.length > 0) {
+    sections.push({
+      heading: "Key decisions",
+      bullets: decisions.map((d) => ({ text: d })),
+    });
+  }
+
+  // Questions / open items from notes
+  const questions = ctx.sessionNotes
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith("? Question:") || /\?$/.test(l));
+  if (questions.length > 0) {
+    sections.push({
+      heading: "Open questions",
+      bullets: questions.map((q) => ({
+        text: q.replace(/^\? Question:\s*/, ""),
+      })),
+    });
+  }
+
+  return sections;
+}
+
 function speakerCount(ctx: RecordingContext): number {
   const speakers = new Set(
     ctx.transcript.map((s) => s.speaker).filter((s): s is string => Boolean(s)),
@@ -164,7 +275,7 @@ function extractDecisions(ctx: RecordingContext): string[] {
   for (const seg of ctx.transcript) {
     if (!pattern.test(seg.text)) continue;
     const s = seg.text.trim();
-    const normalized = s.charAt(0).toUpperCase() + s.slice(1);
+    const normalized = capitalize(s);
     if (!found.some((d) => d.toLowerCase() === normalized.toLowerCase())) {
       found.push(normalized.endsWith(".") ? normalized : `${normalized}.`);
     }
@@ -172,8 +283,9 @@ function extractDecisions(ctx: RecordingContext): string[] {
 
   for (const line of ctx.sessionNotes.split("\n")) {
     const t = line.replace(/^[-*•]\s*/, "").trim();
-    if (t && /\b(decide|decision|agreed|approved)\b/i.test(t)) {
-      const normalized = t.charAt(0).toUpperCase() + t.slice(1);
+    if (t && (/\b(decide|decision|agreed|approved)\b/i.test(t) || t.startsWith("✓ Decision:"))) {
+      const cleaned = t.replace(/^✓ Decision:\s*/, "");
+      const normalized = capitalize(cleaned);
       if (!found.some((d) => d.toLowerCase() === normalized.toLowerCase())) {
         found.push(normalized.endsWith(".") ? normalized : `${normalized}.`);
       }
@@ -183,33 +295,34 @@ function extractDecisions(ctx: RecordingContext): string[] {
   return found.slice(0, 5);
 }
 
-function extractActions(ctx: RecordingContext): RecapData["actions"] {
+function extractActions(ctx: RecordingContext): RecapAction[] {
   const pattern =
     /\b(need to|needs to|should|must|have to|action item|follow up|follow-up|todo|task is|make sure|don't forget)\b/i;
-  const found: RecapData["actions"] = [];
+  const found: RecapAction[] = [];
   const seen = new Set<string>();
 
-  const add = (text: string, soon = false) => {
-    const t = text.trim().replace(/^[-*•]\s*/, "");
+  const add = (text: string, sourceSegmentIndex?: number, soon = false) => {
+    const t = text.trim().replace(/^[-*•→]\s*/, "").replace(/^→ Action:\s*/, "");
     if (t.length < 8 || seen.has(t.toLowerCase())) return;
     seen.add(t.toLowerCase());
     found.push({
-      text: t.charAt(0).toUpperCase() + t.slice(1),
+      text: capitalize(t),
       owner: ctx.userInitials,
       due: dueDate(soon ? 2 : 5),
       soon,
+      sourceSegmentIndex,
     });
   };
 
-  for (const seg of ctx.transcript) {
-    if (pattern.test(seg.text)) add(seg.text, /\b(today|tomorrow|asap|urgent|this week)\b/i.test(seg.text));
-  }
+  ctx.transcript.forEach((seg, i) => {
+    if (pattern.test(seg.text)) add(seg.text, i, /\b(today|tomorrow|asap|urgent|this week)\b/i.test(seg.text));
+  });
 
   for (const line of ctx.sessionNotes.split("\n")) {
     const t = line.trim();
     if (!t) continue;
-    if (/^[-*•]/.test(t) || pattern.test(t)) {
-      add(t.replace(/^[-*•]\s*/, ""), /\b(today|tomorrow|asap|urgent)\b/i.test(t));
+    if (t.startsWith("→ Action:") || /^[-*•]/.test(t) || pattern.test(t)) {
+      add(t.replace(/^→ Action:\s*/, ""), undefined, /\b(today|tomorrow|asap|urgent)\b/i.test(t));
     }
   }
 
@@ -259,21 +372,53 @@ function pickHighlight(ctx: RecordingContext): RecapData["highlight"] {
   };
 }
 
+/** Build a placeholder recap while transcription is in progress. */
+export function placeholderRecap(ctx: Partial<RecordingContext> & { titleOverride?: string }): RecapData {
+  const recordedAt = ctx.recordedAt ?? new Date();
+  const title = ctx.titleOverride?.trim()
+    ? `Meeting @ ${formatDateTime(recordedAt)}`
+    : `Meeting @ ${formatDateTime(recordedAt)}`;
+  return {
+    title,
+    subtitle: ctx.titleOverride?.trim() ?? "Generating summary…",
+    meta: `${formatDate(recordedAt)} · ${formatDuration(ctx.durationSeconds ?? 0)}`,
+    summary: "",
+    sections: [],
+    decisions: [],
+    actions: [],
+    chapters: [],
+    suggestions: [],
+    highlight: { quote: "", by: "" },
+  };
+}
+
 /** Build a meeting recap tailored to a specific recording. */
 export function generateRecapFromRecording(ctx: RecordingContext): RecapData {
   const dateLabel = formatDate(ctx.recordedAt);
   const duration = formatDuration(ctx.durationSeconds);
 
-  const title = ctx.titleOverride?.trim() || titleFromRecording(ctx);
-
   return {
-    title,
+    title: titleFromRecording(ctx),
+    subtitle: subtitleFromRecording(ctx),
     meta: `${dateLabel} · ${duration} · ${speakerCount(ctx)} speaker${speakerCount(ctx) === 1 ? "" : "s"}`,
     summary: buildSummary(ctx),
+    sections: buildSections(ctx),
     decisions: extractDecisions(ctx),
     actions: extractActions(ctx),
     chapters: buildChapters(ctx),
     suggestions: ["Summarize for Slack", "Draft follow-up email"],
     highlight: pickHighlight(ctx),
   };
+}
+
+/** Map segment indices cited by actions to 1-based citation numbers. */
+export function buildCitationMap(actions: RecapAction[]): Map<number, number> {
+  const map = new Map<number, number>();
+  let n = 1;
+  for (const a of actions) {
+    if (a.sourceSegmentIndex != null && !map.has(a.sourceSegmentIndex)) {
+      map.set(a.sourceSegmentIndex, n++);
+    }
+  }
+  return map;
 }

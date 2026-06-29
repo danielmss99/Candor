@@ -29,6 +29,8 @@ export interface MeetingDetail {
   audioPath?: string | null;
   folderId?: string | null;
   calendarEventId?: string | null;
+  status?: string | null;
+  transcriptionError?: string | null;
 }
 
 export interface StorageFolder {
@@ -41,6 +43,8 @@ export interface StorageFolder {
 export interface StopRecordingResult {
   segments: TranscriptSegment[];
   meetingId: string;
+  status: string;
+  transcriptionError?: string | null;
 }
 
 const PEOPLE_KEY = "candor-v2.people";
@@ -154,6 +158,10 @@ export async function pickAndImportAudio(): Promise<StopRecordingResult | null> 
   const path = await invoke<string | null>("pick_audio_file");
   if (!path) return null;
   return invoke<StopRecordingResult>("import_audio_file", { path, title: null });
+}
+
+export async function retryTranscription(meetingId: string): Promise<StopRecordingResult> {
+  return invoke<StopRecordingResult>("retry_transcription", { meetingId });
 }
 
 export async function stopRecordingWithNotes(

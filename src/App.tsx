@@ -30,7 +30,7 @@ import {
 } from "./api/actions";
 import type { RecapData } from "./data/mock";
 import { actionItems } from "./data/mock";
-import { generateRecapFromRecording } from "./recapGenerate";
+import { generateRecapFromRecording, placeholderRecap } from "./recapGenerate";
 import { MeetingMenuHost } from "./components/MeetingMenuHost";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
@@ -95,11 +95,11 @@ function App() {
   const [count, setCount] = useState(3);
   const [elapsed, setElapsed] = useState(0);
   const [downloadPct, setDownloadPct] = useState<number | null>(null);
+  const [transcriptionPct, setTranscriptionPct] = useState<number | null>(null);
   const [transcript, setTranscript] = useState<TranscriptSegment[] | null>(null);
   const [sessionNotes, setSessionNotes] = useState("");
   const [activeRecap, setActiveRecap] = useState<RecapData | null>(null);
   const [meetingsRefreshKey, setMeetingsRefreshKey] = useState(0);
-  const [lastSavedMeetingId, setLastSavedMeetingId] = useState<string | null>(null);
   const [completedActions, setCompletedActions] = useState<CompletedAction[]>([]);
   const [userTasks, setUserTasks] = useState<UserTask[]>([]);
   const [meetingMenu, setMeetingMenu] = useState<ContextMenuState | null>(null);
@@ -112,6 +112,10 @@ function App() {
   const [onboarding, setOnboarding] = useState<OnboardingState>(() => loadOnboarding());
   const [liveMoments, setLiveMoments] = useState<MeetingMoments>({ bookmarks: [], highlights: [] });
   const [recapTranscript, setRecapTranscript] = useState<TranscriptSegment[] | null>(null);
+  const [recapSessionNotes, setRecapSessionNotes] = useState("");
+  const [recapProcessing, setRecapProcessing] = useState(false);
+  const [recapProcessingMessage, setRecapProcessingMessage] = useState("Transcribing your recording…");
+  const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
   const [recordingEvent, setRecordingEvent] = useState<CalendarEvent | null>(null);
   const [showConsent, setShowConsent] = useState(false);
   const [pendingRecord, setPendingRecord] = useState<(() => void) | null>(null);
@@ -392,6 +396,15 @@ function App() {
       const { downloaded, total } = e.payload;
       if (total > 0) setDownloadPct(Math.round((downloaded / total) * 100));
     }).then((u) => unlisteners.push(u));
+    listen<{ chunk: number; totalChunks: number; percent: number }>(
+      "transcription-progress",
+      (e) => {
+        setTranscriptionPct(e.payload.percent);
+        if (e.payload.percent > 0) {
+          setRecapProcessingMessage(`Transcribing your recording… ${e.payload.percent}%`);
+        }
+      },
+    ).then((u) => unlisteners.push(u));
     listen<string>("recording-error", (e) => {
       setError(String(e.payload));
       stopTimer();
@@ -477,8 +490,30 @@ function App() {
       segments: TranscriptSegment[];
       notes: string;
       duration: number;
+      processing?: boolean;
+      transcriptionError?: string | null;
     }) => {
-      const { meetingId, segments, notes, duration } = params;
+      const { meetingId, segments, notes, duration, processing, transcriptionError: txErr } = params;
+      setRecapProcessing(processing ?? false);
+      setTranscriptionError(txErr ?? null);
+      setRecapSessionNotes(notes);
+
+      if (processing) {
+        setActiveRecap(
+          placeholderRecap({
+            recordedAt: new Date(),
+            durationSeconds: duration,
+            titleOverride: recordingEvent?.title,
+          }),
+        );
+        setRecapTranscript([]);
+        setSelectedMeetingId(meetingId ?? `recording-${Date.now()}`);
+        setRecapRenameTarget(null);
+        setJumpTimestamp(null);
+        setView("recap");
+        return;
+      }
+
       if (meetingId && isTauri()) {
         const detail = await loadMeetingDetail(meetingId);
         if (detail) {
@@ -505,21 +540,6 @@ function App() {
     },
     [openSavedRecap, recapCtx, recordingEvent?.title],
   );
-
-  const wrapUpRecording = useCallback(() => {
-    void navigateToRecapAfterRecording({
-      meetingId: lastSavedMeetingId,
-      segments: transcript ?? [],
-      notes: sessionNotes,
-      duration: elapsed,
-    });
-  }, [
-    navigateToRecapAfterRecording,
-    lastSavedMeetingId,
-    transcript,
-    sessionNotes,
-    elapsed,
-  ]);
 
   // Start: ensure model → countdown → begin mic capture.
   const runRecording = useCallback(async () => {
@@ -597,41 +617,58 @@ function App() {
     [runRecording],
   );
 
-  // Stop: end capture, transcribe, save, and open the recap automatically.
+  // Stop: navigate to recap immediately, then transcribe + save in background.
   const stopRecording = useCallback(async () => {
     stopTimer();
-    setRec("transcribing");
+    setTranscriptionPct(0);
+    setError(null);
     const duration = elapsed;
     const notes = sessionNotes;
+    const eventTitle = recordingEvent?.title;
+
+    await navigateToRecapAfterRecording({
+      meetingId: null,
+      segments: [],
+      notes,
+      duration,
+      processing: true,
+    });
+    setRec("transcribing");
+
     try {
       const result = await stopRecordingWithNotes(notes.trim() || null, duration, {
-        titleOverride: recordingEvent?.title,
+        titleOverride: eventTitle,
         calendarEventId: recordingEvent?.id,
       });
       setTranscript(result.segments);
-      setLastSavedMeetingId(result.meetingId);
+      const txErr =
+        result.status === "transcription_failed"
+          ? result.transcriptionError ?? "Transcription failed"
+          : null;
       if (result.meetingId) {
         saveMoments(result.meetingId, liveMoments);
-        const recap = generateRecapFromRecording(
-          recapCtx({
-            transcript: result.segments,
-            sessionNotes: notes,
-            durationSeconds: duration,
-            recordedAt: new Date(),
-            titleOverride: recordingEvent?.title,
-          }),
-        );
-        addPendingTasks(
-          recap.actions.map((a, i) => ({
-            id: resolveActionId(result.meetingId, i, a.text, recap.title),
-            meetingId: result.meetingId,
-            meetingTitle: recap.title,
-            text: a.text,
-            owner: a.owner,
-            due: a.due,
-            soon: a.soon,
-          })),
-        );
+        if (result.status === "complete") {
+          const recap = generateRecapFromRecording(
+            recapCtx({
+              transcript: result.segments,
+              sessionNotes: notes,
+              durationSeconds: duration,
+              recordedAt: new Date(),
+              titleOverride: eventTitle,
+            }),
+          );
+          addPendingTasks(
+            recap.actions.map((a, i) => ({
+              id: resolveActionId(result.meetingId, i, a.text, recap.title),
+              meetingId: result.meetingId,
+              meetingTitle: recap.title,
+              text: a.text,
+              owner: a.owner,
+              due: a.due,
+              soon: a.soon,
+            })),
+          );
+        }
       }
       patchOnboarding({ firstRecording: true });
       setOnboarding(loadOnboarding());
@@ -641,16 +678,19 @@ function App() {
         segments: result.segments,
         notes,
         duration,
+        processing: false,
+        transcriptionError: txErr,
       });
     } catch (e) {
       setError(String(e));
-      setTranscript([]);
-      setView("live");
+      setRecapProcessing(false);
+      setTranscriptionError(String(e));
     } finally {
+      setTranscriptionPct(null);
       setRec("idle");
       setRecordingEvent(null);
     }
-  }, [stopTimer, sessionNotes, elapsed, navigateToRecapAfterRecording, liveMoments, userName, recordingEvent, recapCtx]);
+  }, [stopTimer, sessionNotes, elapsed, navigateToRecapAfterRecording, liveMoments, recordingEvent, recapCtx]);
 
   // Cancel the pre-roll (preparing/countdown) and unblock the UI.
   const cancelPreroll = useCallback(() => {
@@ -778,14 +818,11 @@ function App() {
       {view === "live" && (
         <Live
           timeLabel={timeLabel}
-          transcript={transcript}
           sessionNotes={sessionNotes}
           onSessionNotesChange={setSessionNotes}
           recording={rec === "recording"}
-          transcribing={rec === "transcribing"}
           error={error}
           onNavigate={navigate}
-          onWrapUp={wrapUpRecording}
           moments={liveMoments}
           onMomentsChange={setLiveMoments}
         />
@@ -795,6 +832,7 @@ function App() {
           meetingId={selectedMeetingId}
           recapData={activeRecap}
           transcript={recapTranscript ?? transcript ?? undefined}
+          sessionNotes={recapSessionNotes || sessionNotes}
           jumpTimestamp={jumpTimestamp}
           onNavigate={navigate}
           completedIds={completedIds}
@@ -805,6 +843,9 @@ function App() {
           }}
           canRename={recapRenameTarget !== null}
           onRename={() => recapRenameTarget && setPendingMeetingEdit(recapRenameTarget)}
+          processing={recapProcessing}
+          processingMessage={recapProcessingMessage}
+          transcriptionError={transcriptionError}
         />
       )}
         </div>
@@ -816,12 +857,13 @@ function App() {
           count={count}
           timeLabel={timeLabel}
           downloadPct={downloadPct}
+          transcriptionPct={transcriptionPct}
           onStop={stopRecording}
           onCancel={cancelPreroll}
         />
       )}
 
-      {error && rec === "idle" && view !== "live" && (
+      {error && rec === "idle" && (
         <div className="rec-error-toast" role="alert">
           ⚠ {error}
           <button type="button" className="rec-error-dismiss" onClick={() => setError(null)}>

@@ -1,3 +1,4 @@
+use std::io::{self, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -8,8 +9,6 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::Segment;
-
-const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 /// TODO: Integrate RNNoise for real-time noise suppression before Whisper.
 /// Blocked: needs a maintained Rust RNNoise binding tested on Windows/macOS.
@@ -49,6 +48,102 @@ pub fn save_wav(path: &Path, samples: &[f32], sample_rate: u32) -> Result<(), St
   }
   writer.finalize().map_err(|e| e.to_string())?;
   Ok(())
+}
+
+/// Flush underlying file every ~1s of 16-bit mono audio at the given sample rate.
+struct FlushingWriter {
+  inner: io::BufWriter<std::fs::File>,
+  bytes_since_flush: usize,
+  flush_every: usize,
+}
+
+impl FlushingWriter {
+  fn new(path: &Path, sample_rate: u32) -> Result<Self, String> {
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let flush_every = (sample_rate as usize * 2).max(8192);
+    Ok(Self {
+      inner: io::BufWriter::new(file),
+      bytes_since_flush: 0,
+      flush_every,
+    })
+  }
+}
+
+impl Seek for FlushingWriter {
+  fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+    self.inner.seek(pos)
+  }
+}
+
+impl Write for FlushingWriter {
+  fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+    let n = self.inner.write(buf)?;
+    self.bytes_since_flush += n;
+    if self.bytes_since_flush >= self.flush_every {
+      self.inner.flush()?;
+      let _ = self.inner.get_ref().sync_all();
+      self.bytes_since_flush = 0;
+    }
+    Ok(n)
+  }
+
+  fn flush(&mut self) -> io::Result<()> {
+    self.inner.flush()
+  }
+}
+
+/// Incrementally writes PCM to a WAV file while recording (flushed to disk periodically).
+pub struct StreamingWavWriter {
+  writer: WavWriter<FlushingWriter>,
+  channels: u16,
+  samples_written: u64,
+}
+
+impl StreamingWavWriter {
+  pub fn create(path: &Path, sample_rate: u32, channels: u16) -> Result<Self, String> {
+    let ch = channels.max(1);
+    let spec = WavSpec {
+      channels: 1,
+      sample_rate,
+      bits_per_sample: 16,
+      sample_format: hound::SampleFormat::Int,
+    };
+    let flushing = FlushingWriter::new(path, sample_rate)?;
+    let writer = WavWriter::new(flushing, spec).map_err(|e| e.to_string())?;
+    Ok(Self {
+      writer,
+      channels: ch,
+      samples_written: 0,
+    })
+  }
+
+  pub fn write_f32_interleaved(&mut self, samples: &[f32]) -> Result<(), String> {
+    let ch = self.channels as usize;
+    if ch == 1 {
+      for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        self.writer.write_sample(v).map_err(|e| e.to_string())?;
+        self.samples_written += 1;
+      }
+    } else {
+      for frame in samples.chunks(ch) {
+        let mono = frame.iter().sum::<f32>() / frame.len() as f32;
+        let v = (mono.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        self.writer.write_sample(v).map_err(|e| e.to_string())?;
+        self.samples_written += 1;
+      }
+    }
+    Ok(())
+  }
+
+  pub fn finalize(mut self) -> Result<u64, String> {
+    self.writer.flush().map_err(|e| e.to_string())?;
+    self.writer.finalize().map_err(|e| e.to_string())?;
+    Ok(self.samples_written)
+  }
 }
 
 pub fn export_clip(
@@ -264,8 +359,11 @@ pub fn start_loopback_capture(
   let (ready_tx, ready_rx) = mpsc::channel();
 
   std::thread::spawn(move || {
-    let err_fn = move |e| {
-      let _ = app_emit.emit("recording-error", format!("System audio: {e}"));
+    let err_fn = {
+      let app = app_emit.clone();
+      move |e| {
+        let _ = app.emit("recording-error", format!("System audio: {e}"));
+      }
     };
     let rec = recording.clone();
     let buf = samples.clone();

@@ -75,30 +75,75 @@ export const liveInsights = {
 };
 
 // ----- Recap -----
+export interface SummaryBullet {
+  text: string;
+  subBullets?: string[];
+}
+
+export interface SummarySection {
+  heading: string;
+  bullets: SummaryBullet[];
+}
+
+export interface RecapAction {
+  text: string;
+  owner: string;
+  due: string;
+  soon: boolean;
+  /** Transcript segment index for citation badge (0-based). */
+  sourceSegmentIndex?: number;
+}
+
 export interface RecapData {
   title: string;
+  /** Descriptive subtitle shown under the title (Notion-style). */
+  subtitle?: string;
   meta: string;
   summary: string;
+  sections?: SummarySection[];
   decisions: string[];
-  actions: { text: string; owner: string; due: string; soon: boolean }[];
+  actions: RecapAction[];
   chapters: { label: string; time: string }[];
   suggestions: string[];
   highlight: { quote: string; by: string };
 }
 
 export const recap: RecapData = {
-  title: "Q3 Roadmap Sync",
+  title: "Meeting @ Jun 24, 2026 2:00 PM",
+  subtitle: "Q3 roadmap sequencing — export vs mobile redesign",
   meta: "Jun 24, 2026 · 31 min · 5 people",
   summary:
     "The team debated sequencing the **export feature** against the **mobile redesign** for Q3. Support data shows export is the top customer request, but the group agreed mobile keeps its priority slot. Export will likely slip ~2 weeks, pending an impact review on signed enterprise deals.",
+  sections: [
+    {
+      heading: "Scope clarifications",
+      bullets: [
+        { text: "Support data shows **export** is the top customer request this quarter." },
+        { text: "**Mobile redesign** retains its Q3 priority slot per prior commitment." },
+      ],
+    },
+    {
+      heading: "Key decisions",
+      bullets: [
+        { text: "Mobile redesign retains its Q3 priority slot." },
+        { text: "Export ships after mobile, contingent on enterprise impact review." },
+      ],
+    },
+    {
+      heading: "Open questions",
+      bullets: [
+        { text: "Impact of a **2-week export delay** on signed enterprise deals needs review." },
+      ],
+    },
+  ],
   decisions: [
     "Mobile redesign retains its Q3 priority slot.",
     "Export ships after mobile, contingent on enterprise impact review.",
   ],
   actions: [
-    { text: "Scope the 2-week export delay impact", owner: "DP", due: "Jun 27", soon: true },
-    { text: "Pull top support requests for Q3", owner: "SL", due: "Jul 1", soon: false },
-    { text: "Confirm enterprise commitments with sales", owner: "MC", due: "Jul 3", soon: false },
+    { text: "Scope the 2-week export delay impact", owner: "DP", due: "Jun 27", soon: true, sourceSegmentIndex: 12 },
+    { text: "Pull top support requests for Q3", owner: "SL", due: "Jul 1", soon: false, sourceSegmentIndex: 8 },
+    { text: "Confirm enterprise commitments with sales", owner: "MC", due: "Jul 3", soon: false, sourceSegmentIndex: 15 },
   ],
   chapters: [
     { label: "Intros & agenda", time: "00:00" },

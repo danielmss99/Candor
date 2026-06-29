@@ -42,6 +42,8 @@ pub struct MeetingDetail {
     pub audio_path: Option<String>,
     pub folder_id: Option<String>,
     pub calendar_event_id: Option<String>,
+    pub status: Option<String>,
+    pub transcription_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -219,6 +221,8 @@ pub struct SaveNoteOptions<'a> {
     pub audio_path: Option<&'a str>,
     pub calendar_event_id: Option<&'a str>,
     pub folder_id: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub transcription_error: Option<&'a str>,
 }
 
 pub fn save_note_file(
@@ -263,6 +267,12 @@ pub fn save_note_file(
     }
     if let Some(eid) = opts.calendar_event_id {
         md.push_str(&format!("calendar_event_id: {eid}\n"));
+    }
+    if let Some(status) = opts.status {
+        md.push_str(&format!("status: {status}\n"));
+    }
+    if let Some(err) = opts.transcription_error {
+        md.push_str(&format!("transcription_error: {err}\n"));
     }
     md.push_str("---\n\n");
 
@@ -407,6 +417,14 @@ pub fn read_meeting(app: AppHandle, id: String) -> Result<MeetingDetail, String>
                 .get("calendar_event_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            status: meta
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            transcription_error: meta
+                .get("transcription_error")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         });
     }
     Err("Meeting not found".into())
@@ -447,6 +465,50 @@ fn write_frontmatter(meta: &serde_json::Map<String, serde_json::Value>, body: &s
     md.push_str("---\n\n");
     md.push_str(body);
     md
+}
+
+fn format_transcript_body(segs: &[Segment], user_notes: &str) -> String {
+    let mut body = String::new();
+    if !user_notes.trim().is_empty() {
+        body.push_str("# My notes\n\n");
+        body.push_str(user_notes.trim());
+        body.push_str("\n\n");
+    }
+    body.push_str("# Transcript\n\n");
+    for s in segs {
+        let line = if let Some(ref spk) = s.speaker {
+            format!("`{}` [{}] {}\n\n", s.time, spk, s.text)
+        } else {
+            format!("`{}` {}\n\n", s.time, s.text)
+        };
+        body.push_str(&line);
+    }
+    body
+}
+
+pub fn update_meeting_transcript(
+    app: &AppHandle,
+    id: &str,
+    segs: &[Segment],
+    status: &str,
+    transcription_error: Option<&str>,
+) -> Result<(), String> {
+    let dir = notes_dir(app)?;
+    let path = meeting_path_by_id(&dir, id)?;
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let (mut meta, body) = parse_frontmatter(&raw);
+    let user_notes = parse_user_notes(&body);
+    meta.insert("status".into(), serde_json::Value::String(status.into()));
+    if let Some(err) = transcription_error {
+        meta.insert(
+            "transcription_error".into(),
+            serde_json::Value::String(err.into()),
+        );
+    } else {
+        meta.remove("transcription_error");
+    }
+    let new_body = format_transcript_body(segs, &user_notes);
+    fs::write(&path, write_frontmatter(&meta, &new_body)).map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]

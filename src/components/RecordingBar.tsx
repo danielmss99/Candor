@@ -7,13 +7,15 @@ interface RecordingBarProps {
   timeLabel: string;
   /** 0–100 while the model downloads, or null when already present. */
   downloadPct: number | null;
+  /** Chunk progress during long transcriptions. */
+  transcriptionPct?: number | null;
   onStop: () => void;
   onCancel: () => void;
 }
 
 // A small floating bar that stays out of the way so the rest of the app
 // remains usable while recording. Never covers the page.
-export function RecordingBar({ phase, count, timeLabel, downloadPct, onStop, onCancel }: RecordingBarProps) {
+export function RecordingBar({ phase, count, timeLabel, downloadPct, transcriptionPct, onStop, onCancel }: RecordingBarProps) {
   return (
     <div className="rec-bar" role="status">
       {phase === "recording" && (
@@ -30,7 +32,11 @@ export function RecordingBar({ phase, count, timeLabel, downloadPct, onStop, onC
       {phase === "transcribing" && (
         <>
           <span className="rec-bar-spinner" />
-          <span className="rec-bar-label">Transcribing on this device…</span>
+          <span className="rec-bar-label">
+            {transcriptionPct != null && transcriptionPct > 0
+              ? `Transcribing… ${transcriptionPct}%`
+              : "Saving audio & transcribing…"}
+          </span>
         </>
       )}
 
