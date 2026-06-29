@@ -1,5 +1,5 @@
 use std::io::{self, Seek, SeekFrom, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tauri::Emitter;
@@ -9,6 +9,14 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use crate::Segment;
+
+/// ~115 MB/hour at 16 kHz mono 16-bit PCM.
+pub const BYTES_PER_HOUR_16K_MONO: u64 = 115 * 1024 * 1024;
+/// Warn when free disk space drops below ~2 hours of recording headroom.
+pub const DISK_WARN_BYTES: u64 = 250 * 1024 * 1024;
+/// Read/resample this many seconds of source audio per chunk (keeps RAM bounded).
+const RESAMPLE_READ_SECS: u32 = 60;
+pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 /// TODO: Integrate RNNoise for real-time noise suppression before Whisper.
 /// Blocked: needs a maintained Rust RNNoise binding tested on Windows/macOS.
@@ -143,6 +151,251 @@ impl StreamingWavWriter {
     self.writer.flush().map_err(|e| e.to_string())?;
     self.writer.finalize().map_err(|e| e.to_string())?;
     Ok(self.samples_written)
+  }
+
+  pub fn samples_written(&self) -> u64 {
+    self.samples_written
+  }
+}
+
+/// Duration in seconds from a finalized mono WAV (uses header sample count).
+pub fn wav_duration_seconds(path: &Path) -> Result<u32, String> {
+  let reader = WavReader::open(path).map_err(|e| e.to_string())?;
+  let spec = reader.spec();
+  let frames = reader.len() as u64 / spec.channels as u64;
+  Ok((frames / spec.sample_rate as u64).min(u32::MAX as u64) as u32)
+}
+
+/// Free bytes on the volume holding `path` (Windows: GetDiskFreeSpaceEx).
+pub fn free_disk_bytes(path: &Path) -> Result<u64, String> {
+  let dir = if path.is_dir() {
+    path.to_path_buf()
+  } else {
+    path.parent()
+      .map(Path::to_path_buf)
+      .unwrap_or_else(|| PathBuf::from("."))
+  };
+  #[cfg(target_os = "windows")]
+  {
+    use std::os::windows::ffi::OsStrExt;
+    let wide: Vec<u16> = dir
+      .as_os_str()
+      .encode_wide()
+      .chain(std::iter::once(0))
+      .collect();
+    let mut free = 0u64;
+    let ok = unsafe {
+      windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+        wide.as_ptr(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        &mut free,
+      )
+    };
+    if ok != 0 {
+      Ok(free)
+    } else {
+      Err("Could not read disk space".into())
+    }
+  }
+  #[cfg(not(target_os = "windows"))]
+  {
+    let _ = dir;
+    Err("Disk space check not implemented on this platform".into())
+  }
+}
+
+struct StreamResampler {
+  ratio: f32,
+  src_pos: f32,
+}
+
+impl StreamResampler {
+  fn new(src_rate: u32, dst_rate: u32) -> Self {
+    Self {
+      ratio: dst_rate as f32 / src_rate as f32,
+      src_pos: 0.0,
+    }
+  }
+
+  fn process(&mut self, mono: &[f32]) -> Vec<f32> {
+    if mono.is_empty() {
+      return Vec::new();
+    }
+    let last = mono.len() - 1;
+    let start_out = (self.src_pos * self.ratio).floor() as usize;
+    let end_src = mono.len() as f32 - 1.0;
+    let end_out = ((end_src + self.src_pos) * self.ratio).floor() as usize;
+    let out_len = end_out.saturating_sub(start_out);
+    let mut out = Vec::with_capacity(out_len.max(1));
+    for i in 0..out_len {
+      let src = (start_out + i) as f32 / self.ratio - self.src_pos;
+      let i0 = src.floor() as usize;
+      let i1 = (i0 + 1).min(last);
+      let frac = src - i0 as f32;
+      let s0 = mono.get(i0).copied().unwrap_or(0.0);
+      let s1 = mono.get(i1).copied().unwrap_or(s0);
+      out.push(s0 * (1.0 - frac) + s1 * frac);
+    }
+    self.src_pos += mono.len() as f32;
+    out
+  }
+}
+
+fn read_mono_from_iter(
+  iter: &mut dyn Iterator<Item = Result<i16, hound::Error>>,
+  max_frames: usize,
+  channels: u16,
+) -> Result<Vec<f32>, String> {
+  let ch = channels.max(1) as usize;
+  let mut mono = Vec::with_capacity(max_frames);
+  for _ in 0..max_frames {
+    if ch == 1 {
+      match iter.next() {
+        Some(Ok(v)) => mono.push(v as f32 / i16::MAX as f32),
+        Some(Err(e)) => return Err(e.to_string()),
+        None => break,
+      }
+    } else {
+      let mut frame = Vec::with_capacity(ch);
+      for _ in 0..ch {
+        match iter.next() {
+          Some(Ok(v)) => frame.push(v as f32 / i16::MAX as f32),
+          Some(Err(e)) => return Err(e.to_string()),
+          None => break,
+        }
+      }
+      if frame.len() < ch {
+        break;
+      }
+      mono.push(frame.iter().sum::<f32>() / ch as f32);
+    }
+  }
+  Ok(mono)
+}
+
+/// Resample a WAV to 16 kHz mono on disk without loading the full file into RAM.
+pub fn stream_resample_wav_to_16k(source: &Path, dest: &Path) -> Result<u32, String> {
+  stream_resample_mix_to_16k(source, None, dest)
+}
+
+/// Mix optional second WAV (same length, resampled independently) while writing 16 kHz mono.
+pub fn stream_resample_mix_to_16k(
+  mic_source: &Path,
+  system_source: Option<&Path>,
+  dest: &Path,
+) -> Result<u32, String> {
+  if let Some(parent) = dest.parent() {
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+  }
+
+  let mic_reader = WavReader::open(mic_source).map_err(|e| e.to_string())?;
+  let mic_spec = mic_reader.spec();
+  let mic_sr = mic_spec.sample_rate;
+  let mic_ch = mic_spec.channels;
+
+  let mut sys_reader = if let Some(p) = system_source.filter(|p| p.exists()) {
+    Some(WavReader::open(p).map_err(|e| e.to_string())?)
+  } else {
+    None
+  };
+  let (sys_sr, sys_ch) = sys_reader
+    .as_ref()
+    .map(|r| (r.spec().sample_rate, r.spec().channels))
+    .unwrap_or((mic_sr, mic_ch));
+
+  let spec = WavSpec {
+    channels: 1,
+    sample_rate: WHISPER_SAMPLE_RATE,
+    bits_per_sample: 16,
+    sample_format: hound::SampleFormat::Int,
+  };
+  let mut mic_iter: Box<dyn Iterator<Item = Result<i16, hound::Error>>> =
+    Box::new(mic_reader.into_samples::<i16>());
+  let mut sys_iter: Option<Box<dyn Iterator<Item = Result<i16, hound::Error>>>> = sys_reader
+    .map(|r| Box::new(r.into_samples::<i16>()) as Box<dyn Iterator<Item = Result<i16, hound::Error>>>);
+  let mut writer = WavWriter::create(dest, spec).map_err(|e| e.to_string())?;
+
+  let mut mic_resampler = StreamResampler::new(mic_sr, WHISPER_SAMPLE_RATE);
+  let mut sys_resampler = StreamResampler::new(sys_sr, WHISPER_SAMPLE_RATE);
+  let read_frames = (mic_sr * RESAMPLE_READ_SECS).max(1024) as usize;
+  let mut total_out: u64 = 0;
+
+  loop {
+    let mic_chunk = read_mono_from_iter(mic_iter.as_mut(), read_frames, mic_ch)?;
+    if mic_chunk.is_empty() {
+      break;
+    }
+    let mut mic_16k = mic_resampler.process(&mic_chunk);
+    if let Some(ref mut sys_it) = sys_iter {
+      let sys_chunk = read_mono_from_iter(sys_it.as_mut(), read_frames, sys_ch)?;
+      if !sys_chunk.is_empty() {
+        let sys_16k = sys_resampler.process(&sys_chunk);
+        mic_16k = mix_mono(&mic_16k, &sys_16k);
+      }
+    }
+    let processed = preprocess_audio(&mic_16k);
+    for s in processed {
+      let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+      writer.write_sample(v).map_err(|e| e.to_string())?;
+      total_out += 1;
+    }
+  }
+
+  writer.finalize().map_err(|e| e.to_string())?;
+  Ok((total_out / WHISPER_SAMPLE_RATE as u64).min(u32::MAX as u64) as u32)
+}
+
+/// Read 16 kHz mono WAV in fixed-size chunks without loading the full file.
+pub struct WavChunkReader {
+  samples: Box<dyn Iterator<Item = Result<i16, hound::Error>>>,
+  chunk_samples: usize,
+  total_frames: u64,
+}
+
+impl WavChunkReader {
+  pub fn open(path: &Path, chunk_samples: usize) -> Result<Self, String> {
+    let reader = WavReader::open(path).map_err(|e| e.to_string())?;
+    let spec = reader.spec();
+    if spec.sample_rate != WHISPER_SAMPLE_RATE || spec.channels != 1 {
+      return Err(format!(
+        "Expected 16 kHz mono WAV, got {} Hz {} ch",
+        spec.sample_rate, spec.channels
+      ));
+    }
+    let total_frames = reader.len() as u64;
+    Ok(Self {
+      samples: Box::new(reader.into_samples::<i16>()),
+      chunk_samples,
+      total_frames,
+    })
+  }
+
+  pub fn chunk_samples(&self) -> usize {
+    self.chunk_samples
+  }
+
+  /// Returns the next chunk, or `None` when finished.
+  pub fn next_chunk(&mut self) -> Result<Option<Vec<f32>>, String> {
+    let mut chunk = Vec::with_capacity(self.chunk_samples);
+    while chunk.len() < self.chunk_samples {
+      match self.samples.next() {
+        Some(Ok(v)) => chunk.push(v as f32 / i16::MAX as f32),
+        Some(Err(e)) => return Err(e.to_string()),
+        None => break,
+      }
+    }
+    if chunk.is_empty() {
+      Ok(None)
+    } else {
+      Ok(Some(chunk))
+    }
+  }
+
+  pub fn total_chunks(&self) -> u32 {
+    (self.total_frames as usize)
+      .div_ceil(self.chunk_samples)
+      .max(1) as u32
   }
 }
 
@@ -342,7 +595,9 @@ pub fn find_loopback_device(_host: &cpal::Host) -> Option<cpal::Device> {
 
 pub fn start_loopback_capture(
   recording: Arc<AtomicBool>,
-  samples: Arc<Mutex<Vec<f32>>>,
+  live_wav: Arc<Mutex<Option<StreamingWavWriter>>>,
+  sample_rate: u32,
+  channels: u16,
   app_emit: tauri::AppHandle,
 ) -> Result<(), String> {
   let host = cpal::default_host();
@@ -354,8 +609,9 @@ pub fn start_loopback_capture(
     .map_err(|e| format!("No loopback config: {e}"))?;
   let sample_format = supported.sample_format();
   let config: cpal::StreamConfig = supported.into();
+  let loop_sr = config.sample_rate.0;
+  let loop_ch = config.channels;
 
-  samples.lock().unwrap().clear();
   let (ready_tx, ready_rx) = mpsc::channel();
 
   std::thread::spawn(move || {
@@ -366,26 +622,31 @@ pub fn start_loopback_capture(
       }
     };
     let rec = recording.clone();
-    let buf = samples.clone();
+    let wav = live_wav.clone();
+
+    let write_samples = move |data: &[f32]| {
+      if !rec.load(Ordering::Relaxed) {
+        return;
+      }
+      if let Ok(mut guard) = wav.lock() {
+        if let Some(w) = guard.as_mut() {
+          let _ = w.write_f32_interleaved(data);
+        }
+      }
+    };
 
     let built = match sample_format {
       cpal::SampleFormat::F32 => device.build_input_stream(
         &config,
-        move |d: &[f32], _: &cpal::InputCallbackInfo| {
-          if rec.load(Ordering::Relaxed) {
-            buf.lock().unwrap().extend_from_slice(d);
-          }
-        },
+        move |d: &[f32], _: &cpal::InputCallbackInfo| write_samples(d),
         err_fn,
         None,
       ),
       cpal::SampleFormat::I16 => device.build_input_stream(
         &config,
         move |d: &[i16], _: &cpal::InputCallbackInfo| {
-          if rec.load(Ordering::Relaxed) {
-            buf.lock()
-              .unwrap()
-              .extend(d.iter().map(|s| *s as f32 / 32768.0));
+          for s in d {
+            write_samples(&[*s as f32 / 32768.0]);
           }
         },
         err_fn,
@@ -403,7 +664,7 @@ pub fn start_loopback_capture(
           let _ = ready_tx.send(Err(format!("Failed to start loopback: {e}")));
           return;
         }
-        let _ = ready_tx.send(Ok(()));
+        let _ = ready_tx.send(Ok((loop_sr, loop_ch)));
         while recording.load(Ordering::SeqCst) {
           std::thread::sleep(Duration::from_millis(100));
         }
@@ -416,7 +677,10 @@ pub fn start_loopback_capture(
   });
 
   match ready_rx.recv_timeout(Duration::from_secs(5)) {
-    Ok(Ok(())) => Ok(()),
+    Ok(Ok((loop_sr, loop_ch))) => {
+      let _ = (sample_rate, channels, loop_sr, loop_ch);
+      Ok(())
+    }
     Ok(Err(e)) => Err(e),
     Err(_) => Err("Timed out starting system audio capture".into()),
   }

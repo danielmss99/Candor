@@ -3,7 +3,7 @@ export type RecPhase = "preparing" | "countdown" | "recording" | "transcribing";
 interface RecordingBarProps {
   phase: RecPhase;
   count: number;
-  /** mm:ss */
+  /** MM:SS or H:MM:SS while recording */
   timeLabel: string;
   /** 0–100 while the model downloads, or null when already present. */
   downloadPct: number | null;

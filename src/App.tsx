@@ -17,7 +17,8 @@ import { RecordingBar } from "./components/RecordingBar";
 import { ConnectCalendarModal } from "./components/ConnectCalendarModal";
 import { NamePrompt } from "./components/NamePrompt";
 import { SettingsModal, type Theme } from "./components/SettingsModal";
-import { loadMeetingDetail, loadPrivacySettings, stopRecordingWithNotes } from "./api/local";
+import { loadMeetingDetail, loadPrivacySettings, stopRecordingWithNotes, checkRecordingRecovery, recoverPartialRecording } from "./api/local";
+import { formatRecordingTime } from "./utils/time";
 import { invokeError } from "./api/calendar";
 import {
   loadCompletedActions,
@@ -83,10 +84,10 @@ type Rec = "idle" | "preparing" | "countdown" | "recording" | "transcribing";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+const RECORDING_SESSION_KEY = "candor-v2.recording-session";
+
 function format(elapsed: number): string {
-  const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
-  const ss = String(elapsed % 60).padStart(2, "0");
-  return `${mm}:${ss}`;
+  return formatRecordingTime(elapsed);
 }
 
 function App() {
@@ -121,6 +122,14 @@ function App() {
   const [pendingRecord, setPendingRecord] = useState<(() => void) | null>(null);
   const [calendarToast, setCalendarToast] = useState<CalendarEvent | null>(null);
   const [captureSystemAudio, setCaptureSystemAudio] = useState(false);
+  const [diskWarning, setDiskWarning] = useState<string | null>(null);
+  const [recoveryOffer, setRecoveryOffer] = useState<{
+    meetingId: string;
+    liveWavPath: string;
+    durationSeconds: number;
+    title?: string | null;
+  } | null>(null);
+  const [recovering, setRecovering] = useState(false);
 
   // Navigation context for search + recap
   const [searchQuery, setSearchQuery] = useState("");
@@ -401,10 +410,33 @@ function App() {
       (e) => {
         setTranscriptionPct(e.payload.percent);
         if (e.payload.percent > 0) {
-          setRecapProcessingMessage(`Transcribing your recording… ${e.payload.percent}%`);
+          setRecapProcessingMessage(
+            `Transcribing your recording… ${e.payload.percent}% (chunk ${e.payload.chunk}/${e.payload.totalChunks})`,
+          );
         }
       },
     ).then((u) => unlisteners.push(u));
+    listen<{
+      meetingId: string;
+      durationSeconds: number;
+      audioPath: string;
+      freeDiskBytes?: number | null;
+      lowDisk: boolean;
+    }>("recording-checkpoint", (e) => {
+      localStorage.setItem(
+        RECORDING_SESSION_KEY,
+        JSON.stringify({
+          meetingId: e.payload.meetingId,
+          durationSeconds: e.payload.durationSeconds,
+          audioPath: e.payload.audioPath,
+          savedAt: new Date().toISOString(),
+        }),
+      );
+      if (e.payload.lowDisk && e.payload.freeDiskBytes != null) {
+        const gb = (e.payload.freeDiskBytes / (1024 * 1024 * 1024)).toFixed(1);
+        setDiskWarning(`Low disk space (${gb} GB free). Long recordings need ~115 MB/hour.`);
+      }
+    }).then((u) => unlisteners.push(u));
     listen<string>("recording-error", (e) => {
       setError(String(e.payload));
       stopTimer();
@@ -541,6 +573,47 @@ function App() {
     [openSavedRecap, recapCtx, recordingEvent?.title],
   );
 
+  // Offer recovery if a previous recording was interrupted.
+  useEffect(() => {
+    if (!isTauri() || rec !== "idle") return;
+    checkRecordingRecovery()
+      .then((r) => {
+        if (r && r.durationSeconds > 0) setRecoveryOffer(r);
+      })
+      .catch(() => {});
+  }, [rec, meetingsRefreshKey]);
+
+  const handleRecoverPartial = useCallback(async () => {
+    if (!recoveryOffer) return;
+    setRecovering(true);
+    setError(null);
+    try {
+      const result = await recoverPartialRecording(
+        recoveryOffer.liveWavPath,
+        recoveryOffer.meetingId,
+        recoveryOffer.title ?? undefined,
+      );
+      localStorage.removeItem(RECORDING_SESSION_KEY);
+      setRecoveryOffer(null);
+      setMeetingsRefreshKey((k) => k + 1);
+      await navigateToRecapAfterRecording({
+        meetingId: result.meetingId,
+        segments: result.segments,
+        notes: "",
+        duration: recoveryOffer.durationSeconds,
+        processing: false,
+        transcriptionError:
+          result.status === "transcription_failed"
+            ? result.transcriptionError ?? "Transcription failed"
+            : null,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRecovering(false);
+    }
+  }, [recoveryOffer, navigateToRecapAfterRecording]);
+
   // Start: ensure model → countdown → begin mic capture.
   const runRecording = useCallback(async () => {
     if (rec !== "idle") return;
@@ -570,7 +643,6 @@ function App() {
       }
       if (cancelRef.current) return;
 
-      await invoke("start_recording", { captureSystemAudio });
       setTranscript(null);
       setSessionNotes(
         recordingEvent
@@ -579,6 +651,11 @@ function App() {
       );
       setLiveMoments({ bookmarks: [], highlights: [] });
       setElapsed(0);
+      setDiskWarning(null);
+      await invoke("start_recording", {
+        captureSystemAudio,
+        titleOverride: recordingEvent?.title ?? null,
+      });
       setRec("recording");
       timerRef.current = window.setInterval(() => setElapsed((e) => e + 1), 1000);
     } catch (e) {
@@ -689,6 +766,8 @@ function App() {
       setTranscriptionPct(null);
       setRec("idle");
       setRecordingEvent(null);
+      setDiskWarning(null);
+      localStorage.removeItem(RECORDING_SESSION_KEY);
     }
   }, [stopTimer, sessionNotes, elapsed, navigateToRecapAfterRecording, liveMoments, recordingEvent, recapCtx]);
 
@@ -867,6 +946,37 @@ function App() {
         <div className="rec-error-toast" role="alert">
           ⚠ {error}
           <button type="button" className="rec-error-dismiss" onClick={() => setError(null)}>
+            ×
+          </button>
+        </div>
+      )}
+
+      {recoveryOffer && rec === "idle" && (
+        <div className="rec-error-toast" role="status">
+          Interrupted recording found ({formatRecordingTime(recoveryOffer.durationSeconds)}).{" "}
+          <button
+            type="button"
+            className="btn-ghost"
+            disabled={recovering}
+            onClick={() => void handleRecoverPartial()}
+          >
+            {recovering ? "Recovering…" : "Save & transcribe"}
+          </button>
+          <button
+            type="button"
+            className="rec-error-dismiss"
+            onClick={() => setRecoveryOffer(null)}
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
+      {diskWarning && rec === "recording" && (
+        <div className="rec-error-toast" role="status">
+          ⚠ {diskWarning}
+          <button type="button" className="rec-error-dismiss" onClick={() => setDiskWarning(null)}>
             ×
           </button>
         </div>

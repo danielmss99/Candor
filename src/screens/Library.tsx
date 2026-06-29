@@ -81,7 +81,11 @@ export function Library({
     }
     if (filter === "long") list = list.filter((m) => m.durationMinutes > 45);
     if (filter === "favorites") list = list.filter((m) => favorites.has(m.id));
-    if (folderFilter) list = list.filter((m) => meetingFolders[m.id] === folderFilter);
+    if (folderFilter) {
+      list = list.filter(
+        (m) => (m.folderId ?? meetingFolders[m.id] ?? "inbox") === folderFilter,
+      );
+    }
     const q = localQuery.trim().toLowerCase();
     if (q) {
       list = list.filter(
@@ -141,11 +145,11 @@ export function Library({
       <div className="meeting-main">
         <div className="meeting-title-row">
           <span className="meeting-title">{m.title}</span>
-          {meetingFolders[m.id] && (
+          {(m.folderId ?? meetingFolders[m.id]) && (
             <span
               className="folder-dot"
               style={{
-                background: folders.find((f) => f.id === meetingFolders[m.id])?.color,
+                background: folders.find((f) => f.id === (m.folderId ?? meetingFolders[m.id]))?.color,
               }}
             />
           )}

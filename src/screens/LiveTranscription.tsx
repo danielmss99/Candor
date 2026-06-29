@@ -3,6 +3,7 @@ import type { View } from "../App";
 import { useLiveSpeech } from "../useLiveSpeech";
 import { WaveformScrubber } from "../components/WaveformScrubber";
 import type { LiveBookmark, LiveHighlight, MeetingMoments } from "../v2/metadata";
+import { parseRecordingTime } from "../utils/time";
 
 interface LiveProps {
   timeLabel: string;
@@ -91,7 +92,7 @@ export function Live({
   }, [recording, addBookmark]);
 
   const showLive = recording && (liveSegments.length > 0 || interim);
-  const waveProgress = recording ? (parseInt(timeLabel.split(":")[1] || "0", 10) % 60) / 60 : 0;
+  const waveProgress = recording ? (parseRecordingTime(timeLabel) % 60) / 60 : 0;
 
   return (
     <div className="screen live">

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import {
   deleteCalendarEvent,
@@ -9,12 +9,22 @@ import {
 import type { ContextMenuState, MeetingTarget } from "../meetingEdit";
 import { ContextMenu } from "./ContextMenu";
 import { EditMeetingModal } from "./EditMeetingModal";
+import { loadFolderTree, moveMeetingToFolder, type FolderTreeNode } from "../api/local";
 import {
   loadFolders,
   loadMeetingFolders,
   setMeetingFolder,
   type MeetingFolder,
 } from "../v2/metadata";
+
+function flattenFolderTree(tree: FolderTreeNode[], depth = 0): { id: string; label: string }[] {
+  const out: { id: string; label: string }[] = [];
+  for (const node of tree) {
+    out.push({ id: node.id, label: `${"  ".repeat(depth)}${node.name}` });
+    out.push(...flattenFolderTree(node.children, depth + 1));
+  }
+  return out;
+}
 
 interface MeetingMenuHostProps {
   menu: ContextMenuState | null;
@@ -43,9 +53,35 @@ export function MeetingMenuHost({
 }: MeetingMenuHostProps) {
   const [editTarget, setEditTarget] = useState<MeetingTarget | null>(null);
   const [busy, setBusy] = useState(false);
-  const [folders] = useState<MeetingFolder[]>(() => loadFolders());
+  const [legacyFolders] = useState<MeetingFolder[]>(() => loadFolders());
+  const [orgFolders, setOrgFolders] = useState<{ id: string; label: string }[]>([]);
   const [meetingFolders, setMeetingFolders] = useState(() => loadMeetingFolders());
   const [showFolderPicker, setShowFolderPicker] = useState(false);
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    loadFolderTree()
+      .then((tree) => setOrgFolders(flattenFolderTree(tree)))
+      .catch(() => setOrgFolders([]));
+  }, [menu]);
+
+  const folders = isTauri()
+    ? orgFolders.map((f) => ({ id: f.id, name: f.label.trim() }))
+    : legacyFolders.map((f) => ({ id: f.id, name: f.name }));
+
+  const moveToFolder = useCallback(
+    async (meetingId: string, folderId: string | null) => {
+      if (isTauri()) {
+        await moveMeetingToFolder(meetingId, folderId);
+      } else {
+        setMeetingFolder(meetingId, folderId);
+        await updateSavedMeeting({ id: meetingId, folderId }).catch(() => {});
+      }
+      setMeetingFolders(loadMeetingFolders());
+      onRefreshSaved();
+    },
+    [onRefreshSaved],
+  );
 
   const items = useMemo(() => {
     if (!menu) return [];
@@ -92,12 +128,7 @@ export function MeetingMenuHost({
       label: `Move to ${f.name}`,
       disabled: !desktop,
       onClick: async () => {
-        setMeetingFolder(target.meeting.id, f.id);
-        setMeetingFolders(loadMeetingFolders());
-        if (desktop) {
-          await updateSavedMeeting({ id: target.meeting.id, folderId: f.id }).catch(() => {});
-        }
-        onRefreshSaved();
+        await moveToFolder(target.meeting.id, f.id);
       },
     }));
 
@@ -122,13 +153,10 @@ export function MeetingMenuHost({
       ...folderItems,
       {
         id: "folder-clear",
-        label: "Remove from folder",
-        disabled: !desktop || !meetingFolders[target.meeting.id],
+        label: "Move to Inbox",
+        disabled: !desktop || !(target.meeting.folderId && target.meeting.folderId !== "inbox"),
         onClick: async () => {
-          setMeetingFolder(target.meeting.id, null);
-          setMeetingFolders(loadMeetingFolders());
-          await updateSavedMeeting({ id: target.meeting.id, folderId: null }).catch(() => {});
-          onRefreshSaved();
+          await moveToFolder(target.meeting.id, "inbox");
         },
       },
       {
@@ -152,7 +180,7 @@ export function MeetingMenuHost({
         },
       },
     ];
-  }, [menu, folders, meetingFolders, onOpenSaved, onRecord, onRecordEvent, onRefreshCalendar, onRefreshSaved]);
+  }, [menu, folders, meetingFolders, moveToFolder, onOpenSaved, onRecord, onRecordEvent, onRefreshCalendar, onRefreshSaved]);
 
   useEffect(() => {
     if (pendingEdit) {
@@ -205,13 +233,9 @@ export function MeetingMenuHost({
             id: f.id,
             label: f.name,
             onClick: async () => {
-              setMeetingFolder(menu.target.kind === "saved" ? menu.target.meeting.id : "", f.id);
-              setMeetingFolders(loadMeetingFolders());
-              await updateSavedMeeting({
-                id: menu.target.kind === "saved" ? menu.target.meeting.id : "",
-                folderId: f.id,
-              }).catch(() => {});
-              onRefreshSaved();
+              if (menu.target.kind === "saved") {
+                await moveToFolder(menu.target.meeting.id, f.id);
+              }
               setShowFolderPicker(false);
               onCloseMenu();
             },

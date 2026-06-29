@@ -34,4 +34,5 @@ uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
 symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "flac"] }
 rfd = "0.15"
+windows-sys = { version = "0.59", features = ["Win32_Storage_FileSystem"] }
 

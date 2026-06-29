@@ -17,6 +17,21 @@ export interface SavedMeeting {
   blurb: string;
   durationMinutes: number;
   path: string;
+  folderId?: string | null;
+}
+
+export interface OrgFolder {
+  id: string;
+  name: string;
+  parentId?: string | null;
+}
+
+export interface FolderTreeNode {
+  id: string;
+  name: string;
+  parentId?: string | null;
+  diskPath: string;
+  children: FolderTreeNode[];
 }
 
 export interface MeetingDetail {
@@ -122,6 +137,46 @@ export async function openStorageFolder(folderId: string): Promise<void> {
   await invoke("open_storage_folder", { folderId });
 }
 
+export async function getCandorRootPath(): Promise<string> {
+  if (!isTauri()) return "";
+  return invoke<string>("get_candor_root_path");
+}
+
+export async function loadFolderTree(): Promise<FolderTreeNode[]> {
+  if (!isTauri()) return [];
+  return invoke<FolderTreeNode[]>("list_folder_tree");
+}
+
+export async function createOrgFolder(name: string, parentId?: string | null): Promise<OrgFolder> {
+  return invoke<OrgFolder>("create_folder", { name, parentId: parentId ?? null });
+}
+
+export async function renameOrgFolder(id: string, name: string): Promise<OrgFolder> {
+  return invoke<OrgFolder>("rename_folder", { id, name });
+}
+
+export async function deleteOrgFolder(id: string): Promise<void> {
+  await invoke("delete_folder", { id });
+}
+
+export async function moveMeetingToFolder(meetingId: string, folderId?: string | null): Promise<void> {
+  await invoke("move_meeting_to_folder", { meetingId, folderId: folderId ?? null });
+}
+
+export async function saveMeetingEdits(payload: {
+  id: string;
+  title?: string;
+  userNotes?: string;
+  transcript?: TranscriptSegment[];
+}): Promise<void> {
+  await invoke("save_meeting_edits", { payload });
+}
+
+export async function openCandorFolder(): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("open_candor_folder");
+}
+
 export interface PrivacySettings {
   deleteAudioAfterTranscribe: boolean;
   retentionDays: number;
@@ -179,5 +234,37 @@ export async function stopRecordingWithNotes(
     titleOverride: options?.titleOverride ?? null,
     calendarEventId: options?.calendarEventId ?? null,
     folderId: options?.folderId ?? null,
+  });
+}
+
+export interface RecordingCheckpoint {
+  meetingId: string;
+  durationSeconds: number;
+  audioPath: string;
+  freeDiskBytes?: number | null;
+  lowDisk: boolean;
+}
+
+export interface RecordingRecovery {
+  meetingId: string;
+  liveWavPath: string;
+  durationSeconds: number;
+  title?: string | null;
+}
+
+export async function checkRecordingRecovery(): Promise<RecordingRecovery | null> {
+  if (!isTauri()) return null;
+  return invoke<RecordingRecovery | null>("check_recording_recovery");
+}
+
+export async function recoverPartialRecording(
+  liveWavPath: string,
+  meetingId?: string,
+  title?: string,
+): Promise<StopRecordingResult> {
+  return invoke<StopRecordingResult>("recover_partial_recording", {
+    liveWavPath,
+    meetingId: meetingId ?? null,
+    titleOverride: title ?? null,
   });
 }
