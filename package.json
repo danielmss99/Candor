@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:all": "npm run build && npm run tauri build",
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/tauri-dev.ps1"

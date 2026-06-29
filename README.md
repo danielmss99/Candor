@@ -35,7 +35,16 @@ cp .env.example .env   # then fill in client IDs
 npm install
 npm run tauri dev      # development
 npm run tauri build    # release installer
+npm run build:all      # same as build + tauri build
 ```
+
+### CI (GitHub Actions)
+
+Every push to `main` or `v2` runs the [Tauri Desktop Build](.github/workflows/tauri-build.yml) workflow on `windows-latest`: Node frontend build, then a full `npm run tauri build` (including whisper-rs native compile). Installers (`.exe`, `.msi`) are uploaded as artifacts on push runs.
+
+To download a build: open the repo on GitHub → **Actions** → select the workflow run → scroll to **Artifacts** → download `candor-windows-<commit-sha>`.
+
+The first run or a cold cache can take a while because whisper.cpp is compiled from source. Cached Rust dependencies shorten later runs.
 
 Set each client ID once as `VITE_MS_CLIENT_ID` / `VITE_GOOGLE_CLIENT_ID` in `.env`. Vite bundles them for the frontend; `src-tauri/build.rs` reads the same file and passes them to Rust at compile time. Restart `npm run tauri dev` after changing `.env`.
 

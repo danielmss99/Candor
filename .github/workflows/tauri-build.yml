@@ -1,0 +1,64 @@
+name: Tauri Desktop Build
+
+on:
+  push:
+    branches:
+      - main
+      - v2
+  pull_request:
+    branches:
+      - main
+      - v2
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install LLVM and CMake
+        shell: pwsh
+        run: |
+          choco install llvm cmake -y --no-progress
+          "LIBCLANG_PATH=C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "C:\Program Files\CMake\bin" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build Tauri app
+        run: npm run tauri build
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+      - name: Upload Windows installers
+        uses: actions/upload-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: candor-windows-${{ github.sha }}
+          path: |
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.msi
+          if-no-files-found: warn
+          retention-days: 14
