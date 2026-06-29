@@ -1,0 +1,127 @@
+/* Candor — Sunrise theme design tokens.
+   Source of truth: design_handoff_ai_transcription/README.md (Direction C · Sunrise). */
+
+:root {
+  /* Brand */
+  --coral: #f0714e;
+  --coral-on: #2a1006; /* text/icon color on coral fills */
+  --coral-dark: #d23b1e;
+  --gold: #ffb24d;
+  --gold-on: #1a1204;
+  --purple: #8b6fd6;
+  --red-live: #f0506e;
+
+  /* Sunrise surfaces */
+  --bg: #fbf4ef;
+  --bg-sidebar: #fffaf6;
+  --border: #efe1d8;
+  --border-inner: #f1e6dd;
+
+  /* Text */
+  --text-primary: #2b1f33;
+  --text-body: #574a63;
+  --text-muted: #a99cb5;
+  --text-label: #8c7f9a;
+
+  /* Accent surfaces */
+  --chip-bg: #fbe7de;
+  --action-bg: #fdeee9;
+  --action-border: #f7d6cc;
+  --card-alt-bg: #fbf2ec;
+  --card-alt-border: #e6d6ca;
+  --dark-input: #0a0f0d;
+
+  /* Typography */
+  --font-sans: "Space Grotesk", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Shadows */
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-overlay: 0 30px 90px rgba(20, 8, 30, 0.5);
+
+  color-scheme: light;
+}
+
+/* Dark theme — overrides surfaces/text; brand colors (coral/gold/purple) stay. */
+:root[data-theme="dark"] {
+  --bg: #17131a;
+  --bg-sidebar: #1f1822;
+  --border: #342b34;
+  --border-inner: #2b232c;
+
+  --text-primary: #f3ecef;
+  --text-body: #c8bcc6;
+  --text-muted: #8f8294;
+  --text-label: #9b8ea0;
+
+  --chip-bg: #3a2a30;
+  --action-bg: #3a2620;
+  --action-border: #4d332b;
+  --card-alt-bg: #241c24;
+  --card-alt-border: #3a2f39;
+
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  color: var(--text-primary);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  font-family: var(--font-sans);
+}
+
+/* Shared animations (from prototype) */
+@keyframes blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scale(0.85);
+  }
+}
+
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.28);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
