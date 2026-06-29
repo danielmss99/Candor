@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { View } from "../App";
 import { Sidebar } from "../components/Sidebar";
 import { FolderTree } from "../components/FolderTree";
+import { FolderActionsDropdown } from "../components/FolderActionsDropdown";
 import { FileEditor } from "../components/FileEditor";
 import {
   getCandorRootPath,
@@ -12,6 +13,7 @@ import {
   type FolderTreeNode,
   type SavedMeeting,
 } from "../api/local";
+import { directItemCounts, formatItemCount } from "../utils/folderActions";
 import { meetingContextHandler } from "../components/ContextMenu";
 import type { ContextMenuState } from "../meetingEdit";
 
@@ -82,6 +84,8 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
     refresh();
   }, [refresh, refreshKey]);
 
+  const itemCounts = useMemo(() => directItemCounts(meetings), [meetings]);
+
   const visibleMeetings = useMemo(() => {
     if (!tree.length) return meetings;
     const allowed = folderIdsForTree(tree, selectedFolderId);
@@ -89,6 +93,7 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
   }, [meetings, tree, selectedFolderId]);
 
   const flatFolders = useMemo(() => flattenFolders(tree), [tree]);
+  const selectedFolder = flatFolders.find((f) => f.id === selectedFolderId);
 
   const handleDropOnFolder = async (folderId: string) => {
     if (!dragMeetingId) return;
@@ -104,13 +109,24 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
 
   return (
     <div className="screen screen--sidebar">
-      <Sidebar active="Files" onNavigate={onNavigate} />
+      <Sidebar
+        active="Files"
+        onNavigate={onNavigate}
+        filesSelectedFolderId={selectedFolderId}
+        onFilesFolderChange={refresh}
+      />
 
       <div className="main main--scroll files-layout">
-        <div className="library-head">
-          <span className="page-title">Files</span>
-          <span className="page-sub">Organize transcripts and notes on your device</span>
+        <div className="library-head files-page-head">
+          <div className="files-page-head-text">
+            <span className="page-title">Files</span>
+            <span className="page-sub">Organize transcripts and notes on your device</span>
+          </div>
           <div className="spacer" />
+          <FolderActionsDropdown
+            selectedFolderId={selectedFolderId}
+            onCreated={() => refresh()}
+          />
           <button type="button" className="btn-ghost" onClick={() => openCandorFolder().catch(() => {})}>
             Open in Explorer
           </button>
@@ -128,20 +144,23 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
 
         <div className="files-split">
           <aside className="files-pane files-pane--tree">
+            <div className="folder-tree-head">
+              <span className="folder-tree-title">Folders</span>
+            </div>
             <FolderTree
               tree={tree}
               selectedId={selectedFolderId}
               onSelect={setSelectedFolderId}
               onChange={refresh}
+              meetings={meetings}
+              itemCounts={itemCounts}
             />
           </aside>
 
           <section className="files-pane files-pane--list">
             <div className="files-list-head">
-              <span className="section-label">
-                {flatFolders.find((f) => f.id === selectedFolderId)?.name ?? "Folder"} ·{" "}
-                {visibleMeetings.length}
-              </span>
+              <span className="files-list-title">{selectedFolder?.name ?? "Folder"}</span>
+              <span className="files-list-count">{formatItemCount(visibleMeetings.length)}</span>
             </div>
             {loading ? (
               <div className="library-empty">Loading meetings…</div>

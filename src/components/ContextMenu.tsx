@@ -5,7 +5,8 @@ export interface ContextMenuItem {
   label: string;
   danger?: boolean;
   disabled?: boolean;
-  onClick: () => void;
+  separator?: boolean;
+  onClick?: () => void;
 }
 
 interface ContextMenuProps {
@@ -54,22 +55,26 @@ export function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
   return (
     <div className="ctx-backdrop" role="presentation">
       <div ref={ref} className="ctx-menu" style={{ left: x, top: y }} role="menu">
-        {items.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            role="menuitem"
-            className={`ctx-item ${item.danger ? "ctx-item--danger" : ""}`}
-            disabled={item.disabled}
-            onClick={() => {
-              if (item.disabled) return;
-              item.onClick();
-              onClose();
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
+        {items.map((item) =>
+          item.separator ? (
+            <div key={item.id} className="ctx-sep" role="separator" />
+          ) : (
+            <button
+              key={item.id}
+              type="button"
+              role="menuitem"
+              className={`ctx-item ${item.danger ? "ctx-item--danger" : ""}`}
+              disabled={item.disabled}
+              onClick={() => {
+                if (item.disabled || !item.onClick) return;
+                item.onClick();
+                onClose();
+              }}
+            >
+              {item.label}
+            </button>
+          ),
+        )}
       </div>
     </div>
   );

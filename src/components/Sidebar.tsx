@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { View } from "../App";
 import { useUser } from "../user";
 import { Avatar } from "./Avatar";
+import { FolderActionsDropdown } from "./FolderActionsDropdown";
 import { ScalesLogo } from "./ScalesLogo";
 
 interface NavItem {
@@ -12,21 +13,28 @@ interface NavItem {
 const NAV_WORK: NavItem[] = [
   { label: "Home", target: "home" },
   { label: "Meetings", target: "library" },
-  { label: "Search", target: "search" },
 ];
 
 const NAV_MANAGE: NavItem[] = [
-  { label: "Tasks", target: "actions" },
   { label: "People", target: "people" },
-  { label: "Files", target: "files" },
+  { label: "Tasks", target: "actions" },
+  { label: "Search", target: "search" },
 ];
 
 interface SidebarProps {
   active: "Home" | "Meetings" | "People" | "Files" | "Tasks" | "Search";
   onNavigate: (view: View) => void;
+  /** Selected folder when Files view is open — used by the Files + menu. */
+  filesSelectedFolderId?: string;
+  onFilesFolderChange?: () => void;
 }
 
-export function Sidebar({ active, onNavigate }: SidebarProps) {
+export function Sidebar({
+  active,
+  onNavigate,
+  filesSelectedFolderId,
+  onFilesFolderChange,
+}: SidebarProps) {
   const {
     name,
     initials,
@@ -98,6 +106,8 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
     </div>
   );
 
+  const isFilesActive = active === "Files";
+
   return (
     <div className="sidebar">
       <button className="brand" onClick={() => onNavigate("landing")} aria-label="Candor v2">
@@ -110,6 +120,27 @@ export function Sidebar({ active, onNavigate }: SidebarProps) {
 
       {renderSection("Work", NAV_WORK, workOpen, setWorkOpen)}
       {renderSection("Manage", NAV_MANAGE, manageOpen, setManageOpen)}
+
+      <div className="nav-section nav-section--files">
+        <div className={`nav-files-row ${isFilesActive ? "nav-files-row--active" : ""}`}>
+          <button
+            type="button"
+            className={`nav-item nav-item--files ${isFilesActive ? "nav-item--active" : ""}`}
+            onClick={() => onNavigate("files")}
+          >
+            <span className="nav-bullet" />
+            Files
+          </button>
+          <FolderActionsDropdown
+            compact
+            selectedFolderId={filesSelectedFolderId ?? "inbox"}
+            onCreated={() => {
+              onFilesFolderChange?.();
+              if (!isFilesActive) onNavigate("files");
+            }}
+          />
+        </div>
+      </div>
 
       <div className="sidebar-spacer" />
 

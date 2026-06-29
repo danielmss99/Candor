@@ -159,6 +159,10 @@ export async function deleteOrgFolder(id: string): Promise<void> {
   await invoke("delete_folder", { id });
 }
 
+export async function moveOrgFolder(id: string, parentId?: string | null): Promise<OrgFolder> {
+  return invoke<OrgFolder>("move_folder", { id, newParentId: parentId ?? null });
+}
+
 export async function moveMeetingToFolder(meetingId: string, folderId?: string | null): Promise<void> {
   await invoke("move_meeting_to_folder", { meetingId, folderId: folderId ?? null });
 }

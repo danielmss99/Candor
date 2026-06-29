@@ -1273,6 +1273,7 @@ pub fn run() {
             storage::create_folder,
             storage::rename_folder,
             storage::delete_folder,
+            storage::move_folder,
             storage::move_meeting_to_folder,
             storage::save_meeting_edits,
             storage::open_candor_folder,

@@ -1,6 +1,14 @@
-import { useCallback, useState } from "react";
-import type { FolderTreeNode } from "../api/local";
-import { createOrgFolder, deleteOrgFolder, renameOrgFolder } from "../api/local";
+import { useCallback, useMemo, useState } from "react";
+import type { FolderTreeNode, SavedMeeting } from "../api/local";
+import { moveOrgFolder } from "../api/local";
+import {
+  confirmDeleteFolder,
+  emptyFolder,
+  flattenFolderTree,
+  folderDescendantIds,
+  promptCreateFolder,
+  promptRenameFolder,
+} from "../utils/folderActions";
 import { ContextMenu } from "./ContextMenu";
 
 interface FolderTreeProps {
@@ -8,6 +16,8 @@ interface FolderTreeProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   onChange: () => void;
+  meetings?: SavedMeeting[];
+  itemCounts?: Record<string, number>;
 }
 
 interface CtxState {
@@ -21,59 +31,50 @@ function FolderRow({
   depth,
   selectedId,
   expanded,
+  itemCounts,
   onToggle,
   onSelect,
   onContextMenu,
-  onNewSubfolder,
 }: {
   node: FolderTreeNode;
   depth: number;
   selectedId: string | null;
   expanded: Set<string>;
+  itemCounts: Record<string, number>;
   onToggle: (id: string) => void;
   onSelect: (id: string) => void;
   onContextMenu: (e: React.MouseEvent, node: FolderTreeNode) => void;
-  onNewSubfolder: (parentId: string) => void;
 }) {
   const hasChildren = node.children.length > 0;
   const isOpen = expanded.has(node.id);
   const isSelected = selectedId === node.id;
   const isInbox = node.id === "inbox";
+  const count = itemCounts[node.id] ?? 0;
 
   return (
     <>
       <div
         className={`folder-tree-row ${isSelected ? "folder-tree-row--selected" : ""}`}
-        style={{ paddingLeft: `${12 + depth * 16}px` }}
+        style={{ paddingLeft: `${8 + depth * 18}px` }}
         onClick={() => onSelect(node.id)}
         onContextMenu={(e) => onContextMenu(e, node)}
       >
         <button
           type="button"
-          className={`folder-tree-chevron ${hasChildren ? "" : "folder-tree-chevron--spacer"}`}
+          className={`folder-tree-chevron ${hasChildren || isOpen ? "" : "folder-tree-chevron--spacer"}`}
           aria-label={isOpen ? "Collapse folder" : "Expand folder"}
           onClick={(e) => {
             e.stopPropagation();
-            if (hasChildren) onToggle(node.id);
+            if (hasChildren || isOpen) onToggle(node.id);
           }}
         >
-          {hasChildren ? (isOpen ? "▾" : "▸") : ""}
+          {hasChildren || isOpen ? (isOpen ? "▾" : "▸") : ""}
         </button>
-        <span className="folder-tree-icon" aria-hidden>
-          📁
+        <span className={`folder-tree-icon ${isOpen && hasChildren ? "folder-tree-icon--open" : ""}`} aria-hidden>
+          {isOpen && hasChildren ? "📂" : "📁"}
         </span>
         <span className="folder-tree-label">{node.name}</span>
-        <button
-          type="button"
-          className="folder-tree-add"
-          title="New subfolder"
-          onClick={(e) => {
-            e.stopPropagation();
-            onNewSubfolder(node.id);
-          }}
-        >
-          +
-        </button>
+        {count > 0 && <span className="folder-tree-count">{count}</span>}
       </div>
       {hasChildren && isOpen &&
         node.children.map((child) => (
@@ -83,14 +84,14 @@ function FolderRow({
             depth={depth + 1}
             selectedId={selectedId}
             expanded={expanded}
+            itemCounts={itemCounts}
             onToggle={onToggle}
             onSelect={onSelect}
             onContextMenu={onContextMenu}
-            onNewSubfolder={onNewSubfolder}
           />
         ))}
       {isInbox && isSelected && (
-        <div className="folder-tree-hint" style={{ paddingLeft: `${28 + depth * 16}px` }}>
+        <div className="folder-tree-hint" style={{ paddingLeft: `${26 + depth * 18}px` }}>
           Default folder for new recordings
         </div>
       )}
@@ -98,9 +99,18 @@ function FolderRow({
   );
 }
 
-export function FolderTree({ tree, selectedId, onSelect, onChange }: FolderTreeProps) {
+export function FolderTree({
+  tree,
+  selectedId,
+  onSelect,
+  onChange,
+  meetings = [],
+  itemCounts = {},
+}: FolderTreeProps) {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(["inbox"]));
   const [ctx, setCtx] = useState<CtxState | null>(null);
+
+  const flatFolders = useMemo(() => flattenFolderTree(tree), [tree]);
 
   const toggle = useCallback((id: string) => {
     setExpanded((prev) => {
@@ -111,21 +121,19 @@ export function FolderTree({ tree, selectedId, onSelect, onChange }: FolderTreeP
     });
   }, []);
 
-  const promptNewFolder = useCallback(
-    async (parentId?: string) => {
-      const name = window.prompt("Folder name");
-      if (!name?.trim()) return;
-      try {
-        await createOrgFolder(name.trim(), parentId ?? null);
-        if (parentId) {
-          setExpanded((prev) => new Set(prev).add(parentId));
-        }
+  const expandParent = useCallback((parentId: string) => {
+    setExpanded((prev) => new Set(prev).add(parentId));
+  }, []);
+
+  const handleNewSubfolder = useCallback(
+    async (parentId: string) => {
+      const id = await promptCreateFolder(parentId);
+      if (id) {
+        expandParent(parentId);
         onChange();
-      } catch (e) {
-        window.alert(String(e));
       }
     },
-    [onChange],
+    [expandParent, onChange],
   );
 
   const handleContextMenu = (e: React.MouseEvent, folder: FolderTreeNode) => {
@@ -134,15 +142,75 @@ export function FolderTree({ tree, selectedId, onSelect, onChange }: FolderTreeP
     setCtx({ x: e.clientX, y: e.clientY, folder });
   };
 
+  const moveTargets = useMemo(() => {
+    if (!ctx) return [];
+    const blocked = folderDescendantIds(tree, ctx.folder.id);
+    return flatFolders.filter((f) => f.id !== ctx.folder.id && !blocked.has(f.id));
+  }, [ctx, flatFolders, tree]);
+
+  const ctxItems = useMemo(() => {
+    if (!ctx) return [];
+    const folder = ctx.folder;
+    const parentId = folder.parentId ?? "inbox";
+    const directCount = itemCounts[folder.id] ?? 0;
+    const items = [
+      {
+        id: "new",
+        label: "Create new subfolder",
+        onClick: () => handleNewSubfolder(folder.id),
+      },
+      {
+        id: "rename",
+        label: "Rename",
+        disabled: folder.id === "inbox",
+        onClick: async () => {
+          if (await promptRenameFolder(folder)) onChange();
+        },
+      },
+      { id: "sep1", label: "", separator: true },
+      ...moveTargets.map((t) => ({
+        id: `move-${t.id}`,
+        label: `Move to ${t.name}`,
+        disabled: folder.id === "inbox",
+        onClick: async () => {
+          try {
+            await moveOrgFolder(folder.id, t.id);
+            onChange();
+          } catch (e) {
+            window.alert(String(e));
+          }
+        },
+      })),
+      { id: "sep2", label: "", separator: true },
+      {
+        id: "empty",
+        label: "Empty folder",
+        disabled: folder.id === "inbox" || directCount === 0,
+        onClick: async () => {
+          if (await emptyFolder(folder.id, meetings, parentId)) onChange();
+        },
+      },
+      {
+        id: "delete",
+        label: "Delete",
+        danger: true,
+        disabled: folder.id === "inbox",
+        onClick: async () => {
+          if (await confirmDeleteFolder(folder)) {
+            if (selectedId === folder.id) onSelect("inbox");
+            onChange();
+          }
+        },
+      },
+    ];
+    if (moveTargets.length === 0) {
+      return items.filter((i) => i.id !== "sep1" && !i.id.startsWith("move-"));
+    }
+    return items;
+  }, [ctx, handleNewSubfolder, itemCounts, meetings, moveTargets, onChange, onSelect, selectedId]);
+
   return (
     <div className="folder-tree">
-      <div className="folder-tree-head">
-        <span className="folder-tree-title">Folders</span>
-        <button type="button" className="btn-ghost-sm" onClick={() => promptNewFolder(selectedId ?? undefined)}>
-          + New folder
-        </button>
-      </div>
-
       <div className="folder-tree-body">
         {tree.map((node) => (
           <FolderRow
@@ -151,10 +219,10 @@ export function FolderTree({ tree, selectedId, onSelect, onChange }: FolderTreeP
             depth={0}
             selectedId={selectedId}
             expanded={expanded}
+            itemCounts={itemCounts}
             onToggle={toggle}
             onSelect={onSelect}
             onContextMenu={handleContextMenu}
-            onNewSubfolder={promptNewFolder}
           />
         ))}
       </div>
@@ -163,50 +231,7 @@ export function FolderTree({ tree, selectedId, onSelect, onChange }: FolderTreeP
         <ContextMenu
           x={ctx.x}
           y={ctx.y}
-          items={[
-            {
-              id: "new",
-              label: "New subfolder…",
-              onClick: () => promptNewFolder(ctx.folder.id),
-            },
-            {
-              id: "rename",
-              label: "Rename…",
-              disabled: ctx.folder.id === "inbox",
-              onClick: async () => {
-                const name = window.prompt("Rename folder", ctx.folder.name);
-                if (!name?.trim() || name.trim() === ctx.folder.name) return;
-                try {
-                  await renameOrgFolder(ctx.folder.id, name.trim());
-                  onChange();
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              },
-            },
-            {
-              id: "delete",
-              label: "Delete folder",
-              danger: true,
-              disabled: ctx.folder.id === "inbox",
-              onClick: async () => {
-                if (
-                  !window.confirm(
-                    `Delete “${ctx.folder.name}”? Meetings move to the parent folder.`,
-                  )
-                ) {
-                  return;
-                }
-                try {
-                  await deleteOrgFolder(ctx.folder.id);
-                  if (selectedId === ctx.folder.id) onSelect("inbox");
-                  onChange();
-                } catch (e) {
-                  window.alert(String(e));
-                }
-              },
-            },
-          ]}
+          items={ctxItems}
           onClose={() => setCtx(null)}
         />
       )}

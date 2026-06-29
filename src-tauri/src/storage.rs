@@ -1211,6 +1211,55 @@ pub fn delete_folder(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn move_folder(
+    app: AppHandle,
+    id: String,
+    new_parent_id: Option<String>,
+) -> Result<OrgFolder, String> {
+    if id == INBOX_FOLDER_ID {
+        return Err("Cannot move the Inbox folder".into());
+    }
+    let mut folders = ensure_folder_store(&app)?;
+    if let Some(ref pid) = new_parent_id {
+        if pid == &id {
+            return Err("Cannot move a folder into itself".into());
+        }
+        if !folders.iter().any(|f| f.id == *pid) {
+            return Err("Destination folder not found".into());
+        }
+        let descendants = folder_descendants(&folders, &id);
+        if descendants.iter().any(|d| d == pid) {
+            return Err("Cannot move a folder into its own subfolder".into());
+        }
+    }
+    let idx = folders
+        .iter()
+        .position(|f| f.id == id)
+        .ok_or_else(|| "Folder not found".to_string())?;
+    let root = candor_root(&app)?;
+    let old_path = folder_disk_path(&root, &folders, &id)?;
+    folders[idx].parent_id = new_parent_id;
+    let new_path = folder_disk_path(&root, &folders, &id)?;
+    if old_path != new_path {
+        if new_path.exists() {
+            return Err("A folder with that name already exists at the destination".into());
+        }
+        if old_path.exists() {
+            if let Some(parent) = new_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            fs::rename(&old_path, &new_path).map_err(|e| e.to_string())?;
+        } else {
+            fs::create_dir_all(&new_path).map_err(|e| e.to_string())?;
+        }
+    }
+    let updated = folders[idx].clone();
+    save_folder_store(&app, &FolderStore { folders: folders.clone() })?;
+    sync_disk_folders(&app, &folders)?;
+    Ok(updated)
+}
+
+#[tauri::command]
 pub fn move_meeting_to_folder(
     app: AppHandle,
     meeting_id: String,
