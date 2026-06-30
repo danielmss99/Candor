@@ -276,7 +276,7 @@ export function Home({
                       owner: a.owner,
                       due: a.due,
                       meeting: a.meeting,
-                      meetingId: a.meetingId,
+                      meetingId: "meetingId" in a ? a.meetingId : undefined,
                       soon: a.soon,
                     })
                   }
