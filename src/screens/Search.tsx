@@ -3,7 +3,7 @@ import type { View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
 import { loadSavedMeetings } from "../api/local";
-import { people } from "../data/mock";
+import { mockSavedMeetings, people } from "../data/mock";
 import {
   DATE_FILTERS,
   PERSON_FILTERS,
@@ -50,7 +50,7 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
   useEffect(() => {
     loadSavedMeetings().then((rows) =>
       setSavedMeetings(
-        rows.map((m) => ({
+        (rows.length > 0 ? rows : mockSavedMeetings()).map((m) => ({
           id: m.id,
           title: m.title,
           when: m.whenLabel,
@@ -79,7 +79,8 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
     const q = crossAskQ.trim();
     if (!q) return;
     setCrossLoading(true);
-    const meetings = await loadSavedMeetings();
+    const saved = await loadSavedMeetings();
+    const meetings = saved.length > 0 ? saved : mockSavedMeetings();
     const answer = await answerCrossMeeting(q, meetings);
     setCrossAskA(answer);
     pushCrossAsk(q, answer);

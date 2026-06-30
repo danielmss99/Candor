@@ -9,7 +9,7 @@ import type { CompletedAction, UserTask } from "../api/actions";
 import { loadSavedMeetings, type SavedMeeting } from "../api/local";
 import { useUser } from "../user";
 import { fmtEventTime } from "../format";
-import { actionItems, people } from "../data/mock";
+import { actionItems, mockSavedMeetings, people } from "../data/mock";
 import { meetingContextHandler } from "../components/ContextMenu";
 import type { ContextMenuState } from "../meetingEdit";
 import { buildCatchUpDigest } from "../v2/catchUp";
@@ -80,9 +80,10 @@ export function Home({
   const mockOpen = actionItems.filter((a) => !completedIds.has(a.id));
   const userOpen = userTasks.filter((a) => !completedIds.has(a.id));
   const openActions = [...userOpen, ...mockOpen];
-  const recent = savedMeetings.slice(0, 3);
-  const pinned = savedMeetings.filter((m) => favorites.has(m.id)).slice(0, 2);
-  const digest = buildCatchUpDigest(savedMeetings, userTasks, completedIds);
+  const displayMeetings = savedMeetings.length > 0 ? savedMeetings : mockSavedMeetings();
+  const recent = displayMeetings.slice(0, 3);
+  const pinned = displayMeetings.filter((m) => favorites.has(m.id)).slice(0, 2);
+  const digest = buildCatchUpDigest(displayMeetings, userTasks, completedIds, [], mockOpen);
 
   return (
     <div className="screen screen--sidebar">
@@ -126,7 +127,7 @@ export function Home({
               <div>
                 <div className="connect-title">Connect your calendar</div>
                 <div className="connect-desc">
-                  Pull in your Outlook or Apple meetings — ready to record in one click.
+                  Pull in your Outlook, Google, or Apple meetings — ready to record in one click.
                 </div>
               </div>
               <span className="connect-cta">Connect →</span>
@@ -195,7 +196,7 @@ export function Home({
 
         <div className="home-stats">
           <button className="stat-card" onClick={() => onNavigate("library")}>
-            <span className="stat-num">{savedMeetings.length}</span>
+            <span className="stat-num">{displayMeetings.length}</span>
             <span className="stat-label">Meetings</span>
           </button>
           <button className="stat-card" onClick={() => onNavigate("actions")}>
@@ -275,6 +276,7 @@ export function Home({
                       owner: a.owner,
                       due: a.due,
                       meeting: a.meeting,
+                      meetingId: a.meetingId,
                       soon: a.soon,
                     })
                   }
