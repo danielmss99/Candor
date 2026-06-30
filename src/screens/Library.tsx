@@ -4,6 +4,7 @@ import { Sidebar } from "../components/Sidebar";
 import { EmptyState } from "../components/EmptyState";
 import { Skeleton } from "../components/Skeleton";
 import { loadSavedMeetings, type SavedMeeting } from "../api/local";
+import { mockSavedMeetings } from "../data/mock";
 import { fmtEventTime } from "../format";
 import { meetingContextHandler } from "../components/ContextMenu";
 import type { ContextMenuState } from "../meetingEdit";
@@ -70,7 +71,7 @@ export function Library({
   }, [meetingsRefreshKey]);
 
   const filtered = useMemo(() => {
-    let list = saved;
+    let list = saved.length > 0 ? saved : mockSavedMeetings();
     if (filter === "week") {
       list = list.filter(
         (m) =>
@@ -96,9 +97,10 @@ export function Library({
   }, [saved, filter, localQuery, favorites, folderFilter, meetingFolders]);
 
   const pinned = useMemo(
-    () => saved.filter((m) => favorites.has(m.id)),
+    () => (saved.length > 0 ? saved : mockSavedMeetings()).filter((m) => favorites.has(m.id)),
     [saved, favorites],
   );
+  const isShowingMockMeetings = saved.length === 0;
 
   const submitSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -128,10 +130,13 @@ export function Library({
       key={m.id}
       className="meeting-row meeting-row--menu"
       onClick={() => onOpenMeeting(m.id)}
-      onContextMenu={(e) =>
-        meetingContextHandler(e, (x, y) =>
-          onMeetingContextMenu(x, y, { kind: "saved", meeting: m }),
-        )
+      onContextMenu={
+        m.path.startsWith("mock://")
+          ? undefined
+          : (e) =>
+              meetingContextHandler(e, (x, y) =>
+                onMeetingContextMenu(x, y, { kind: "saved", meeting: m }),
+              )
       }
     >
       <button
@@ -253,7 +258,7 @@ export function Library({
         )}
 
         <div className="section-label section-label--calm section-label--block">
-          Recorded · saved locally
+          {isShowingMockMeetings ? "Demo meetings" : "Recorded · saved locally"}
           <button type="button" className="link-btn link-btn--inline" onClick={() => onNavigate("files")}>
             Browse files →
           </button>

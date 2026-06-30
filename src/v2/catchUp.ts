@@ -13,6 +13,7 @@ export function buildCatchUpDigest(
   userTasks: UserTask[],
   completedIds: Set<string>,
   mockDecisions: string[] = [],
+  mockOpenTasks: { id: string; text: string; meeting: string; due: string }[] = [],
 ): CatchUpDigest {
   const weekAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
   const recent = meetings.filter((m) => {
@@ -25,10 +26,14 @@ export function buildCatchUpDigest(
     .filter((b) => /\b(decided|agreed|approved|consensus)\b/i.test(b))
     .slice(0, 5);
 
-  const openTasks = userTasks
+  const openTasks = [
+    ...userTasks
     .filter((t) => !completedIds.has(t.id))
-    .slice(0, 6)
-    .map((t) => ({ text: t.text, meeting: t.meeting, due: t.due }));
+    .map((t) => ({ text: t.text, meeting: t.meeting, due: t.due })),
+    ...mockOpenTasks
+      .filter((t) => !completedIds.has(t.id))
+      .map((t) => ({ text: t.text, meeting: t.meeting, due: t.due })),
+  ].slice(0, 6);
 
   return {
     decisions: decisions.length > 0 ? decisions : mockDecisions.slice(0, 3),

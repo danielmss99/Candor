@@ -1,5 +1,6 @@
 // Mock data mirroring the design handoff content. Replaced by real
 // transcription/storage in later milestones; here it drives the layout.
+import type { SavedMeeting } from "../api/local";
 
 export interface Person {
   initials: string;
@@ -286,6 +287,33 @@ export function getMeetingById(id: string): MeetingSummary | undefined {
   return meetings.find((m) => m.id === id);
 }
 
+function mockMeetingDate(index: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - index);
+  return date.toISOString();
+}
+
+function durationFromWhen(when: string): number {
+  const match = when.match(/(\d+)\s*min/);
+  return match ? Number(match[1]) : 1;
+}
+
+export function mockSavedMeetings(): SavedMeeting[] {
+  return meetings.map((m, index) => ({
+    id: m.id,
+    title: m.title,
+    date: mockMeetingDate(index),
+    whenLabel: m.when,
+    blurb: m.blurb,
+    durationMinutes: durationFromWhen(m.when),
+    path: `mock://${m.id}`,
+  }));
+}
+
+export function mockMeetingIdForTitle(title: string): string | undefined {
+  return meetings.find((m) => m.title === title)?.id;
+}
+
 // ----- Search -----
 export interface SearchResult {
   meeting: string;
@@ -359,15 +387,16 @@ export interface ActionItem {
   due: string;
   soon?: boolean;
   meeting: string;
+  meetingId?: string;
   done?: boolean;
 }
 
 export const actionItems: ActionItem[] = [
-  { id: "a1", text: "Scope the 2-week export delay impact", owner: "DP", due: "Jun 27", soon: true, meeting: "Q3 Roadmap Sync" },
-  { id: "a2", text: "Remove the welcome modal from onboarding", owner: "MC", due: "Jun 27", soon: true, meeting: "Design Critique — Onboarding", done: true },
-  { id: "a3", text: "Ship progressive profiling for signup", owner: "RK", due: "Jun 28", soon: true, meeting: "Design Critique — Onboarding" },
-  { id: "a4", text: "Pull top support requests for Q3", owner: "SL", due: "Jul 1", meeting: "Q3 Roadmap Sync" },
-  { id: "a5", text: "Send SSO + audit-log timeline to Northwind", owner: "DP", due: "Jul 1", meeting: "Customer Call — Northwind" },
-  { id: "a6", text: "Rewrite onboarding copy for clarity", owner: "RK", due: "Jul 2", meeting: "Design Critique — Onboarding" },
-  { id: "a7", text: "Confirm enterprise commitments with sales", owner: "MC", due: "Jul 3", meeting: "Q3 Roadmap Sync" },
+  { id: "a1", text: "Scope the 2-week export delay impact", owner: "DP", due: "Jun 27", soon: true, meeting: "Q3 Roadmap Sync", meetingId: "q3-roadmap" },
+  { id: "a2", text: "Remove the welcome modal from onboarding", owner: "MC", due: "Jun 27", soon: true, meeting: "Design Critique — Onboarding", meetingId: "design-crit", done: true },
+  { id: "a3", text: "Ship progressive profiling for signup", owner: "RK", due: "Jun 28", soon: true, meeting: "Design Critique — Onboarding", meetingId: "design-crit" },
+  { id: "a4", text: "Pull top support requests for Q3", owner: "SL", due: "Jul 1", meeting: "Q3 Roadmap Sync", meetingId: "q3-roadmap" },
+  { id: "a5", text: "Send SSO + audit-log timeline to Northwind", owner: "DP", due: "Jul 1", meeting: "Customer Call — Northwind", meetingId: "northwind" },
+  { id: "a6", text: "Rewrite onboarding copy for clarity", owner: "RK", due: "Jul 2", meeting: "Design Critique — Onboarding", meetingId: "design-crit" },
+  { id: "a7", text: "Confirm enterprise commitments with sales", owner: "MC", due: "Jul 3", meeting: "Q3 Roadmap Sync", meetingId: "q3-roadmap" },
 ];

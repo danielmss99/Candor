@@ -1,5 +1,6 @@
 import type { SavedMeeting } from "../api/local";
 import { loadMeetingDetail } from "../api/local";
+import { getRecapForMeeting } from "../data/mock";
 
 /** Simple cross-meeting Q&A using keyword matching across saved transcripts. */
 export async function answerCrossMeeting(
@@ -14,8 +15,16 @@ export async function answerCrossMeeting(
 
   for (const m of meetings.slice(0, 20)) {
     const detail = await loadMeetingDetail(m.id);
-    if (!detail) continue;
-    const full = detail.transcript.map((s) => s.text).join(" ");
+    const full =
+      detail?.transcript.map((s) => s.text).join(" ") ??
+      (m.path.startsWith("mock://")
+        ? [
+            getRecapForMeeting(m.id).summary,
+            ...getRecapForMeeting(m.id).decisions,
+            ...getRecapForMeeting(m.id).actions.map((a) => a.text),
+          ].join(" ")
+        : "");
+    if (!full) continue;
     const lower = full.toLowerCase();
     let score = 0;
     for (const t of terms) {

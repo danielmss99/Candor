@@ -30,7 +30,7 @@ import {
   type UserTask,
 } from "./api/actions";
 import type { RecapData } from "./data/mock";
-import { actionItems } from "./data/mock";
+import { actionItems, meetings as mockMeetings } from "./data/mock";
 import { generateRecapFromRecording, placeholderRecap } from "./recapGenerate";
 import { MeetingMenuHost } from "./components/MeetingMenuHost";
 import { CommandPalette } from "./components/CommandPalette";
@@ -257,7 +257,9 @@ function App() {
 
   useEffect(() => {
     loadSavedMeetings().then((m) =>
-      setPaletteMeetings(m.map((x) => ({ id: x.id, title: x.title }))),
+      setPaletteMeetings(
+        (m.length > 0 ? m : mockMeetings).map((x) => ({ id: x.id, title: x.title })),
+      ),
     );
   }, [meetingsRefreshKey]);
 
@@ -278,20 +280,60 @@ function App() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (showPalette) {
+          setShowPalette(false);
+          return;
+        }
+        if (showShortcuts) {
+          setShowShortcuts(false);
+          return;
+        }
+        if (showSettings) {
+          setShowSettings(false);
+          return;
+        }
+        if (showConnect) {
+          setShowConnect(false);
+          return;
+        }
+        if (editingName) {
+          setEditingName(false);
+          return;
+        }
+        if (showConsent) {
+          setShowConsent(false);
+          setPendingRecord(null);
+          return;
+        }
+        if (meetingMenu) {
+          setMeetingMenu(null);
+          return;
+        }
+      }
+      const overlayOpen =
+        showPalette ||
+        showShortcuts ||
+        showSettings ||
+        showConnect ||
+        editingName ||
+        showConsent ||
+        meetingMenu !== null;
       if (e.key === "?" && !e.metaKey && !e.ctrlKey) {
         const tag = (e.target as HTMLElement)?.tagName;
-        if (tag === "INPUT" || tag === "TEXTAREA") return;
+        if (overlayOpen || tag === "INPUT" || tag === "TEXTAREA") return;
         e.preventDefault();
         setShowShortcuts(true);
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        if (overlayOpen) return;
         e.preventDefault();
         setShowPalette(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [editingName, meetingMenu, showConnect, showConsent, showPalette, showSettings, showShortcuts]);
 
   useEffect(() => {
     loadCompletedActions().then((loaded) => {
@@ -304,6 +346,7 @@ function App() {
             owner: a.owner,
             due: a.due,
             meeting: a.meeting,
+            meetingId: a.meetingId,
             soon: a.soon,
             completedAt: new Date().toISOString(),
           }));
@@ -400,6 +443,9 @@ function App() {
 
   // Backend events: model download progress + audio errors.
   useEffect(() => {
+    if (!isTauri()) {
+      return () => stopTimer();
+    }
     const unlisteners: Array<() => void> = [];
     listen<{ downloaded: number; total: number }>("model-download-progress", (e) => {
       const { downloaded, total } = e.payload;
@@ -789,6 +835,12 @@ function App() {
   }, [rec, cancelPreroll]);
 
   const importAudio = useCallback(async () => {
+    if (!isTauri()) {
+      setError(
+        "Importing audio requires the Candor desktop app. Run npm run tauri dev instead of opening the browser.",
+      );
+      return;
+    }
     try {
       const result = await pickAndImportAudio();
       if (!result) return;
@@ -942,7 +994,7 @@ function App() {
         />
       )}
 
-      {error && rec === "idle" && (
+      {error && rec === "idle" && view !== "live" && (
         <div className="rec-error-toast" role="alert">
           ⚠ {error}
           <button type="button" className="rec-error-dismiss" onClick={() => setError(null)}>
