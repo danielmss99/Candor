@@ -82,7 +82,7 @@ Candor is local-first:
 
 - Transcripts and notes stay on the user's device.
 - Whisper models run locally.
-- Calendar tokens are stored locally.
+- Calendar token metadata is stored locally; token secrets use operating-system secret storage on Windows.
 - No server infrastructure is expected for the app's core functionality.
 
 Calendar integration is now write-capable by product request:

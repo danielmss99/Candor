@@ -180,6 +180,29 @@ export function saveRecapEdits(meetingId: string, edits: RecapEdits): void {
   set(`recapEdits.${meetingId}`, edits);
 }
 
+export function clearMeetingClientMetadata(meetingId: string): void {
+  localStorage.removeItem(PREFIX + `moments.${meetingId}`);
+  localStorage.removeItem(PREFIX + `speakers.${meetingId}`);
+  localStorage.removeItem(PREFIX + `recapEdits.${meetingId}`);
+
+  const favs = loadFavorites();
+  if (favs.delete(meetingId)) {
+    set("favorites", [...favs]);
+  }
+
+  const meetingFolders = loadMeetingFolders();
+  if (meetingFolders[meetingId]) {
+    delete meetingFolders[meetingId];
+    set("meetingFolders", meetingFolders);
+  }
+
+  const pending = loadPendingTasks();
+  const remaining = pending.filter((task) => task.meetingId !== meetingId);
+  if (remaining.length !== pending.length) {
+    savePendingTasks(remaining);
+  }
+}
+
 // --- Cross-meeting ask history ---
 export interface AskThread {
   id: string;

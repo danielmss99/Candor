@@ -1,6 +1,5 @@
 import { useEffect, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   getCalendarStatus,
   getGoogleCalendarSetup,
@@ -328,7 +327,9 @@ export function ConnectCalendarModal({ onClose, onConnected }: ConnectCalendarMo
             </p>
             <button
               className="link-btn link-btn--block"
-              onClick={() => openUrl("https://appleid.apple.com/account/manage")}
+              onClick={() =>
+                invoke("open_apple_account_page").catch((e) => setError(invokeError(e)))
+              }
             >
               Open appleid.apple.com →
             </button>

@@ -240,7 +240,7 @@ pub fn add_library(app: &AppHandle, name: String, path: String) -> Result<Storag
     if state
         .libraries
         .iter()
-        .any(|l| PathBuf::from(&l.path) == path_buf)
+        .any(|l| Path::new(&l.path) == path_buf.as_path())
     {
         return Err("This folder is already a storage location".into());
     }
@@ -289,7 +289,7 @@ pub fn change_library_path(
         .libraries
         .iter()
         .enumerate()
-        .any(|(i, l)| i != idx && PathBuf::from(&l.path) == path_buf)
+        .any(|(i, l)| i != idx && Path::new(&l.path) == path_buf.as_path())
     {
         return Err("This folder is already a storage location".into());
     }

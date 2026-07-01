@@ -10,8 +10,6 @@ use tauri::Emitter;
 
 use crate::Segment;
 
-/// ~115 MB/hour at 16 kHz mono 16-bit PCM.
-pub const BYTES_PER_HOUR_16K_MONO: u64 = 115 * 1024 * 1024;
 /// Warn when free disk space drops below ~2 hours of recording headroom.
 pub const DISK_WARN_BYTES: u64 = 250 * 1024 * 1024;
 /// Read/resample this many seconds of source audio per chunk (keeps RAM bounded).
@@ -152,10 +150,6 @@ impl StreamingWavWriter {
         self.writer.finalize().map_err(|e| e.to_string())?;
         Ok(self.samples_written)
     }
-
-    pub fn samples_written(&self) -> u64 {
-        self.samples_written
-    }
 }
 
 /// Duration in seconds from a finalized mono WAV (uses header sample count).
@@ -274,11 +268,6 @@ fn read_mono_from_iter(
     Ok(mono)
 }
 
-/// Resample a WAV to 16 kHz mono on disk without loading the full file into RAM.
-pub fn stream_resample_wav_to_16k(source: &Path, dest: &Path) -> Result<u32, String> {
-    stream_resample_mix_to_16k(source, None, dest)
-}
-
 /// Mix optional second WAV (same length, resampled independently) while writing 16 kHz mono.
 pub fn stream_resample_mix_to_16k(
     mic_source: &Path,
@@ -294,7 +283,7 @@ pub fn stream_resample_mix_to_16k(
     let mic_sr = mic_spec.sample_rate;
     let mic_ch = mic_spec.channels;
 
-    let mut sys_reader = if let Some(p) = system_source.filter(|p| p.exists()) {
+    let sys_reader = if let Some(p) = system_source.filter(|p| p.exists()) {
         Some(WavReader::open(p).map_err(|e| e.to_string())?)
     } else {
         None
@@ -371,10 +360,6 @@ impl WavChunkReader {
             chunk_samples,
             total_frames,
         })
-    }
-
-    pub fn chunk_samples(&self) -> usize {
-        self.chunk_samples
     }
 
     /// Returns the next chunk, or `None` when finished.
