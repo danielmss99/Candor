@@ -51,6 +51,87 @@ jobs:
         env:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
 
+      - name: Smoke test Windows installers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $bundleRoot = Join-Path $env:RUNNER_TEMP "candor-target\release\bundle"
+          $installer = Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Filter "*_x64-setup.exe" | Select-Object -First 1
+          if (-not $installer) {
+            throw "NSIS installer was not produced."
+          }
+
+          $msi = Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Filter "*.msi" | Select-Object -First 1
+          if (-not $msi) {
+            throw "MSI installer was not produced."
+          }
+
+          $installDir = Join-Path $env:RUNNER_TEMP "candor-smoke-install"
+          $profileRoot = Join-Path $env:RUNNER_TEMP "candor-smoke-profile"
+          $appData = Join-Path $profileRoot "AppData"
+          $localAppData = Join-Path $profileRoot "LocalAppData"
+          $tempDir = Join-Path $profileRoot "Temp"
+          New-Item -ItemType Directory -Force -Path $installDir,$appData,$localAppData,$tempDir | Out-Null
+
+          $install = Start-Process -FilePath $installer.FullName -ArgumentList @("/S", "/D=$installDir") -Wait -PassThru
+          if ($install.ExitCode -ne 0) {
+            throw "NSIS installer failed with exit code $($install.ExitCode)."
+          }
+
+          $exe = Join-Path $installDir "Candor.exe"
+          if (-not (Test-Path -LiteralPath $exe)) {
+            throw "Installed Candor.exe was not found."
+          }
+
+          $processInfo = [System.Diagnostics.ProcessStartInfo]::new()
+          $processInfo.FileName = $exe
+          $processInfo.WorkingDirectory = $installDir
+          $processInfo.Environment["APPDATA"] = $appData
+          $processInfo.Environment["LOCALAPPDATA"] = $localAppData
+          $processInfo.Environment["TEMP"] = $tempDir
+          $processInfo.Environment["TMP"] = $tempDir
+
+          $appProcess = [System.Diagnostics.Process]::Start($processInfo)
+          Start-Sleep -Seconds 15
+          if ($appProcess.HasExited) {
+            throw "Candor.exe exited during smoke test with code $($appProcess.ExitCode)."
+          }
+
+          $tcpConnections = @(Get-NetTCPConnection -OwningProcess $appProcess.Id -ErrorAction SilentlyContinue)
+          if ($tcpConnections.Count -gt 0) {
+            throw "Candor.exe opened $($tcpConnections.Count) TCP listener or connection during smoke test."
+          }
+
+          Stop-Process -Id $appProcess.Id -Force -ErrorAction SilentlyContinue
+
+          $uninstaller = Get-ChildItem -LiteralPath $installDir -File -Filter "uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $uninstaller) {
+            throw "NSIS uninstaller was not found."
+          }
+
+          $uninstall = Start-Process -FilePath $uninstaller.FullName -ArgumentList "/S" -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) {
+            throw "NSIS uninstaller failed with exit code $($uninstall.ExitCode)."
+          }
+
+          Start-Sleep -Seconds 2
+          if (Test-Path -LiteralPath $installDir) {
+            throw "NSIS uninstall left the install directory behind."
+          }
+
+          $extractDir = Join-Path $env:RUNNER_TEMP "candor-msi-extract"
+          New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+          $msiExtract = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/a", $msi.FullName, "/qn", "TARGETDIR=$extractDir") -Wait -PassThru
+          if ($msiExtract.ExitCode -ne 0) {
+            throw "MSI administrative extraction failed with exit code $($msiExtract.ExitCode)."
+          }
+
+          $extractedExe = Get-ChildItem -LiteralPath $extractDir -Recurse -File -Filter "Candor.exe" | Select-Object -First 1
+          if (-not $extractedExe) {
+            throw "MSI extraction did not contain Candor.exe."
+          }
+
       - name: Build Microsoft Store candidate
         if: github.event_name == 'workflow_dispatch'
         shell: pwsh
