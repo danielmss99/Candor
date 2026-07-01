@@ -262,6 +262,12 @@ async fn open_notes_folder(app: AppHandle) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn open_apple_account_page() -> Result<(), String> {
+    tauri_plugin_opener::open_url("https://appleid.apple.com/account/manage", None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 // ---------- Model management ----------
 
 fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -619,6 +625,7 @@ fn start_recording(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn stop_recording(
     app: AppHandle,
     state: State<'_, AudioState>,
@@ -1372,6 +1379,7 @@ pub fn run() {
             get_settings,
             set_model,
             open_notes_folder,
+            open_apple_account_page,
             storage::list_meetings,
             storage::read_meeting,
             storage::update_saved_meeting,

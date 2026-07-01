@@ -32,7 +32,7 @@ pub fn set_secret(app: &AppHandle, name: &str, value: Option<&str>) -> Result<()
     };
 
     let mut blob = value.as_bytes().to_vec();
-    let mut credential = CREDENTIALW {
+    let credential = CREDENTIALW {
         Flags: 0,
         Type: CRED_TYPE_GENERIC,
         TargetName: target_w.as_mut_ptr(),
@@ -47,7 +47,7 @@ pub fn set_secret(app: &AppHandle, name: &str, value: Option<&str>) -> Result<()
         UserName: null_mut(),
     };
 
-    let ok = unsafe { CredWriteW(&mut credential, 0) };
+    let ok = unsafe { CredWriteW(&credential, 0) };
     if ok == 0 {
         return Err("Could not save secret to Windows Credential Manager".into());
     }

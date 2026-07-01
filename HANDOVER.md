@@ -82,7 +82,7 @@ Candor is local-first:
 
 - Transcripts and notes stay on the user's device.
 - Whisper models run locally.
-- Calendar tokens are stored locally.
+- Calendar token metadata is stored locally; token secrets use operating-system secret storage on Windows.
 - No server infrastructure is expected for the app's core functionality.
 
 Calendar integration is now write-capable by product request:
@@ -146,164 +146,117 @@ Frontend:
 
 ## Security Review State
 
-The blue-team review was started but not fully completed before this handover. Continue from these findings first.
+The previous blue-team backlog has been closed for the Windows alpha path. Keep the items below as regression checks for future work.
 
-### P1: Apple CalDAV Event URL Validation
+### Closed: Apple CalDAV Event URL Validation
 
-Current risk:
+Renderer-supplied Apple `event_url` values are validated before CalDAV reads, writes, and deletes. The backend now requires `https`, rejects query strings and path traversal, checks host and port equality, and only accepts event paths under the connected iCloud calendar home URL.
 
-Renderer-supplied Apple `event_url` values reach backend CalDAV calls. Because Apple CalDAV uses a Basic auth header with the user's Apple ID and app-specific password, a compromised renderer could try to make the backend send that Authorization header to an attacker-controlled URL.
+Primary file:
+
+- `src-tauri/src/calendar.rs`
+
+Evidence:
+
+- `validate_apple_url_under_home`
+- `validated_apple_event_url`
+- `apple_get_ics`
+- `apple_put_ics`
+- `apple_delete_event`
+
+### Closed: Plaintext Secret Fallback
+
+Calendar credentials no longer persist to `calendar.json`. `save_auth` writes Microsoft, Google, and Apple secrets through `secret_store`; `calendar.json` receives metadata only. Legacy plaintext values are loaded only for migration, and the metadata file is rewritten without those secret fields.
 
 Primary files:
 
 - `src-tauri/src/calendar.rs`
-
-Important functions:
-
-- `apple_get_ics`
-- `apple_put_ics`
-- `apple_delete_event`
-- `update_calendar_event`
-- `delete_calendar_event`
-
-Recommended fix:
-
-- Validate any renderer-supplied Apple event URL before any CalDAV request.
-- Only allow `https://` URLs under the connected Apple calendar home URL.
-- Reject URLs outside the discovered iCloud CalDAV calendar root.
-- Consider validating final redirected URLs too, if the HTTP helper exposes them.
-
-### P1: Plaintext Secret Fallback
-
-Current risk:
-
-`save_auth` attempts to store calendar secrets in the OS credential manager, then has fallback behavior that can retain secrets in `calendar.json` if retrieval checks fail. For a privacy-first app, token persistence should fail closed instead of silently keeping refresh tokens or app passwords in plaintext.
-
-Primary file:
-
-- `src-tauri/src/calendar.rs`
-
-Recommended fix:
-
-- Remove plaintext fallback for Microsoft refresh token, Google refresh token, Apple email, and Apple app password.
-- If OS secret storage fails, return an error and do not save connected state.
-- Keep legacy plaintext loading only for migration, then resave without plaintext secrets.
-
-### P1: Audio Path Trust From Markdown Frontmatter
-
-Current risk:
-
-Meeting markdown frontmatter can contain `audio_path`. Some backend commands read or delete files based on that value. If a note file is edited by hand or tampered with, this can become an arbitrary local file read/delete primitive.
-
-Primary file:
-
-- `src-tauri/src/storage.rs`
-
-Relevant areas:
-
-- `meeting_audio_path`
-- retention cleanup logic around `audio_path`
-
-Recommended fix:
-
-- Canonicalize `audio_path`.
-- Only accept paths under Candor's app audio directory.
-- Only delete retained audio files if they are under that directory.
-- Return `None` for unsafe paths instead of using them.
-
-### P2: Model Verification Coverage
-
-Current risk:
-
-Model hashes are pinned, but all transcription entry points should verify model integrity immediately before use. Do not rely only on the download path.
-
-Primary file:
-
-- `src-tauri/src/lib.rs`
-
-Search target:
-
-```text
-model_path(&app)
-```
-
-Recommended fix:
-
-- Add a helper such as `verified_model_path`.
-- Require the selected model to exist and match its pinned SHA-256 before recording stop, import transcription, retry transcription, and recovery transcription.
-
-### P2: Calendar Write Input Validation
-
-Current risk:
-
-Calendar create/update commands should validate titles, dates, and event boundaries server-side. The renderer is not a security boundary.
-
-Primary file:
-
-- `src-tauri/src/calendar.rs`
-
-Recommended fix:
-
-- Reject empty titles.
-- Reject overly long titles and locations.
-- Parse RFC3339 or expected local datetime format consistently.
-- Require `end > start`.
-- Validate provider is one of `microsoft`, `google`, or `apple`.
-
-### P2: Documentation Mismatch
-
-Current risk:
-
-The docs still mention read-only calendar scopes in some places even though the app now requests write permissions.
-
-Known stale references:
-
-- `README.md`
-  - Microsoft Graph scope still listed as `Calendars.Read`
-  - Google scope still listed as `calendar.readonly`
-
-Recommended fix:
-
-- Update docs to `Calendars.ReadWrite` and `calendar.readwrite`.
-- Explain why write access is requested.
-- Update `SECURITY.md` to describe user-initiated calendar modification flows.
-
-## Files Most Likely To Need Attention Next
-
-- `src-tauri/src/calendar.rs`
-- `src-tauri/src/lib.rs`
-- `src-tauri/src/storage.rs`
 - `src-tauri/src/secret_store.rs`
-- `src/App.tsx`
-- `src/screens/Home.tsx`
-- `src/components/SettingsModal.tsx`
-- `src/components/MeetingMenuHost.tsx`
+
+Evidence:
+
+- `save_auth`
+- `auth_metadata`
+- `secure_or_migrate_secret`
+- `scripts/audit-source-security.ps1`
+
+### Closed: Audio Path Trust From Markdown Frontmatter
+
+Meeting `audio_path` values are canonicalized and accepted only when they resolve under Candor's managed app audio directory. Unsafe values are ignored for read and delete paths.
+
+Primary file:
+
+- `src-tauri/src/storage.rs`
+
+Evidence:
+
+- `managed_audio_path`
+- `meeting_audio_path`
+- retention cleanup around `audio_path`
+- `delete_meeting`
+
+### Closed: Model Verification Coverage
+
+Transcription entry points use a verified model path before work begins. The selected model must exist and match its pinned SHA-256 before recording stop, import transcription, retry transcription, and recovery transcription.
+
+Primary file:
+
+- `src-tauri/src/lib.rs`
+
+Evidence:
+
+- `verified_model_path`
+- `stop_recording`
+- `recover_partial_recording`
+- `transcribe_imported_audio`
+- `retry_transcription`
+
+### Closed: Calendar Write Input Validation
+
+Backend calendar create, update, and delete commands validate provider, event IDs, titles, locations, date parsing, and event ordering. The renderer is still treated as untrusted input.
+
+Primary file:
+
+- `src-tauri/src/calendar.rs`
+
+Evidence:
+
+- `validate_create_payload`
+- `validate_update_payload`
+- `validate_delete_payload`
+
+### Closed: Documentation Mismatch
+
+Calendar setup docs now describe write permissions and explain that calendar changes are user-initiated.
+
+Primary files:
+
 - `README.md`
 - `SECURITY.md`
+- `docs/privacy-policy-draft.md`
+- `docs/release-checklist.md`
 
-## Suggested Next Pass
+## Remaining Alpha Caveats
 
-1. Patch Apple CalDAV URL validation.
-2. Remove plaintext secret fallback in calendar auth storage.
-3. Harden `meeting_audio_path` and audio retention deletion.
-4. Add verified model path checks before every transcription entry point.
-5. Add backend validation for calendar write payloads.
-6. Update README and SECURITY docs for write scopes.
-7. Run:
+- The Windows alpha artifacts are intentionally unsigned until the signing step is handled by release ownership.
+- Clean VM execution still needs a real VM host or a hosted runner that exercises install, launch, and uninstall. Local sandbox providers were not available on this machine.
+- Dependency advisory scans should be repeated before every release because Rust and npm advisories change over time.
+- OAuth and CalDAV live-account flows still need manual verification with release credentials before a public launch.
+
+## Standard Release Gate
+
+Run these before every alpha build:
 
 ```powershell
 npm run build
-npm run tauri -- build --no-bundle --ci
-npm audit --audit-level=moderate
-```
-
-8. If installed, run:
-
-```powershell
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+npm audit --json
 cargo audit
+npm run audit:release
+npm run tauri:release
 ```
-
-If `cargo audit` is not installed, install it in a separate step or record that dependency advisory scanning remains incomplete.
 
 ## User Preferences And Product Direction
 

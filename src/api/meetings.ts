@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { CalendarEvent } from "../App";
+import { clearMeetingClientMetadata } from "../v2/metadata";
 
 export interface CreateCalendarPayload {
   provider: string;
@@ -55,4 +56,5 @@ export async function updateSavedMeeting(payload: UpdateSavedPayload): Promise<v
 export async function deleteSavedMeeting(id: string): Promise<void> {
   if (!isTauri()) throw new Error("Editing recordings requires the Candor desktop app.");
   await invoke("delete_saved_meeting", { id });
+  clearMeetingClientMetadata(id);
 }

@@ -11,7 +11,7 @@ Use this before publishing a Windows installer on the website or submitting a pa
 - [ ] `npm run build:store` creates a Store candidate installer.
 - [ ] `npm run audit:release` passes on the executable and installers before anything is shared.
 - [ ] Release artifacts contain no `C:\Users\...`, local repo paths, or unapproved `.env` values.
-- [ ] `CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS` is set only for production public client IDs that are intended to ship.
+- [ ] `CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS` is used only for additional public `.env` values intended to ship.
 - [ ] PDB files are removed from public release output, or audited and retained privately for debugging only.
 - [ ] Installer has been tested on a clean Windows machine.
 - [ ] Recording starts and stops from a fresh install.

@@ -1,6 +1,6 @@
 // Calendar integration. Microsoft (Outlook/365) and Google Calendar via browser
-// OAuth (PKCE + localhost callback). Apple/iCloud uses CalDAV. Tokens are stored
-// locally in the app data dir.
+// OAuth (PKCE + localhost callback). Apple/iCloud uses CalDAV. Calendar
+// metadata is stored locally; tokens and app passwords use the OS secret store.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};

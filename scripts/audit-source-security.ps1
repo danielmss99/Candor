@@ -30,6 +30,29 @@ if ($buildScript -match "CANDOR_GOOGLE_CLIENT_SECRET") {
   Fail "Google client secrets must not be exported at compile time"
 }
 
+$tauriConfig = Get-Content -LiteralPath (Join-Path $repoRootFull "src-tauri\tauri.conf.json") -Raw
+if ($tauriConfig -match "http://127\.0\.0\.1:\*" -or $tauriConfig -match "http://localhost:\*") {
+  Fail "release CSP must not allow every localhost port"
+}
+
+$defaultCapability = Get-Content -LiteralPath (Join-Path $repoRootFull "src-tauri\capabilities\default.json") -Raw
+if ($defaultCapability -match '"opener:default"') {
+  Fail "main window must not expose broad frontend opener permissions"
+}
+
+$packageJson = Get-Content -LiteralPath (Join-Path $repoRootFull "package.json") -Raw
+if ($packageJson -match '"@tauri-apps/plugin-opener"') {
+  Fail "frontend opener package must not be shipped when only Rust opens controlled URLs"
+}
+
+$frontendOpenerImports = @(
+  Get-ChildItem -LiteralPath (Join-Path $repoRootFull "src") -Recurse -File -Include *.ts,*.tsx |
+    Select-String -Pattern "@tauri-apps/plugin-opener"
+)
+if ($frontendOpenerImports.Count -gt 0) {
+  Fail "frontend code must not import the opener plugin directly"
+}
+
 $calendar = Get-Content -LiteralPath (Join-Path $repoRootFull "src-tauri\src\calendar.rs") -Raw
 $plaintextFallbackPatterns = @(
   "\.or\(auth\.ms_access_token\)",

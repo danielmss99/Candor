@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PrivacySettings {
     /// Delete WAV files after successful transcription.
@@ -10,16 +10,6 @@ pub struct PrivacySettings {
     pub retention_days: u32,
     /// Capture system/loopback audio alongside microphone.
     pub capture_system_audio: bool,
-}
-
-impl Default for PrivacySettings {
-    fn default() -> Self {
-        Self {
-            delete_audio_after_transcribe: false,
-            retention_days: 0,
-            capture_system_audio: false,
-        }
-    }
 }
 
 fn settings_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {

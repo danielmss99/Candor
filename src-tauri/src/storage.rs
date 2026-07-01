@@ -438,9 +438,9 @@ fn user_tasks_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 fn parse_frontmatter(raw: &str) -> (serde_json::Map<String, serde_json::Value>, String) {
     let mut meta = serde_json::Map::new();
-    let body = if raw.starts_with("---\n") {
-        if let Some(end) = raw[4..].find("\n---\n") {
-            let fm = &raw[4..4 + end];
+    let body = if let Some(stripped) = raw.strip_prefix("---\n") {
+        if let Some(end) = stripped.find("\n---\n") {
+            let fm = &stripped[..end];
             for line in fm.lines() {
                 if let Some((k, v)) = line.split_once(':') {
                     meta.insert(
@@ -449,7 +449,7 @@ fn parse_frontmatter(raw: &str) -> (serde_json::Map<String, serde_json::Value>, 
                     );
                 }
             }
-            raw[4 + end + 5..].to_string()
+            stripped[end + 5..].to_string()
         } else {
             raw.to_string()
         }
@@ -457,6 +457,22 @@ fn parse_frontmatter(raw: &str) -> (serde_json::Map<String, serde_json::Value>, 
         raw.to_string()
     };
     (meta, body)
+}
+
+fn frontmatter_scalar(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn push_frontmatter_field(md: &mut String, key: &str, value: &str) {
+    md.push_str(key);
+    md.push_str(": ");
+    md.push_str(&frontmatter_scalar(value));
+    md.push('\n');
 }
 
 fn parse_transcript(body: &str) -> Vec<Segment> {
@@ -596,22 +612,22 @@ pub fn save_note_file(
 
     let mut md = String::new();
     md.push_str("---\n");
-    md.push_str(&format!("id: {id}\n"));
-    md.push_str(&format!("title: {title}\n"));
-    md.push_str(&format!("date: {}\n", now.to_rfc3339()));
-    md.push_str(&format!("duration_seconds: {duration_seconds}\n"));
+    push_frontmatter_field(&mut md, "id", &id);
+    push_frontmatter_field(&mut md, "title", &title);
+    push_frontmatter_field(&mut md, "date", &now.to_rfc3339());
+    push_frontmatter_field(&mut md, "duration_seconds", &duration_seconds.to_string());
     if let Some(ap) = opts.audio_path {
-        md.push_str(&format!("audio_path: {ap}\n"));
+        push_frontmatter_field(&mut md, "audio_path", ap);
     }
-    md.push_str(&format!("folder_id: {folder_id}\n"));
+    push_frontmatter_field(&mut md, "folder_id", folder_id);
     if let Some(eid) = opts.calendar_event_id {
-        md.push_str(&format!("calendar_event_id: {eid}\n"));
+        push_frontmatter_field(&mut md, "calendar_event_id", eid);
     }
     if let Some(status) = opts.status {
-        md.push_str(&format!("status: {status}\n"));
+        push_frontmatter_field(&mut md, "status", status);
     }
     if let Some(err) = opts.transcription_error {
-        md.push_str(&format!("transcription_error: {err}\n"));
+        push_frontmatter_field(&mut md, "transcription_error", err);
     }
     md.push_str("---\n\n");
 
@@ -802,7 +818,7 @@ fn write_frontmatter(meta: &serde_json::Map<String, serde_json::Value>, body: &s
     let mut md = String::from("---\n");
     for (k, v) in meta {
         if let Some(s) = v.as_str() {
-            md.push_str(&format!("{k}: {s}\n"));
+            push_frontmatter_field(&mut md, k, s);
         }
     }
     md.push_str("---\n\n");
@@ -937,6 +953,15 @@ pub fn save_meeting_edits(app: AppHandle, payload: SaveMeetingEditsPayload) -> R
 #[tauri::command]
 pub fn delete_saved_meeting(app: AppHandle, id: String) -> Result<(), String> {
     let path = meeting_path_by_id(&app, &id)?;
+    let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let (meta, _) = parse_frontmatter(&raw);
+    if let Some(audio) = meta
+        .get("audio_path")
+        .and_then(|v| v.as_str())
+        .and_then(|p| managed_audio_path(&app, p))
+    {
+        let _ = fs::remove_file(audio);
+    }
     fs::remove_file(&path).map_err(|e| e.to_string())
 }
 
@@ -1449,4 +1474,30 @@ pub fn remove_storage_library(
     id: String,
 ) -> Result<storage_config::StorageLibrariesState, String> {
     storage_config::remove_library(&app, id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_frontmatter_does_not_allow_multiline_value_injection() {
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "title".into(),
+            serde_json::Value::String(
+                "Quarterly review\nfolder_id: attacker\n---\n# Hidden".into(),
+            ),
+        );
+
+        let written = write_frontmatter(&meta, "# Transcript\n\n");
+        let (parsed, body) = parse_frontmatter(&written);
+
+        assert_eq!(
+            parsed.get("title").and_then(|v| v.as_str()),
+            Some("Quarterly review folder_id: attacker --- # Hidden")
+        );
+        assert!(parsed.get("folder_id").is_none());
+        assert_eq!(body.trim_start(), "# Transcript\n\n");
+    }
 }

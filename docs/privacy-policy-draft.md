@@ -12,7 +12,7 @@ Candor may store the following on your computer:
 
 - Your name and profile picture.
 - App settings and theme preferences.
-- Calendar connection status and credentials needed to sync calendar events.
+- Calendar connection metadata and credentials needed to sync calendar events. Credentials are stored through operating-system secret storage where available.
 - Meeting recordings, if you choose to keep audio files.
 - Transcripts, summaries, action items, dictionary terms, and notes.
 - Local folder and storage library preferences.
