@@ -14,7 +14,7 @@ export interface CompletedAction {
   completedAt: string;
 }
 
-const COMPLETED_KEY = "candor-v2.completedActions";
+const COMPLETED_KEY = "candor.completedActions";
 
 export function recapActionId(meetingId: string, index: number): string {
   return `${meetingId}::action::${index}`;
@@ -61,7 +61,7 @@ export interface UserTask {
   createdAt: string;
 }
 
-const USER_TASKS_KEY = "candor-v2.userTasks";
+const USER_TASKS_KEY = "candor.userTasks";
 
 export function formatDueLabel(isoDate: string): string {
   const d = new Date(`${isoDate}T12:00:00`);

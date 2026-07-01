@@ -9,6 +9,37 @@ export function formatRecordingTime(elapsedSeconds: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
+/** Parse ISO datetime to local Date (Graph/Calendar often omit Z). */
+export function parseIsoLocalDate(iso: string): Date | null {
+  if (!iso) return null;
+  const zoned =
+    iso.includes("Z") || /[+-]\d\d:?\d\d$/.test(iso) ? iso : iso.split(".")[0] + "Z";
+  const d = new Date(zoned);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/** Local calendar day key: YYYY-MM-DD */
+export function toDateKey(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/** First day of week for locale (0 = Sunday … 6 = Saturday). */
+export function localeWeekStart(): number {
+  try {
+    const locale = new Intl.Locale(navigator.language);
+    const info = (locale as Intl.Locale & { weekInfo?: { firstDay: number } }).weekInfo;
+    if (info?.firstDay != null) {
+      return info.firstDay === 7 ? 0 : info.firstDay;
+    }
+  } catch {
+    /* Intl.Locale unsupported */
+  }
+  return 0;
+}
+
 /** Parse MM:SS or H:MM:SS to seconds. */
 export function parseRecordingTime(label: string): number {
   const parts = label.split(":").map((p) => parseInt(p, 10));

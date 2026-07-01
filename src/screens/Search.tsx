@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { View } from "../App";
+import type { SidebarFolderProps, View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
-import { loadSavedMeetings } from "../api/local";
+import { loadMeetingDetail, loadSavedMeetings } from "../api/local";
 import { people } from "../data/mock";
 import {
   DATE_FILTERS,
@@ -12,7 +12,7 @@ import {
   runSearch,
   type DateFilter,
   type PersonFilter,
-  type SavedSearchEntry,
+  type SearchableMeeting,
   type SearchScope,
 } from "../search";
 import { loadRecentSearches, pushRecentSearch } from "../v2/metadata";
@@ -25,6 +25,8 @@ interface SearchProps {
   onQueryChange: (query: string) => void;
   onJump: (meetingId: string, timestamp: string) => void;
   meetingsRefreshKey: number;
+  sidebarFolder: SidebarFolderProps;
+  embedded?: boolean;
 }
 
 function cycleFilter<T extends string>(options: T[], current: T): T {
@@ -32,47 +34,109 @@ function cycleFilter<T extends string>(options: T[], current: T): T {
   return options[(i + 1) % options.length];
 }
 
-export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefreshKey }: SearchProps) {
+function speakerAvatar(who: keyof typeof people, label?: string) {
+  if (label && !(label in people)) {
+    const initials = label
+      .split(/\s+/)
+      .map((p) => p[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase();
+    return <Avatar label={initials || "?"} size={24} />;
+  }
+  return <Avatar who={who} size={24} />;
+}
+
+export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefreshKey, sidebarFolder, embedded }: SearchProps) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const [person, setPerson] = useState<PersonFilter>("Anyone");
   const [date, setDate] = useState<DateFilter>("Any date");
-  const [scope, setScope] = useState<SearchScope>("Transcript");
-  const [savedMeetings, setSavedMeetings] = useState<SavedSearchEntry[]>([]);
+  const [scope, setScope] = useState<SearchScope>("All");
+  const [searchIndex, setSearchIndex] = useState<SearchableMeeting[]>([]);
+  const [indexLoading, setIndexLoading] = useState(false);
   const [recent, setRecent] = useState<string[]>(() => loadRecentSearches());
   const [crossAskQ, setCrossAskQ] = useState("");
   const [crossAskA, setCrossAskA] = useState<string | null>(null);
   const [crossLoading, setCrossLoading] = useState(false);
+  const [selectedIdx, setSelectedIdx] = useState(-1);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    loadSavedMeetings().then((rows) =>
-      setSavedMeetings(
-        rows.map((m) => ({
-          id: m.id,
-          title: m.title,
-          when: m.whenLabel,
-          blurb: m.blurb,
-        })),
-      ),
-    );
+    let cancelled = false;
+    setIndexLoading(true);
+    (async () => {
+      const rows = await loadSavedMeetings();
+      const enriched = await Promise.all(
+        rows.map(async (m) => {
+          const detail = await loadMeetingDetail(m.id);
+          return {
+            id: m.id,
+            title: m.title,
+            when: m.whenLabel,
+            blurb: m.blurb,
+            transcript: detail?.transcript ?? [],
+            notes: detail?.userNotes ?? "",
+          };
+        }),
+      );
+      if (!cancelled) {
+        setSearchIndex(enriched);
+        setIndexLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [meetingsRefreshKey]);
 
   useEffect(() => {
     if (query.trim()) {
       setRecent(pushRecentSearch(query));
     }
+    setSelectedIdx(-1);
   }, [query]);
 
   const { results, meta } = useMemo(
-    () => runSearch(query, { person, date, scope }, savedMeetings),
-    [query, person, date, scope, savedMeetings],
+    () => runSearch(query, { person, date, scope }, searchIndex),
+    [query, person, date, scope, searchIndex],
   );
+
+  useEffect(() => {
+    setSelectedIdx(-1);
+  }, [person, date, scope]);
 
   const personLabel = person === "Anyone" ? "Anyone ▾" : `${people[person].name.split(" ")[0]} ▾`;
   const dateLabel = date === "Any date" ? "Any date ▾" : `${date} ▾`;
+
+  const jumpResult = (idx: number) => {
+    const r = results[idx];
+    if (!r) return;
+    onJump(meetingIdForTitle(r.meeting, searchIndex), r.jump);
+  };
+
+  const onSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (results.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelectedIdx((i) => Math.min(i + 1, results.length - 1));
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelectedIdx((i) => Math.max(i - 1, 0));
+    } else if (e.key === "Enter" && selectedIdx >= 0) {
+      e.preventDefault();
+      jumpResult(selectedIdx);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedIdx < 0 || !listRef.current) return;
+    const el = listRef.current.querySelector(`[data-result-idx="${selectedIdx}"]`);
+    el?.scrollIntoView({ block: "nearest" });
+  }, [selectedIdx]);
 
   const submitCrossAsk = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,10 +150,7 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
     setCrossLoading(false);
   };
 
-  return (
-    <div className="screen screen--sidebar">
-      <Sidebar active="Search" onNavigate={onNavigate} />
-
+  const main = (
       <div className="main main--scroll">
         <div className="search-bar">
           <span className="search-bar-icon">⌕</span>
@@ -99,7 +160,8 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
             type="search"
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
-            placeholder="Search transcripts, summaries, tasks…"
+            onKeyDown={onSearchKeyDown}
+            placeholder="Search transcripts, summaries, notes, tasks…"
             aria-label="Search"
           />
           {query.length > 0 && (
@@ -131,7 +193,9 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
         )}
 
         <div className="search-meta-row">
-          <span className="search-count">{meta}</span>
+          <span className="search-count">
+            {indexLoading && query.trim() ? "Indexing meetings…" : meta}
+          </span>
           <div className="spacer" />
           <button
             type="button"
@@ -156,22 +220,27 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
           </button>
         </div>
 
-        <div className="result-list">
+        <div className="result-list" ref={listRef}>
           {results.map((r, i) => (
-            <div key={i} className="result-card">
+            <div
+              key={i}
+              data-result-idx={i}
+              className={`result-card${selectedIdx === i ? " result-card--selected" : ""}`}
+              onMouseEnter={() => setSelectedIdx(i)}
+            >
               <div className="result-head">
                 <span className="result-meeting">{r.meeting}</span>
                 <span className="result-when">{r.when}</span>
                 <div className="spacer" />
                 <button
                   className="jump-link"
-                  onClick={() => onJump(meetingIdForTitle(r.meeting, savedMeetings), r.jump)}
+                  onClick={() => jumpResult(i)}
                 >
                   Jump to {r.jump} →
                 </button>
               </div>
               <div className="result-body">
-                <Avatar who={r.speaker} size={24} />
+                {speakerAvatar(r.speaker, r.speakerLabel)}
                 <div className="result-quote">
                   {r.contextBefore && (
                     <span className="result-context">…{r.contextBefore} </span>
@@ -190,7 +259,7 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
               </div>
             </div>
           ))}
-          {query.trim() && results.length === 0 && (
+          {query.trim() && !indexLoading && results.length === 0 && (
             <div className="search-empty">No matches for "{query.trim()}".</div>
           )}
         </div>
@@ -211,6 +280,13 @@ export function Search({ onNavigate, query, onQueryChange, onJump, meetingsRefre
           {crossAskA && <div className="cross-ask-answer">{crossAskA}</div>}
         </div>
       </div>
+  );
+
+  if (embedded) return main;
+  return (
+    <div className="screen screen--sidebar">
+      <Sidebar active="Search" onNavigate={onNavigate} {...sidebarFolder} />
+      {main}
     </div>
   );
 }

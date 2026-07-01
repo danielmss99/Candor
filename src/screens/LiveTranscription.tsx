@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { View } from "../App";
+import type { View, TranscriptSegment } from "../App";
 import { useLiveSpeech } from "../useLiveSpeech";
-import { WaveformScrubber } from "../components/WaveformScrubber";
+import { LiveLevelMeter } from "../components/LiveLevelMeter";
 import type { LiveBookmark, LiveHighlight, MeetingMoments } from "../v2/metadata";
-import { parseRecordingTime } from "../utils/time";
 
 interface LiveProps {
   timeLabel: string;
@@ -39,17 +38,54 @@ export function Live({
   const timeRef = useRef(timeLabel);
   timeRef.current = timeLabel;
   const [panelTab, setPanelTab] = useState<LivePanelTab>("transcript");
+  const [editedSegments, setEditedSegments] = useState<TranscriptSegment[]>([]);
 
   const { segments: liveSegments, interim, supported, speechError } = useLiveSpeech(
     recording,
     () => timeRef.current,
   );
 
+  useEffect(() => {
+    if (!recording) {
+      setEditedSegments([]);
+      return;
+    }
+    setEditedSegments((prev) => {
+      const next = [...prev];
+      for (const seg of liveSegments) {
+        const idx = next.findIndex((s) => s.time === seg.time);
+        if (idx >= 0) {
+          if (next[idx].text === liveSegments.find((ls) => ls.time === seg.time)?.text) {
+            next[idx] = { time: seg.time, text: seg.text };
+          }
+        } else {
+          next.push({ time: seg.time, text: seg.text });
+        }
+      }
+      return next;
+    });
+  }, [liveSegments, recording]);
+
+  const displaySegments =
+    editedSegments.length > 0
+      ? editedSegments
+      : liveSegments.map((s) => ({ time: s.time, text: s.text }));
+
+  const updateSegmentText = useCallback((index: number, text: string) => {
+    setEditedSegments((prev) => {
+      const base =
+        prev.length > 0 ? prev : liveSegments.map((s) => ({ time: s.time, text: s.text }));
+      const next = [...base];
+      if (next[index]) next[index] = { ...next[index], text };
+      return next;
+    });
+  }, [liveSegments]);
+
   const transcriptEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [liveSegments, interim]);
+  }, [displaySegments, interim]);
 
   const appendChip = useCallback(
     (kind: keyof typeof CHIP_PREFIX) => {
@@ -91,8 +127,8 @@ export function Live({
     return () => window.removeEventListener("keydown", onKey);
   }, [recording, addBookmark]);
 
-  const showLive = recording && (liveSegments.length > 0 || interim);
-  const waveProgress = recording ? (parseRecordingTime(timeLabel) % 60) / 60 : 0;
+  const showLive = recording && (displaySegments.length > 0 || interim);
+  const voiceActive = Boolean(interim);
 
   return (
     <div className="screen live">
@@ -109,8 +145,8 @@ export function Live({
             "Live meeting"
           )}
         </span>
-        <div className="waveform" style={{ flex: 1, maxWidth: 280 }}>
-          <WaveformScrubber progress={waveProgress} onSeek={() => {}} disabled={!recording} />
+        <div className="live-level-wrap">
+          <LiveLevelMeter active={recording} voiceActive={voiceActive} />
         </div>
         <div className="timer-pill">
           {recording && <span className="timer-dot" />}
@@ -142,23 +178,30 @@ export function Live({
         </nav>
 
         {panelTab === "transcript" ? (
-          <main className="live-transcript live-transcript--inline">
+          <main className="live-transcript live-transcript--inline transcript-prose">
             {error ? (
               <div className="transcript-state transcript-state--error">⚠ {error}</div>
             ) : recording ? (
               <>
                 <div className="transcript-kicker kicker--calm">
                   Live transcript
-                  {supported ? " · updating as you speak" : " · enable mic for captions"}
+                  {supported ? " · tap text to edit" : " · enable mic for captions"}
                 </div>
                 {speechError && (
                   <div className="transcript-hint transcript-hint--warn">{speechError}</div>
                 )}
-                {liveSegments.map((s, i) => (
-                  <div key={i} className="real-seg real-seg--live">
+                {displaySegments.map((s, i) => (
+                  <div key={`${s.time}-${i}`} className="real-seg real-seg--live">
                     <span className="real-seg-time">{s.time}</span>
                     <p className="real-seg-text">
-                      {s.text}
+                      <span
+                        className="transcript-editable"
+                        contentEditable
+                        suppressContentEditableWarning
+                        onBlur={(e) => updateSegmentText(i, e.currentTarget.textContent ?? "")}
+                      >
+                        {s.text}
+                      </span>
                       <button
                         type="button"
                         className="seg-highlight-btn"

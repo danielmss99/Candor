@@ -8,15 +8,18 @@
 mod audio;
 mod calendar;
 mod privacy;
+mod secret_store;
 mod storage;
+mod storage_config;
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use sha2::Digest;
 use tauri::{AppHandle, Emitter, Manager, State};
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -28,6 +31,82 @@ const VALID_MODELS: [&str; 3] = ["tiny.en", "base.en", "small.en"];
 const CHECKPOINT_INTERVAL_SECS: u64 = 300;
 /// Whisper processes audio in 5-minute chunks (~48 chunks for 4 h).
 const CHUNK_DURATION_SECS: u32 = 300;
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        sha2::Digest::update(&mut hasher, &buf[..n]);
+    }
+    Ok(format!("{:x}", sha2::Digest::finalize(hasher)))
+}
+
+fn expected_model_sha256(model: &str) -> Option<&'static str> {
+    match model {
+        // Hashes are enforced when configured. Unknown hashes are blocked so alpha
+        // builds do not silently accept tampered model binaries.
+        "tiny.en" => option_env!("CANDOR_SHA256_TINY_EN"),
+        "base.en" => option_env!("CANDOR_SHA256_BASE_EN"),
+        "small.en" => option_env!("CANDOR_SHA256_SMALL_EN"),
+        _ => None,
+    }
+}
+
+fn verify_model(path: &Path, model: &str) -> Result<(), String> {
+    let Some(expected) = expected_model_sha256(model).filter(|h| !h.trim().is_empty()) else {
+        return Err(format!(
+            "Missing trusted SHA-256 for {model}. Set CANDOR_SHA256_* at build time before releasing this build."
+        ));
+    };
+    let actual = sha256_file(path)?;
+    if actual.eq_ignore_ascii_case(expected.trim()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Speech model integrity check failed for {model}. Delete the model and download it again."
+        ))
+    }
+}
+
+fn safe_filename(input: &str, fallback: &str) -> String {
+    let name = Path::new(input)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(fallback);
+    let mut out: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    out = out.trim().trim_matches('.').to_string();
+    if out.is_empty() {
+        fallback.to_string()
+    } else if out.to_ascii_lowercase().ends_with(".wav") {
+        out
+    } else {
+        format!("{out}.wav")
+    }
+}
+
+fn canonical_child(parent: &Path, child: &Path) -> Result<PathBuf, String> {
+    let parent = parent.canonicalize().map_err(|e| e.to_string())?;
+    let child = child.canonicalize().map_err(|e| e.to_string())?;
+    if child.starts_with(&parent) {
+        Ok(child)
+    } else {
+        Err("Path is outside Candor's managed storage.".into())
+    }
+}
 
 /// One transcript line surfaced to the UI.
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -168,8 +247,11 @@ fn set_model(app: AppHandle, model: String) -> Result<(), String> {
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_else(|| serde_json::json!({}));
     v["model"] = serde_json::Value::String(model);
-    std::fs::write(p, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())
+    std::fs::write(
+        p,
+        serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -190,6 +272,16 @@ fn model_path(app: &AppHandle) -> Result<PathBuf, String> {
         .join("models");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join(format!("ggml-{}.bin", current_model(app))))
+}
+
+fn verified_model_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let model = current_model(app);
+    let path = model_path(app)?;
+    if !path.exists() {
+        return Err("Model not downloaded yet".into());
+    }
+    verify_model(&path, &model)?;
+    Ok(path)
 }
 
 fn model_url(model: &str) -> String {
@@ -225,7 +317,10 @@ fn download_model(app: &AppHandle, dest: &Path, url: &str) -> Result<(), String>
         }
         file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
         downloaded += n as u64;
-        let _ = app.emit("model-download-progress", DownloadProgress { downloaded, total });
+        let _ = app.emit(
+            "model-download-progress",
+            DownloadProgress { downloaded, total },
+        );
     }
     file.flush().map_err(|e| e.to_string())?;
     drop(file);
@@ -237,18 +332,21 @@ fn download_model(app: &AppHandle, dest: &Path, url: &str) -> Result<(), String>
 #[tauri::command]
 async fn ensure_model(app: AppHandle) -> Result<String, String> {
     let path = model_path(&app)?;
+    let model = current_model(&app);
     let present = std::fs::metadata(&path)
         .map(|m| m.len() > 1_000_000)
         .unwrap_or(false);
     if present {
+        verify_model(&path, &model)?;
         return Ok(path.to_string_lossy().into_owned());
     }
     let app2 = app.clone();
     let path2 = path.clone();
-    let url = model_url(&current_model(&app));
+    let url = model_url(&model);
     tauri::async_runtime::spawn_blocking(move || download_model(&app2, &path2, &url))
         .await
         .map_err(|e| e.to_string())??;
+    verify_model(&path, &model)?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -276,9 +374,7 @@ fn start_recording(
     }
 
     let host = cpal::default_host();
-    let device = host
-        .default_input_device()
-        .ok_or("No microphone found")?;
+    let device = host.default_input_device().ok_or("No microphone found")?;
     let supported = device
         .default_input_config()
         .map_err(|e| format!("No input config: {e}"))?;
@@ -296,8 +392,7 @@ fn start_recording(
     let meeting_id = uuid::Uuid::new_v4().to_string();
     let audio_dir = audio::audio_dir(&app)?;
     let live_path = audio_dir.join(format!("{}.recording.wav", &meeting_id[..8]));
-    let live_writer =
-        audio::StreamingWavWriter::create(&live_path, sample_rate, channels)?;
+    let live_writer = audio::StreamingWavWriter::create(&live_path, sample_rate, channels)?;
     *state.recording_id.lock().unwrap() = Some(meeting_id.clone());
     *state.recording_title.lock().unwrap() = title_override.clone();
     *state.live_wav_path.lock().unwrap() = Some(live_path.clone());
@@ -311,9 +406,7 @@ fn start_recording(
         capture_system_audio.unwrap_or_else(|| privacy::load_privacy(&app).capture_system_audio);
     if want_system {
         let sys_path = audio_dir.join(format!("{}.system.recording.wav", &meeting_id[..8]));
-        if let Ok(sys_writer) =
-            audio::StreamingWavWriter::create(&sys_path, sample_rate, 2)
-        {
+        if let Ok(sys_writer) = audio::StreamingWavWriter::create(&sys_path, sample_rate, 2) {
             *state.system_live_wav.lock().unwrap() = Some(sys_writer);
             *state.system_live_wav_path.lock().unwrap() = Some(sys_path.clone());
             system_path = Some(sys_path.clone());
@@ -415,10 +508,25 @@ fn start_recording(
         };
         let rec = recording.clone();
         let wav = live_wav.clone();
+        let app_level = app_emit.clone();
+        let last_level_emit = Arc::new(AtomicU64::new(0));
 
         let write_samples = move |data: &[f32]| {
             if !rec.load(Ordering::Relaxed) {
                 return;
+            }
+            if !data.is_empty() {
+                let sum: f32 = data.iter().map(|s| s * s).sum();
+                let rms = (sum / data.len() as f32).sqrt().min(1.0);
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let prev = last_level_emit.load(Ordering::Relaxed);
+                if now.saturating_sub(prev) >= 80 {
+                    last_level_emit.store(now, Ordering::Relaxed);
+                    let _ = app_level.emit("audio-level", rms);
+                }
             }
             if let Ok(mut guard) = wav.lock() {
                 if let Some(w) = guard.as_mut() {
@@ -451,7 +559,8 @@ fn start_recording(
             cpal::SampleFormat::U16 => device.build_input_stream(
                 &config,
                 move |d: &[u16], _: &cpal::InputCallbackInfo| {
-                    let mapped: Vec<f32> = d.iter().map(|s| (*s as f32 - 32768.0) / 32768.0).collect();
+                    let mapped: Vec<f32> =
+                        d.iter().map(|s| (*s as f32 - 32768.0) / 32768.0).collect();
                     write_samples(&mapped);
                 },
                 err_fn,
@@ -460,10 +569,7 @@ fn start_recording(
             cpal::SampleFormat::I32 => device.build_input_stream(
                 &config,
                 move |d: &[i32], _: &cpal::InputCallbackInfo| {
-                    let mapped: Vec<f32> = d
-                        .iter()
-                        .map(|s| *s as f32 / 2_147_483_648.0)
-                        .collect();
+                    let mapped: Vec<f32> = d.iter().map(|s| *s as f32 / 2_147_483_648.0).collect();
                     write_samples(&mapped);
                 },
                 err_fn,
@@ -521,6 +627,7 @@ async fn stop_recording(
     title_override: Option<String>,
     calendar_event_id: Option<String>,
     folder_id: Option<String>,
+    initial_prompt: Option<String>,
 ) -> Result<StopRecordingResult, String> {
     if !state.recording.load(Ordering::SeqCst) {
         return Err("Not recording".into());
@@ -603,35 +710,43 @@ async fn stop_recording(
     }
     let _ = storage::clear_active_recording(&app);
 
-    let model = model_path(&app)?;
-    if !model.exists() {
-        let (_path, meeting_id) = storage::save_note_file(
-            &app,
-            &[],
-            user_notes.as_deref(),
-            duration_seconds,
-            storage::SaveNoteOptions {
-                meeting_id: Some(meeting_id),
-                title_override: title_override.as_deref(),
-                audio_path: audio_saved.as_deref(),
-                calendar_event_id: calendar_event_id.as_deref(),
-                folder_id: folder_id.as_deref(),
-                status: Some("transcription_failed"),
-                transcription_error: Some("Model not downloaded yet"),
-            },
-        )?;
-        return Ok(StopRecordingResult {
-            segments: vec![],
-            meeting_id,
-            status: "transcription_failed".into(),
-            transcription_error: Some("Model not downloaded yet".into()),
-        });
-    }
+    let model = match verified_model_path(&app) {
+        Ok(model) => model,
+        Err(model_error) => {
+            let (_path, meeting_id) = storage::save_note_file(
+                &app,
+                &[],
+                user_notes.as_deref(),
+                duration_seconds,
+                storage::SaveNoteOptions {
+                    meeting_id: Some(meeting_id),
+                    title_override: title_override.as_deref(),
+                    audio_path: audio_saved.as_deref(),
+                    calendar_event_id: calendar_event_id.as_deref(),
+                    folder_id: folder_id.as_deref(),
+                    status: Some("transcription_failed"),
+                    transcription_error: Some(&model_error),
+                },
+            )?;
+            return Ok(StopRecordingResult {
+                segments: vec![],
+                meeting_id,
+                status: "transcription_failed".into(),
+                transcription_error: Some(model_error),
+            });
+        }
+    };
 
     let wav_for_transcribe = wav_path.clone();
     let app_progress = app.clone();
+    let prompt = initial_prompt.filter(|p| !p.trim().is_empty());
     let transcription_result = tauri::async_runtime::spawn_blocking(move || {
-        transcribe_wav_file_chunked(&model, &wav_for_transcribe, Some(&app_progress))
+        transcribe_wav_file_chunked(
+            &model,
+            &wav_for_transcribe,
+            Some(&app_progress),
+            prompt.as_deref(),
+        )
     })
     .await;
 
@@ -671,17 +786,6 @@ async fn stop_recording(
         if let Some(ref path) = audio_saved {
             let _ = std::fs::remove_file(path);
         }
-    }
-
-    if let Some(url) = privacy.webhook_url.filter(|u| !u.trim().is_empty()) {
-        let payload = serde_json::json!({
-            "event": "meeting_saved",
-            "meetingId": meeting_id,
-            "durationSeconds": duration_seconds,
-            "segmentCount": segs.len(),
-            "status": status,
-        });
-        privacy::fire_webhook(&url, &payload);
     }
 
     Ok(StopRecordingResult {
@@ -726,7 +830,7 @@ pub fn to_mono_16k(interleaved: &[f32], sample_rate: u32, channels: u16) -> Vec<
 
 /// Run Whisper.cpp on 16 kHz mono audio and return timestamped segments.
 pub fn transcribe(model_path: &Path, audio: &[f32]) -> Result<Vec<Segment>, String> {
-  transcribe_chunked(model_path, audio, None)
+    transcribe_chunked(model_path, audio, None, None)
 }
 
 /// Transcribe long audio in ~5-minute chunks to avoid OOM/timeouts.
@@ -734,6 +838,7 @@ pub fn transcribe_chunked(
     model_path: &Path,
     audio: &[f32],
     app: Option<&AppHandle>,
+    initial_prompt: Option<&str>,
 ) -> Result<Vec<Segment>, String> {
     let chunk_samples = CHUNK_DURATION_SECS as usize * WHISPER_SAMPLE_RATE as usize;
     if audio.is_empty() {
@@ -758,7 +863,7 @@ pub fn transcribe_chunked(
             );
         }
         let offset_cs = (idx * chunk_samples) as i64 * 100 / WHISPER_SAMPLE_RATE as i64;
-        let mut segs = transcribe_with_context(&ctx, chunk, offset_cs)?;
+        let mut segs = transcribe_with_context(&ctx, chunk, offset_cs, initial_prompt)?;
         all.append(&mut segs);
     }
 
@@ -770,6 +875,7 @@ pub fn transcribe_wav_file_chunked(
     model_path: &Path,
     wav_path: &Path,
     app: Option<&AppHandle>,
+    initial_prompt: Option<&str>,
 ) -> Result<Vec<Segment>, String> {
     let chunk_samples = CHUNK_DURATION_SECS as usize * WHISPER_SAMPLE_RATE as usize;
     let mut reader = audio::WavChunkReader::open(wav_path, chunk_samples)?;
@@ -793,7 +899,7 @@ pub fn transcribe_wav_file_chunked(
             );
         }
         let offset_cs = (idx as usize * chunk_samples) as i64 * 100 / WHISPER_SAMPLE_RATE as i64;
-        let mut segs = transcribe_with_context(&ctx, &chunk, offset_cs)?;
+        let mut segs = transcribe_with_context(&ctx, &chunk, offset_cs, initial_prompt)?;
         all.append(&mut segs);
         idx += 1;
     }
@@ -805,6 +911,7 @@ fn transcribe_with_context(
     ctx: &WhisperContext,
     audio: &[f32],
     offset_cs: i64,
+    initial_prompt: Option<&str>,
 ) -> Result<Vec<Segment>, String> {
     let mut state = ctx.create_state().map_err(|e| e.to_string())?;
 
@@ -819,6 +926,9 @@ fn transcribe_with_context(
     params.set_print_progress(false);
     params.set_print_realtime(false);
     params.set_print_timestamps(false);
+    if let Some(prompt) = initial_prompt.filter(|p| !p.trim().is_empty()) {
+        params.set_initial_prompt(prompt);
+    }
 
     state.full(params, audio).map_err(|e| e.to_string())?;
 
@@ -957,6 +1067,14 @@ async fn recover_partial_recording(
     }
     let meeting_id = meeting_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let audio_dir = audio::audio_dir(&app)?;
+    let live_path = canonical_child(&audio_dir, &live_path)?;
+    if !live_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.ends_with(".recording.wav"))
+    {
+        return Err("Only Candor recovery recordings can be recovered.".into());
+    }
     let wav_path = audio_dir.join(format!("{}.wav", &meeting_id[..8.min(meeting_id.len())]));
 
     let duration_seconds = tauri::async_runtime::spawn_blocking({
@@ -971,35 +1089,37 @@ async fn recover_partial_recording(
     let _ = storage::clear_active_recording(&app);
 
     let audio_saved = Some(wav_path.to_string_lossy().into_owned());
-    let model = model_path(&app)?;
-    if !model.exists() {
-        let (_path, id) = storage::save_note_file(
-            &app,
-            &[],
-            None,
-            duration_seconds,
-            storage::SaveNoteOptions {
-                meeting_id: Some(meeting_id.clone()),
-                title_override: title_override.as_deref(),
-                audio_path: audio_saved.as_deref(),
-                calendar_event_id: None,
-                folder_id: None,
-                status: Some("transcription_failed"),
-                transcription_error: Some("Model not downloaded yet"),
-            },
-        )?;
-        return Ok(StopRecordingResult {
-            segments: vec![],
-            meeting_id: id,
-            status: "transcription_failed".into(),
-            transcription_error: Some("Model not downloaded yet".into()),
-        });
-    }
+    let model = match verified_model_path(&app) {
+        Ok(model) => model,
+        Err(model_error) => {
+            let (_path, id) = storage::save_note_file(
+                &app,
+                &[],
+                None,
+                duration_seconds,
+                storage::SaveNoteOptions {
+                    meeting_id: Some(meeting_id.clone()),
+                    title_override: title_override.as_deref(),
+                    audio_path: audio_saved.as_deref(),
+                    calendar_event_id: None,
+                    folder_id: None,
+                    status: Some("transcription_failed"),
+                    transcription_error: Some(&model_error),
+                },
+            )?;
+            return Ok(StopRecordingResult {
+                segments: vec![],
+                meeting_id: id,
+                status: "transcription_failed".into(),
+                transcription_error: Some(model_error),
+            });
+        }
+    };
 
     let wav_for_transcribe = wav_path.clone();
     let app_progress = app.clone();
     let transcription_result = tauri::async_runtime::spawn_blocking(move || {
-        transcribe_wav_file_chunked(&model, &wav_for_transcribe, Some(&app_progress))
+        transcribe_wav_file_chunked(&model, &wav_for_transcribe, Some(&app_progress), None)
     })
     .await;
 
@@ -1047,10 +1167,7 @@ async fn import_audio_file(
     if !src.exists() {
         return Err("File not found".into());
     }
-    let default_title = src
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::to_string);
+    let default_title = src.file_stem().and_then(|s| s.to_str()).map(str::to_string);
     let app2 = app.clone();
     let title2 = title.clone();
     let (pcm, sr) = tauri::async_runtime::spawn_blocking(move || audio::decode_audio_file(&src))
@@ -1068,37 +1185,38 @@ async fn import_audio_file(
         .ok()
         .map(|()| wav_path.to_string_lossy().into_owned());
 
-    let model = model_path(&app2)?;
+    let model = match verified_model_path(&app2) {
+        Ok(model) => model,
+        Err(model_error) => {
+            return Ok(StopRecordingResult {
+                segments: vec![],
+                meeting_id: storage::save_note_file(
+                    &app2,
+                    &[],
+                    None,
+                    duration_seconds,
+                    storage::SaveNoteOptions {
+                        meeting_id: Some(meeting_id),
+                        title_override: title2.as_deref().or(default_title.as_deref()),
+                        audio_path: audio_saved.as_deref(),
+                        calendar_event_id: None,
+                        folder_id: None,
+                        status: Some("transcription_failed"),
+                        transcription_error: Some(&model_error),
+                    },
+                )?
+                .1,
+                status: "transcription_failed".into(),
+                transcription_error: Some(model_error),
+            });
+        }
+    };
     let audio_for_transcribe = audio.clone();
     let app_progress = app2.clone();
-    let transcription_result = if model.exists() {
-        tauri::async_runtime::spawn_blocking(move || {
-            transcribe_chunked(&model, &audio_for_transcribe, Some(&app_progress))
-        })
-        .await
-    } else {
-        return Ok(StopRecordingResult {
-            segments: vec![],
-            meeting_id: storage::save_note_file(
-                &app2,
-                &[],
-                None,
-                duration_seconds,
-                storage::SaveNoteOptions {
-                    meeting_id: Some(meeting_id),
-                    title_override: title2.as_deref().or(default_title.as_deref()),
-                    audio_path: audio_saved.as_deref(),
-                    calendar_event_id: None,
-                    folder_id: None,
-                    status: Some("transcription_failed"),
-                    transcription_error: Some("Model not downloaded yet"),
-                },
-            )?
-            .1,
-            status: "transcription_failed".into(),
-            transcription_error: Some("Model not downloaded yet".into()),
-        });
-    };
+    let transcription_result = tauri::async_runtime::spawn_blocking(move || {
+        transcribe_chunked(&model, &audio_for_transcribe, Some(&app_progress), None)
+    })
+    .await;
 
     let (mut segs, status, transcription_error) = match transcription_result {
         Ok(Ok(segments)) => (segments, "complete", None),
@@ -1148,7 +1266,10 @@ async fn import_audio_file(
 }
 
 #[tauri::command]
-async fn retry_transcription(app: AppHandle, meeting_id: String) -> Result<StopRecordingResult, String> {
+async fn retry_transcription(
+    app: AppHandle,
+    meeting_id: String,
+) -> Result<StopRecordingResult, String> {
     let detail = storage::read_meeting(app.clone(), meeting_id.clone())?;
     let audio_path = detail
         .audio_path
@@ -1158,15 +1279,12 @@ async fn retry_transcription(app: AppHandle, meeting_id: String) -> Result<StopR
         return Err("Audio file missing on disk".into());
     }
 
-    let model = model_path(&app)?;
-    if !model.exists() {
-        return Err("Model not downloaded yet".into());
-    }
+    let model = verified_model_path(&app)?;
 
     let wav_path = src.clone();
     let app_progress = app.clone();
     let transcription_result = tauri::async_runtime::spawn_blocking(move || {
-        transcribe_wav_file_chunked(&model, &wav_path, Some(&app_progress))
+        transcribe_wav_file_chunked(&model, &wav_path, Some(&app_progress), None)
     })
     .await;
 
@@ -1209,15 +1327,6 @@ fn pick_audio_file() -> Result<Option<String>, String> {
         .map(|p| p.to_string_lossy().into_owned()))
 }
 
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ExportClipArgs {
-    meeting_id: String,
-    start_seconds: f32,
-    end_seconds: f32,
-    dest_path: String,
-}
-
 #[tauri::command]
 fn export_audio_clip(
     app: AppHandle,
@@ -1226,10 +1335,17 @@ fn export_audio_clip(
     end_seconds: f32,
     dest_path: String,
 ) -> Result<String, String> {
-    let src = storage::meeting_audio_path(&app, &meeting_id)?
-        .ok_or("No audio file for this meeting")?;
-    audio::export_clip(Path::new(&src), start_seconds, end_seconds, Path::new(&dest_path))?;
-    Ok(dest_path)
+    let src =
+        storage::meeting_audio_path(&app, &meeting_id)?.ok_or("No audio file for this meeting")?;
+    let export_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("exports");
+    std::fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
+    let dest = export_dir.join(safe_filename(&dest_path, "candor-clip.wav"));
+    audio::export_clip(Path::new(&src), start_seconds, end_seconds, &dest)?;
+    Ok(dest.to_string_lossy().into_owned())
 }
 
 // ---------- Note storage (legacy helper removed — see storage.rs) ----------
@@ -1277,6 +1393,13 @@ pub fn run() {
             storage::move_meeting_to_folder,
             storage::save_meeting_edits,
             storage::open_candor_folder,
+            storage::get_storage_libraries,
+            storage::pick_storage_folder,
+            storage::add_storage_library,
+            storage::set_active_storage_library,
+            storage::change_storage_library_path,
+            storage::rename_storage_library,
+            storage::remove_storage_library,
             calendar::calendar_status,
             calendar::ms_calendar_setup,
             calendar::ms_oauth_connect,
@@ -1287,6 +1410,7 @@ pub fn run() {
             calendar::apple_connect,
             calendar::apple_disconnect,
             calendar::list_events,
+            calendar::create_calendar_event,
             calendar::update_calendar_event,
             calendar::delete_calendar_event,
         ])

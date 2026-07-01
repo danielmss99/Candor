@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { View } from "../App";
+import type { SidebarFolderProps, View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
 import { Skeleton } from "../components/Skeleton";
@@ -15,9 +15,11 @@ import {
 interface PeopleProps {
   onNavigate: (view: View) => void;
   onOpenMeeting?: (id: string) => void;
+  sidebarFolder: SidebarFolderProps;
+  embedded?: boolean;
 }
 
-export function People({ onNavigate, onOpenMeeting }: PeopleProps) {
+export function People({ onNavigate, onOpenMeeting, sidebarFolder, embedded }: PeopleProps) {
   const [people, setPeople] = useState<VoicePerson[]>([]);
   const [meetings, setMeetings] = useState<{ id: string; title: string }[]>([]);
   const [loading, setLoading] = useState(true);
@@ -69,10 +71,7 @@ export function People({ onNavigate, onOpenMeeting }: PeopleProps) {
     await save(people.filter((p) => p.id !== id));
   };
 
-  return (
-    <div className="screen screen--sidebar">
-      <Sidebar active="People" onNavigate={onNavigate} />
-
+  const main = (
       <div className="main main--scroll">
         <div className="library-head">
           <span className="page-title">People</span>
@@ -164,6 +163,13 @@ export function People({ onNavigate, onOpenMeeting }: PeopleProps) {
           </div>
         )}
       </div>
+  );
+
+  if (embedded) return main;
+  return (
+    <div className="screen screen--sidebar">
+      <Sidebar active="People" onNavigate={onNavigate} {...sidebarFolder} />
+      {main}
     </div>
   );
 }

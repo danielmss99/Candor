@@ -52,7 +52,7 @@ export const SUMMARY_TEMPLATES: SummaryTemplate[] = [
   },
 ];
 
-const TEMPLATE_KEY = "candor-v2.summaryTemplate";
+const TEMPLATE_KEY = "candor.summaryTemplate";
 
 export function loadSummaryTemplate(): SummaryTemplateId {
   const raw = localStorage.getItem(TEMPLATE_KEY);

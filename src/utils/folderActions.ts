@@ -19,6 +19,21 @@ export function flattenFolderTree(tree: FolderTreeNode[]): FolderTreeNode[] {
   return out;
 }
 
+export function folderBreadcrumbPath(
+  tree: FolderTreeNode[],
+  folderId: string,
+): FolderTreeNode[] {
+  const flat = flattenFolderTree(tree);
+  const byId = new Map(flat.map((f) => [f.id, f]));
+  const path: FolderTreeNode[] = [];
+  let current: FolderTreeNode | undefined = byId.get(folderId);
+  while (current) {
+    path.unshift(current);
+    current = current.parentId ? byId.get(current.parentId) : undefined;
+  }
+  return path;
+}
+
 export function folderDescendantIds(tree: FolderTreeNode[], id: string): Set<string> {
   const out = new Set<string>();
   const walk = (nodes: FolderTreeNode[]) => {
@@ -97,7 +112,6 @@ export async function createFolderForEdit(
 }
 
 export async function promptRenameFolder(folder: FolderTreeNode): Promise<boolean> {
-  if (folder.id === "inbox") return false;
   const name = window.prompt("Rename folder", folder.name);
   if (!name?.trim() || name.trim() === folder.name) return false;
   try {
@@ -111,13 +125,6 @@ export async function promptRenameFolder(folder: FolderTreeNode): Promise<boolea
 
 export async function confirmDeleteFolder(folder: FolderTreeNode): Promise<boolean> {
   if (folder.id === "inbox") return false;
-  if (
-    !window.confirm(
-      `Delete “${folder.name}”? Meetings in this folder move to the parent folder.`,
-    )
-  ) {
-    return false;
-  }
   try {
     await deleteOrgFolder(folder.id);
     return true;

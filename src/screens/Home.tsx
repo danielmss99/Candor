@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { CalendarEvent, View } from "../App";
+import type { CalendarEvent, SidebarFolderProps, View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
 import { EmptyState } from "../components/EmptyState";
@@ -11,9 +11,12 @@ import { useUser } from "../user";
 import { fmtEventTime } from "../format";
 import { actionItems, people } from "../data/mock";
 import { meetingContextHandler } from "../components/ContextMenu";
+import { datetimeLocalToIso } from "../meetingEdit";
 import type { ContextMenuState } from "../meetingEdit";
-import { buildCatchUpDigest } from "../v2/catchUp";
 import { loadFavorites, type OnboardingState } from "../v2/metadata";
+import { MonthCalendar } from "../components/MonthCalendar";
+import { parseIsoLocalDate, toDateKey } from "../utils/time";
+import { buildCatchUpDigest } from "../v2/catchUp";
 
 interface HomeProps {
   onNavigate: (view: View) => void;
@@ -21,7 +24,15 @@ interface HomeProps {
   onOpenMeeting: (id: string) => void;
   calendarConnected: boolean;
   events: CalendarEvent[];
+  connectedProviders: string[];
   onConnectCalendar: () => void;
+  onCreateCalendarEvent: (payload: {
+    provider: string;
+    title: string;
+    start: string;
+    end: string;
+    location?: string | null;
+  }) => Promise<void>;
   onRecordEvent: (ev: CalendarEvent) => void;
   completedIds: Set<string>;
   onCompleteAction: (item: Omit<CompletedAction, "completedAt">) => void;
@@ -29,6 +40,8 @@ interface HomeProps {
   userTasks: UserTask[];
   meetingsRefreshKey: number;
   onboarding: OnboardingState;
+  sidebarFolder: SidebarFolderProps;
+  embedded?: boolean;
 }
 
 function greeting(): string {
@@ -44,7 +57,9 @@ export function Home({
   onOpenMeeting,
   calendarConnected,
   events,
+  connectedProviders,
   onConnectCalendar,
+  onCreateCalendarEvent,
   onRecordEvent,
   completedIds,
   onCompleteAction,
@@ -52,11 +67,15 @@ export function Home({
   userTasks,
   meetingsRefreshKey,
   onboarding,
+  sidebarFolder,
+  embedded,
 }: HomeProps) {
   const { firstName } = useUser();
   const [savedMeetings, setSavedMeetings] = useState<SavedMeeting[]>([]);
   const [meetingsLoading, setMeetingsLoading] = useState(true);
   const [favorites] = useState(() => loadFavorites());
+  const [selectedDay, setSelectedDay] = useState<string | null>(null);
+  const [showCreateMeeting, setShowCreateMeeting] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,11 +103,15 @@ export function Home({
   const pinned = savedMeetings.filter((m) => favorites.has(m.id)).slice(0, 2);
   const digest = buildCatchUpDigest(savedMeetings, userTasks, completedIds);
 
-  return (
-    <div className="screen screen--sidebar">
-      <Sidebar active="Home" onNavigate={onNavigate} />
+  const upcomingEvents = selectedDay
+    ? events.filter((ev) => {
+        const d = parseIsoLocalDate(ev.start);
+        return d != null && toDateKey(d) === selectedDay;
+      })
+    : events;
 
-      <div className="main main--scroll">
+  const content = (
+    <>
         <OnboardingChecklist
           state={onboarding}
           onConnectCalendar={onConnectCalendar}
@@ -111,13 +134,32 @@ export function Home({
           </button>
         </div>
 
+        <MonthCalendar
+          events={events}
+          savedMeetings={savedMeetings}
+          selectedDay={selectedDay}
+          onSelectDay={setSelectedDay}
+        />
+
         <section className="upcoming">
           <div className="home-col-head">
-            <span className="section-label section-label--calm">Upcoming meetings</span>
+            <span className="section-label section-label--calm">
+              Upcoming meetings
+              {selectedDay &&
+                ` · ${new Date(selectedDay + "T12:00:00").toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                })}`}
+            </span>
             {calendarConnected && (
-              <button className="link-btn" onClick={onConnectCalendar}>
-                Calendar settings
-              </button>
+              <div className="home-head-actions">
+                <button className="link-btn" onClick={() => setShowCreateMeeting(true)}>
+                  New meeting
+                </button>
+                <button className="link-btn" onClick={onConnectCalendar}>
+                  Calendar settings
+                </button>
+              </div>
             )}
           </div>
 
@@ -131,10 +173,12 @@ export function Home({
               </div>
               <span className="connect-cta">Connect →</span>
             </button>
-          ) : events.length === 0 ? (
-            <div className="home-empty">No meetings in the next two weeks.</div>
+          ) : upcomingEvents.length === 0 ? (
+            <div className="home-empty">
+              {selectedDay ? "No scheduled meetings on this day." : "No meetings in the next two weeks."}
+            </div>
           ) : (
-            events.slice(0, 6).map((ev) => (
+            upcomingEvents.slice(0, 6).map((ev) => (
               <div
                 key={ev.id}
                 className="event-card event-card--menu"
@@ -297,7 +341,143 @@ export function Home({
               <div className="home-empty">All caught up — nothing open.</div>
             )}
           </section>
+      </div>
+      {showCreateMeeting && (
+        <CreateCalendarMeetingModal
+          providers={connectedProviders}
+          selectedDay={selectedDay}
+          onClose={() => setShowCreateMeeting(false)}
+          onCreate={async (payload) => {
+            await onCreateCalendarEvent(payload);
+            setShowCreateMeeting(false);
+          }}
+        />
+      )}
+    </>
+  );
+
+  if (embedded) return content;
+
+  return (
+    <div className="screen screen--sidebar">
+      <Sidebar active="Home" onNavigate={onNavigate} {...sidebarFolder} />
+      <div className="main main--scroll">{content}</div>
+    </div>
+  );
+}
+
+function providerName(provider: string): string {
+  if (provider === "microsoft") return "Outlook";
+  if (provider === "google") return "Google Calendar";
+  if (provider === "apple") return "Apple Calendar";
+  return "Calendar";
+}
+
+function defaultLocalTime(selectedDay: string | null, hourOffset: number): string {
+  const d = selectedDay ? new Date(`${selectedDay}T09:00:00`) : new Date();
+  if (!selectedDay) {
+    d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
+  }
+  d.setHours(d.getHours() + hourOffset);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function CreateCalendarMeetingModal({
+  providers,
+  selectedDay,
+  onClose,
+  onCreate,
+}: {
+  providers: string[];
+  selectedDay: string | null;
+  onClose: () => void;
+  onCreate: (payload: {
+    provider: string;
+    title: string;
+    start: string;
+    end: string;
+    location?: string | null;
+  }) => Promise<void>;
+}) {
+  const [provider, setProvider] = useState(providers[0] ?? "microsoft");
+  const [title, setTitle] = useState("");
+  const [start, setStart] = useState(() => defaultLocalTime(selectedDay, 0));
+  const [end, setEnd] = useState(() => defaultLocalTime(selectedDay, 1));
+  const [location, setLocation] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) {
+      setError("Title is required.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await onCreate({
+        provider,
+        title: title.trim(),
+        start: datetimeLocalToIso(start),
+        end: datetimeLocalToIso(end),
+        location: location.trim() || null,
+      });
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={onClose} role="presentation">
+      <div className="modal-card edit-meeting-card" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span className="modal-title">Create meeting</span>
+          <button type="button" className="modal-x" onClick={onClose} aria-label="Close">
+            x
+          </button>
         </div>
+        <form className="modal-body" onSubmit={submit}>
+          <p className="modal-sub">Adds a new event to the selected calendar.</p>
+          {error && <div className="modal-error">{error}</div>}
+          <label className="edit-field">
+            <span className="edit-label">Calendar</span>
+            <select className="modal-input" value={provider} onChange={(e) => setProvider(e.target.value)}>
+              {providers.map((p) => (
+                <option key={p} value={p}>
+                  {providerName(p)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="edit-field">
+            <span className="edit-label">Title</span>
+            <input className="modal-input" value={title} onChange={(e) => setTitle(e.target.value)} autoFocus />
+          </label>
+          <label className="edit-field">
+            <span className="edit-label">Starts</span>
+            <input className="modal-input" type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
+          </label>
+          <label className="edit-field">
+            <span className="edit-label">Ends</span>
+            <input className="modal-input" type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} />
+          </label>
+          <label className="edit-field">
+            <span className="edit-label">Location</span>
+            <input className="modal-input" value={location} onChange={(e) => setLocation(e.target.value)} />
+          </label>
+          <div className="modal-actions">
+            <button type="button" className="btn-ghost" onClick={onClose}>
+              Cancel
+            </button>
+            <button type="submit" className="btn-primary" disabled={saving}>
+              {saving ? "Creating..." : "Create meeting"}
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );

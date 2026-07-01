@@ -470,7 +470,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "candor-v2"
+name = "candor"
 version = "2.0.0"
 dependencies = [
  "base64 0.22.1",

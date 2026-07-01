@@ -92,7 +92,7 @@ export function MeetingMenuHost({
       return [
         {
           id: "edit",
-          label: "Rename meeting…",
+          label: "Edit calendar meeting...",
           disabled: !desktop,
           onClick: () => setEditTarget(target),
         },
@@ -108,7 +108,7 @@ export function MeetingMenuHost({
           danger: true,
           disabled: !desktop,
           onClick: async () => {
-            if (!window.confirm(`Delete “${target.event.title}” from your calendar?`)) return;
+            if (!window.confirm(`Delete "${target.event.title}" from your calendar?`)) return;
             setBusy(true);
             try {
               await deleteCalendarEvent(target.event);
@@ -153,7 +153,7 @@ export function MeetingMenuHost({
       ...folderItems,
       {
         id: "folder-clear",
-        label: "Move to Inbox",
+        label: "Move to Main Folder",
         disabled: !desktop || !(target.meeting.folderId && target.meeting.folderId !== "inbox"),
         onClick: async () => {
           await moveToFolder(target.meeting.id, "inbox");

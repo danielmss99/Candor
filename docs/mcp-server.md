@@ -4,7 +4,7 @@ Candor stores meetings as markdown + WAV on disk. This scaffold describes a **lo
 
 ## Status
 
-**Not fully implemented** — enable the toggle in Settings → Privacy to reserve the flag. Implement when you need agent access.
+**Not implemented in the app.** This document is a design note for a future local-only stdio server. There is no Settings toggle and no running network service in the current build.
 
 ## Planned tools
 
@@ -42,12 +42,6 @@ const notesDir = process.env.CANDOR_NOTES_DIR;
 }
 ```
 
-## Webhook alternative
+## Security boundary
 
-If MCP is too heavy, set **Webhook on meeting saved** in Settings. Candor POSTs:
-
-```json
-{ "event": "meeting_saved", "meetingId": "…", "durationSeconds": 360, "segmentCount": 42 }
-```
-
-Wire your automation (Zapier, n8n, custom script) to pull the markdown file from the notes folder.
+The future MCP server should use stdio, read only the active Candor library by default, and require an explicit user-controlled launch. Do not add a background HTTP server or outbound webhook path without a separate security review.

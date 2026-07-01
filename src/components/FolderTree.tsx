@@ -163,7 +163,6 @@ function FolderRow({
           <span
             className="folder-tree-label"
             onDoubleClick={(e) => {
-              if (isInbox) return;
               e.stopPropagation();
               onStartRename(node.id);
             }}
@@ -325,7 +324,6 @@ export function FolderTree({
       {
         id: "rename",
         label: "Rename",
-        disabled: folder.id === "inbox",
         onClick: () => {
           setCtx(null);
           handleStartRename(folder.id);

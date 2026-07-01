@@ -41,12 +41,14 @@ fn env_value(dotenv: &HashMap<String, String>, key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Emit `CANDOR_*` compile-time vars from `CANDOR_*` or matching `VITE_*` in `.env`.
+/// Emit release-safe compile-time vars from `.env`.
 fn export_oauth_env(dotenv: &HashMap<String, String>) {
     let mappings = [
         ("CANDOR_MS_CLIENT_ID", "VITE_MS_CLIENT_ID"),
         ("CANDOR_GOOGLE_CLIENT_ID", "VITE_GOOGLE_CLIENT_ID"),
-        ("CANDOR_GOOGLE_CLIENT_SECRET", "CANDOR_GOOGLE_CLIENT_SECRET"),
+        ("CANDOR_SHA256_TINY_EN", "CANDOR_SHA256_TINY_EN"),
+        ("CANDOR_SHA256_BASE_EN", "CANDOR_SHA256_BASE_EN"),
+        ("CANDOR_SHA256_SMALL_EN", "CANDOR_SHA256_SMALL_EN"),
     ];
 
     for (candor_key, vite_fallback) in mappings {

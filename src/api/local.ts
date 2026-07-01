@@ -55,6 +55,17 @@ export interface StorageFolder {
   path: string;
 }
 
+export interface StorageLibrary {
+  id: string;
+  name: string;
+  path: string;
+}
+
+export interface StorageLibrariesState {
+  libraries: StorageLibrary[];
+  activeId: string;
+}
+
 export interface StopRecordingResult {
   segments: TranscriptSegment[];
   meetingId: string;
@@ -62,7 +73,7 @@ export interface StopRecordingResult {
   transcriptionError?: string | null;
 }
 
-const PEOPLE_KEY = "candor-v2.people";
+const PEOPLE_KEY = "candor.people";
 
 export const VOICE_COLORS = [
   "#E8744F",
@@ -181,12 +192,46 @@ export async function openCandorFolder(): Promise<void> {
   await invoke("open_candor_folder");
 }
 
+export async function loadStorageLibraries(): Promise<StorageLibrariesState> {
+  if (!isTauri()) {
+    return { libraries: [], activeId: "" };
+  }
+  return invoke<StorageLibrariesState>("get_storage_libraries");
+}
+
+export async function pickStorageFolder(): Promise<string | null> {
+  if (!isTauri()) return null;
+  return invoke<string | null>("pick_storage_folder");
+}
+
+export async function addStorageLibrary(name: string, path: string): Promise<StorageLibrary> {
+  return invoke<StorageLibrary>("add_storage_library", { name, path });
+}
+
+export async function setActiveStorageLibrary(id: string): Promise<StorageLibrariesState> {
+  return invoke<StorageLibrariesState>("set_active_storage_library", { id });
+}
+
+export async function changeStorageLibraryPath(
+  id: string,
+  path: string,
+  migrate: boolean,
+): Promise<StorageLibrary> {
+  return invoke<StorageLibrary>("change_storage_library_path", { id, path, migrate });
+}
+
+export async function renameStorageLibrary(id: string, name: string): Promise<StorageLibrary> {
+  return invoke<StorageLibrary>("rename_storage_library", { id, name });
+}
+
+export async function removeStorageLibrary(id: string): Promise<StorageLibrariesState> {
+  return invoke<StorageLibrariesState>("remove_storage_library", { id });
+}
+
 export interface PrivacySettings {
   deleteAudioAfterTranscribe: boolean;
   retentionDays: number;
   captureSystemAudio: boolean;
-  webhookUrl: string | null;
-  mcpServerEnabled: boolean;
 }
 
 export async function loadPrivacySettings(): Promise<PrivacySettings> {
@@ -195,8 +240,6 @@ export async function loadPrivacySettings(): Promise<PrivacySettings> {
       deleteAudioAfterTranscribe: false,
       retentionDays: 0,
       captureSystemAudio: false,
-      webhookUrl: null,
-      mcpServerEnabled: false,
     };
   }
   return invoke<PrivacySettings>("get_privacy_settings");
@@ -230,6 +273,7 @@ export async function stopRecordingWithNotes(
     titleOverride?: string;
     calendarEventId?: string;
     folderId?: string;
+    initialPrompt?: string | null;
   },
 ): Promise<StopRecordingResult> {
   return invoke<StopRecordingResult>("stop_recording", {
@@ -238,6 +282,7 @@ export async function stopRecordingWithNotes(
     titleOverride: options?.titleOverride ?? null,
     calendarEventId: options?.calendarEventId ?? null,
     folderId: options?.folderId ?? null,
+    initialPrompt: options?.initialPrompt ?? null,
   });
 }
 

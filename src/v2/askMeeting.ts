@@ -41,7 +41,7 @@ export function askMeeting(
     return { answer: "Ask a question about this meeting.", citations: [], usedLlm: false };
   }
 
-  const llmPath = localStorage.getItem("candor-v2.localLlmPath");
+  const llmPath = localStorage.getItem("candor.localLlmPath");
   if (llmPath) {
     // Scaffold: wire to Tauri llama.cpp command when model is configured.
     return {

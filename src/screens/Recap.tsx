@@ -463,7 +463,7 @@ export function Recap({
         )}
 
         {mainTab === "transcript" && (
-          <div className="notion-transcript-panel">
+          <div className="notion-transcript-panel transcript-prose">
             {processing ? (
               <Skeleton rows={6} />
             ) : transcript.length === 0 ? (
@@ -496,7 +496,21 @@ export function Recap({
                       aria-label={`Speaker for segment ${i + 1}`}
                     />
                   </div>
-                  <p className="notion-transcript-text">{seg.text}</p>
+                  <p
+                    className="notion-transcript-text transcript-editable"
+                    contentEditable={!processing}
+                    suppressContentEditableWarning
+                    onBlur={(e) => {
+                      const text = e.currentTarget.textContent ?? "";
+                      setTranscript((prev) => {
+                        const next = [...prev];
+                        if (next[i]) next[i] = { ...next[i], text };
+                        return next;
+                      });
+                    }}
+                  >
+                    {seg.text}
+                  </p>
                 </div>
               ))
             )}

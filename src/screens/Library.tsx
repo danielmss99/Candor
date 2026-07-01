@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { CalendarEvent, View } from "../App";
+import type { CalendarEvent, SidebarFolderProps, View } from "../App";
 import { Sidebar } from "../components/Sidebar";
 import { EmptyState } from "../components/EmptyState";
 import { Skeleton } from "../components/Skeleton";
@@ -27,6 +27,8 @@ interface LibraryProps {
   onImportAudio?: () => void;
   meetingsRefreshKey: number;
   onMeetingContextMenu: (x: number, y: number, target: ContextMenuState["target"]) => void;
+  sidebarFolder: SidebarFolderProps;
+  embedded?: boolean;
 }
 
 type SmartFilter = "all" | "week" | "tasks" | "long" | "favorites";
@@ -44,6 +46,8 @@ export function Library({
   meetingsRefreshKey,
   onMeetingContextMenu,
   onImportAudio,
+  sidebarFolder,
+  embedded,
 }: LibraryProps) {
   const [filter, setFilter] = useState<SmartFilter>("all");
   const [viewMode, setViewMode] = useState<ViewMode>("list");
@@ -163,10 +167,7 @@ export function Library({
     </button>
   );
 
-  return (
-    <div className="screen screen--sidebar">
-      <Sidebar active="Meetings" onNavigate={onNavigate} />
-
+  const main = (
       <div className="main main--scroll">
         <div className="library-head">
           <span className="page-title">Meetings</span>
@@ -329,6 +330,13 @@ export function Library({
           <div className="meeting-list">{displayList.map(renderRow)}</div>
         )}
       </div>
+  );
+
+  if (embedded) return main;
+  return (
+    <div className="screen screen--sidebar">
+      <Sidebar active="Meetings" onNavigate={onNavigate} {...sidebarFolder} />
+      {main}
     </div>
   );
 }

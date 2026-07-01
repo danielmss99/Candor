@@ -1,6 +1,6 @@
-/** Candor v2 — client-side metadata (localStorage; separate keys from v1). */
+/** Client-side metadata stored in localStorage. */
 
-const PREFIX = "candor-v2.";
+const PREFIX = "candor.";
 
 function get<T>(key: string, fallback: T): T {
   try {

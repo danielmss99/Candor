@@ -292,6 +292,8 @@ export interface SearchResult {
   when: string;
   jump: string;
   speaker: keyof typeof people;
+  /** Display label when speaker isn't a mock person key. */
+  speakerLabel?: string;
   // text split into segments; `mark: true` highlights the term
   segments: { t: string; mark?: boolean }[];
   contextBefore?: string;

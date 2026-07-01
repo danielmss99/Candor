@@ -9,9 +9,12 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use sha2::{Digest, Sha256};
+use chrono::{DateTime, SecondsFormat};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager};
+
+use crate::secret_store;
 
 const SCOPE: &str = "offline_access User.Read Calendars.ReadWrite";
 const AUTHORIZE_URL: &str = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize";
@@ -44,12 +47,10 @@ fn default_google_client_id() -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Optional compile-time Google client secret (`CANDOR_GOOGLE_CLIENT_SECRET`).
+/// Google client secrets are intentionally runtime-only so they are never
+/// compiled into a public desktop binary.
 fn default_google_client_secret() -> Option<String> {
-    option_env!("CANDOR_GOOGLE_CLIENT_SECRET")
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
+    None
 }
 
 fn now_secs() -> i64 {
@@ -102,24 +103,122 @@ struct StoredAuth {
     apple_calendar_url: Option<String>,
 }
 
+const SECRET_MS_ACCESS: &str = "calendar.microsoft.access_token";
+const SECRET_MS_REFRESH: &str = "calendar.microsoft.refresh_token";
+const SECRET_GOOGLE_CLIENT_SECRET: &str = "calendar.google.client_secret";
+const SECRET_GOOGLE_ACCESS: &str = "calendar.google.access_token";
+const SECRET_GOOGLE_REFRESH: &str = "calendar.google.refresh_token";
+const SECRET_APPLE_ID: &str = "calendar.apple.id";
+const SECRET_APPLE_APP_PASSWORD: &str = "calendar.apple.app_password";
+
 fn auth_path(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join("calendar.json"))
 }
 
+fn auth_has_plaintext_secrets(auth: &StoredAuth) -> bool {
+    auth.ms_access_token.is_some()
+        || auth.ms_refresh_token.is_some()
+        || auth.google_client_secret.is_some()
+        || auth.google_access_token.is_some()
+        || auth.google_refresh_token.is_some()
+        || auth.apple_id.is_some()
+        || auth.apple_app_password.is_some()
+}
+
+fn auth_metadata(auth: &StoredAuth) -> StoredAuth {
+    StoredAuth {
+        ms_client_id: auth.ms_client_id.clone(),
+        ms_expires_at: auth.ms_expires_at,
+        google_client_id: auth.google_client_id.clone(),
+        google_expires_at: auth.google_expires_at,
+        apple_calendar_url: auth.apple_calendar_url.clone(),
+        ..StoredAuth::default()
+    }
+}
+
+fn write_auth_metadata(app: &AppHandle, auth: &StoredAuth) -> Result<(), String> {
+    let p = auth_path(app)?;
+    let json = serde_json::to_string_pretty(&auth_metadata(auth)).map_err(|e| e.to_string())?;
+    std::fs::write(p, json).map_err(|e| e.to_string())
+}
+
+fn secure_or_migrate_secret(
+    app: &AppHandle,
+    name: &str,
+    legacy_value: Option<String>,
+) -> Option<String> {
+    if let Some(value) = secret_store::get_secret(app, name).filter(|s| !s.trim().is_empty()) {
+        return Some(value);
+    }
+
+    let value = legacy_value.filter(|s| !s.trim().is_empty())?;
+    if secret_store::set_secret(app, name, Some(&value)).is_ok() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 fn load_auth(app: &AppHandle) -> StoredAuth {
-    auth_path(app)
+    let mut auth: StoredAuth = auth_path(app)
         .ok()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+
+    let had_plaintext_secrets = auth_has_plaintext_secrets(&auth);
+
+    auth.ms_access_token =
+        secure_or_migrate_secret(app, SECRET_MS_ACCESS, auth.ms_access_token.take());
+    auth.ms_refresh_token =
+        secure_or_migrate_secret(app, SECRET_MS_REFRESH, auth.ms_refresh_token.take());
+    auth.google_client_secret = secure_or_migrate_secret(
+        app,
+        SECRET_GOOGLE_CLIENT_SECRET,
+        auth.google_client_secret.take(),
+    );
+    auth.google_access_token =
+        secure_or_migrate_secret(app, SECRET_GOOGLE_ACCESS, auth.google_access_token.take());
+    auth.google_refresh_token =
+        secure_or_migrate_secret(app, SECRET_GOOGLE_REFRESH, auth.google_refresh_token.take());
+    auth.apple_id = secure_or_migrate_secret(app, SECRET_APPLE_ID, auth.apple_id.take());
+    auth.apple_app_password = secure_or_migrate_secret(
+        app,
+        SECRET_APPLE_APP_PASSWORD,
+        auth.apple_app_password.take(),
+    );
+
+    if had_plaintext_secrets {
+        let _ = write_auth_metadata(app, &auth);
+    }
+
+    auth
 }
 
 fn save_auth(app: &AppHandle, a: &StoredAuth) -> Result<(), String> {
-    let p = auth_path(app)?;
-    let json = serde_json::to_string_pretty(a).map_err(|e| e.to_string())?;
-    std::fs::write(p, json).map_err(|e| e.to_string())
+    secret_store::set_secret(app, SECRET_MS_ACCESS, a.ms_access_token.as_deref())?;
+    secret_store::set_secret(app, SECRET_MS_REFRESH, a.ms_refresh_token.as_deref())?;
+    secret_store::set_secret(
+        app,
+        SECRET_GOOGLE_CLIENT_SECRET,
+        a.google_client_secret.as_deref(),
+    )?;
+    secret_store::set_secret(app, SECRET_GOOGLE_ACCESS, a.google_access_token.as_deref())?;
+    secret_store::set_secret(
+        app,
+        SECRET_GOOGLE_REFRESH,
+        a.google_refresh_token.as_deref(),
+    )?;
+    secret_store::set_secret(app, SECRET_APPLE_ID, a.apple_id.as_deref())?;
+    secret_store::set_secret(
+        app,
+        SECRET_APPLE_APP_PASSWORD,
+        a.apple_app_password.as_deref(),
+    )?;
+
+    write_auth_metadata(app, a)
 }
 
 // ---------- Status ----------
@@ -194,7 +293,10 @@ fn generate_pkce() -> PkcePair {
     let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
     let digest = Sha256::digest(verifier.as_bytes());
     let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    PkcePair { verifier, challenge }
+    PkcePair {
+        verifier,
+        challenge,
+    }
 }
 
 fn bind_oauth_listener(base_port: u16) -> Result<(TcpListener, u16), String> {
@@ -244,7 +346,13 @@ fn url_decode(s: &str) -> String {
 }
 
 fn query_from_http_request(req: &str) -> HashMap<String, String> {
-    let path = req.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("");
+    let path = req
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .nth(1)
+        .unwrap_or("");
     let query = path.split('?').nth(1).unwrap_or("");
     parse_query_params(query)
 }
@@ -365,7 +473,10 @@ fn exchange_auth_code(
         ])
         .map_err(|e| format!("Network error: {e}"))?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if status != 200 {
         return Err(v["error_description"]
@@ -452,7 +563,8 @@ pub fn google_calendar_setup(app: AppHandle) -> GoogleCalendarSetup {
         stored_client_id: a.google_client_id.clone(),
         default_client_id: default_google_client_id(),
         redirect_uri: oauth_redirect_uri(GOOGLE_OAUTH_PORT, GOOGLE_REDIRECT_PATH),
-        has_client_secret: a.google_client_secret.is_some() || default_google_client_secret().is_some(),
+        has_client_secret: a.google_client_secret.is_some()
+            || default_google_client_secret().is_some(),
     }
 }
 
@@ -493,13 +605,18 @@ fn exchange_google_auth_code(
         .send_form(form)
         .map_err(|e| format!("Network error: {e}"))?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if status != 200 {
         return Err(v["error_description"]
             .as_str()
             .or(v["error"].as_str())
-            .unwrap_or("Google rejected the sign-in. Check the redirect URI in Google Cloud Console.")
+            .unwrap_or(
+                "Google rejected the sign-in. Check the redirect URI in Google Cloud Console.",
+            )
             .to_string());
     }
     save_google_tokens(app, &v)
@@ -565,9 +682,11 @@ pub async fn google_oauth_connect(
     client_id: String,
     client_secret: Option<String>,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || do_google_oauth_connect(&app, client_id, client_secret))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        do_google_oauth_connect(&app, client_id, client_secret)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -587,7 +706,10 @@ fn google_valid_token(app: &AppHandle) -> Result<String, String> {
         }
     }
     let client_id = a.google_client_id.clone().ok_or("Google not connected.")?;
-    let refresh = a.google_refresh_token.clone().ok_or("Google not connected.")?;
+    let refresh = a
+        .google_refresh_token
+        .clone()
+        .ok_or("Google not connected.")?;
     let mut form = vec![
         ("grant_type", "refresh_token"),
         ("client_id", client_id.as_str()),
@@ -601,7 +723,10 @@ fn google_valid_token(app: &AppHandle) -> Result<String, String> {
         .send_form(form)
         .map_err(|e| format!("Network error: {e}"))?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if status != 200 {
         return Err(v["error_description"]
@@ -610,7 +735,10 @@ fn google_valid_token(app: &AppHandle) -> Result<String, String> {
             .to_string());
     }
     let mut a2 = load_auth(app);
-    let access = v["access_token"].as_str().ok_or("No access token.")?.to_string();
+    let access = v["access_token"]
+        .as_str()
+        .ok_or("No access token.")?
+        .to_string();
     a2.google_access_token = Some(access.clone());
     if let Some(r) = v["refresh_token"].as_str() {
         a2.google_refresh_token = Some(r.to_string());
@@ -633,7 +761,10 @@ fn google_events(app: &AppHandle) -> Result<Vec<CalendarEvent>, String> {
         .call()
         .map_err(|e| format!("Google Calendar request failed: {e}"))?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if status != 200 {
         let msg = v["error"]["message"]
@@ -714,7 +845,10 @@ fn ms_valid_token(app: &AppHandle) -> Result<String, String> {
     }
     // Refresh
     let client_id = a.ms_client_id.clone().ok_or("Microsoft not connected.")?;
-    let refresh = a.ms_refresh_token.clone().ok_or("Microsoft not connected.")?;
+    let refresh = a
+        .ms_refresh_token
+        .clone()
+        .ok_or("Microsoft not connected.")?;
     let resp = agent()
         .post(TOKEN_URL)
         .send_form([
@@ -725,7 +859,10 @@ fn ms_valid_token(app: &AppHandle) -> Result<String, String> {
         ])
         .map_err(|e| format!("Network error: {e}"))?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if status != 200 {
         return Err(v["error_description"]
@@ -734,7 +871,10 @@ fn ms_valid_token(app: &AppHandle) -> Result<String, String> {
             .to_string());
     }
     let mut a2 = load_auth(app);
-    let access = v["access_token"].as_str().ok_or("No access token.")?.to_string();
+    let access = v["access_token"]
+        .as_str()
+        .ok_or("No access token.")?
+        .to_string();
     a2.ms_access_token = Some(access.clone());
     if let Some(r) = v["refresh_token"].as_str() {
         a2.ms_refresh_token = Some(r.to_string());
@@ -761,7 +901,10 @@ fn ms_events(app: &AppHandle) -> Result<Vec<CalendarEvent>, String> {
         .call()
         .map_err(|e| format!("Graph request failed: {e}"))?;
     let status = resp.status().as_u16();
-    let body = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+    let body = resp
+        .into_body()
+        .read_to_string()
+        .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
     if status != 200 {
         let msg = v["error"]["message"]
@@ -797,8 +940,13 @@ fn ms_events(app: &AppHandle) -> Result<Vec<CalendarEvent>, String> {
                     .as_str()
                     .unwrap_or("")
                     .to_string(),
-                location: it["location"]["displayName"].as_str().unwrap_or("").to_string(),
-                online_url: it["onlineMeeting"]["joinUrl"].as_str().map(|s| s.to_string()),
+                location: it["location"]["displayName"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                online_url: it["onlineMeeting"]["joinUrl"]
+                    .as_str()
+                    .map(|s| s.to_string()),
                 all_day: it["isAllDay"].as_bool().unwrap_or(false),
                 provider: "microsoft".into(),
                 event_url: None,
@@ -865,7 +1013,10 @@ fn basic_auth(user: &str, pass: &str) -> String {
 
 fn origin_of(url: &str) -> String {
     let after = url.find("://").map(|i| i + 3).unwrap_or(0);
-    let end = url[after..].find('/').map(|i| after + i).unwrap_or(url.len());
+    let end = url[after..]
+        .find('/')
+        .map(|i| after + i)
+        .unwrap_or(url.len());
     url[..end].to_string()
 }
 
@@ -899,10 +1050,25 @@ fn caldav(
     depth: &str,
     body: &str,
 ) -> Result<(u16, String, String), String> {
+    caldav_with_url_validator(method, url, auth, depth, body, |_| Ok(()))
+}
+
+fn caldav_with_url_validator<F>(
+    method: &str,
+    url: &str,
+    auth: &str,
+    depth: &str,
+    body: &str,
+    validate_url: F,
+) -> Result<(u16, String, String), String>
+where
+    F: Fn(&str) -> Result<(), String>,
+{
     let http_method = caldav_method(method)?;
     let agent = caldav_agent();
     let mut current = url.to_string();
     for _ in 0..6 {
+        validate_url(&current)?;
         let req = http::Request::builder()
             .method(&http_method)
             .uri(&current)
@@ -911,17 +1077,20 @@ fn caldav(
             .header("content-type", "application/xml; charset=utf-8")
             .body(body.to_string())
             .map_err(|e| e.to_string())?;
-        let resp = agent
-            .run(req)
-            .map_err(caldav_transport_err)?;
+        let resp = agent.run(req).map_err(caldav_transport_err)?;
         let status = resp.status().as_u16();
         if matches!(status, 301 | 302 | 307 | 308) {
             if let Some(loc) = resp.headers().get("location").and_then(|v| v.to_str().ok()) {
-                current = resolve(&current, loc);
+                let next = resolve(&current, loc);
+                validate_url(&next)?;
+                current = next;
                 continue;
             }
         }
-        let text = resp.into_body().read_to_string().map_err(|e| e.to_string())?;
+        let text = resp
+            .into_body()
+            .read_to_string()
+            .map_err(|e| e.to_string())?;
         return Ok((status, current, text));
     }
     Err("Too many redirects from iCloud.".into())
@@ -997,7 +1166,11 @@ fn do_apple_connect(app: &AppHandle, apple_id: String, app_password: String) -> 
 }
 
 #[tauri::command]
-pub async fn apple_connect(app: AppHandle, apple_id: String, app_password: String) -> Result<(), String> {
+pub async fn apple_connect(
+    app: AppHandle,
+    apple_id: String,
+    app_password: String,
+) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || do_apple_connect(&app, apple_id, app_password))
         .await
         .map_err(|e| e.to_string())?
@@ -1019,8 +1192,13 @@ fn calendar_hrefs(xml: &str) -> Vec<String> {
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    for resp in doc.descendants().filter(|n| n.tag_name().name() == "response") {
-        let is_calendar = resp.descendants().any(|n| n.tag_name().name() == "calendar");
+    for resp in doc
+        .descendants()
+        .filter(|n| n.tag_name().name() == "response")
+    {
+        let is_calendar = resp
+            .descendants()
+            .any(|n| n.tag_name().name() == "calendar");
         if !is_calendar {
             continue;
         }
@@ -1050,7 +1228,10 @@ fn calendar_data_blocks(xml: &str) -> Vec<String> {
 fn ical_dt(value: &str) -> (String, bool) {
     let v = value.trim();
     if v.len() == 8 && v.chars().all(|c| c.is_ascii_digit()) {
-        return (format!("{}-{}-{}T00:00:00", &v[0..4], &v[4..6], &v[6..8]), true);
+        return (
+            format!("{}-{}-{}T00:00:00", &v[0..4], &v[4..6], &v[6..8]),
+            true,
+        );
     }
     if v.len() >= 15 {
         let z = if v.ends_with('Z') { "Z" } else { "" };
@@ -1058,7 +1239,13 @@ fn ical_dt(value: &str) -> (String, bool) {
         return (
             format!(
                 "{}-{}-{}T{}:{}:{}{}",
-                &d[0..4], &d[4..6], &d[6..8], &t[0..2], &t[2..4], &t[4..6], z
+                &d[0..4],
+                &d[4..6],
+                &d[6..8],
+                &t[0..2],
+                &t[2..4],
+                &t[4..6],
+                z
             ),
             false,
         );
@@ -1117,7 +1304,9 @@ fn parse_vevents(ics: &str, event_url: Option<String>) -> Vec<CalendarEvent> {
             continue;
         }
         let Some(e) = cur.as_mut() else { continue };
-        let Some((name_params, value)) = line.split_once(':') else { continue };
+        let Some((name_params, value)) = line.split_once(':') else {
+            continue;
+        };
         match name_params.split(';').next().unwrap_or("") {
             "SUMMARY" => e.title = value.to_string(),
             "UID" => e.id = value.to_string(),
@@ -1146,7 +1335,10 @@ fn calendar_entries(xml: &str) -> Vec<(String, String)> {
         Err(_) => return Vec::new(),
     };
     let mut out = Vec::new();
-    for resp in doc.descendants().filter(|n| n.tag_name().name() == "response") {
+    for resp in doc
+        .descendants()
+        .filter(|n| n.tag_name().name() == "response")
+    {
         let href = resp
             .descendants()
             .find(|n| n.tag_name().name() == "href")
@@ -1167,8 +1359,14 @@ fn calendar_entries(xml: &str) -> Vec<(String, String)> {
 fn apple_events(app: &AppHandle) -> Result<Vec<CalendarEvent>, String> {
     let a = load_auth(app);
     let apple_id = a.apple_id.clone().ok_or("iCloud not connected.")?;
-    let app_pw = a.apple_app_password.clone().ok_or("iCloud not connected.")?;
-    let home = a.apple_calendar_url.clone().ok_or("iCloud not connected.")?;
+    let app_pw = a
+        .apple_app_password
+        .clone()
+        .ok_or("iCloud not connected.")?;
+    let home = a
+        .apple_calendar_url
+        .clone()
+        .ok_or("iCloud not connected.")?;
     let auth = basic_auth(&apple_id, &app_pw);
 
     let list_body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:resourcetype/><d:displayname/></d:prop></d:propfind>"#;
@@ -1203,7 +1401,16 @@ fn apple_events(app: &AppHandle) -> Result<Vec<CalendarEvent>, String> {
     Ok(events)
 }
 
-// ---------- Edit / delete calendar events ----------
+// ---------- Create / edit / delete calendar events ----------
+
+#[derive(Deserialize)]
+pub struct CreateCalendarEventPayload {
+    provider: String,
+    title: String,
+    start: String,
+    end: String,
+    location: Option<String>,
+}
 
 #[derive(Deserialize)]
 pub struct UpdateCalendarEventPayload {
@@ -1225,17 +1432,184 @@ pub struct DeleteCalendarEventPayload {
     event_url: Option<String>,
 }
 
-fn iso_to_ical_datetime(iso: &str) -> Result<String, String> {
-    let trimmed = iso.trim();
-    let zoned = if trimmed.contains('Z') || trimmed.contains('+') {
-        trimmed.to_string()
+const MAX_CALENDAR_TITLE_LEN: usize = 200;
+const MAX_CALENDAR_LOCATION_LEN: usize = 500;
+const MAX_CALENDAR_ID_LEN: usize = 1024;
+const MAX_CALENDAR_URL_LEN: usize = 2048;
+
+fn has_timezone(value: &str) -> bool {
+    let suffix = value.get(10..).unwrap_or("");
+    value.ends_with('Z') || suffix.contains('+') || suffix.contains('-')
+}
+
+fn calendar_datetime_candidate(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Date and time are required.".into());
+    }
+    let base = trimmed.split('.').next().unwrap_or(trimmed);
+    let with_seconds = if base.len() == 16 {
+        format!("{base}:00")
     } else {
-        format!("{}Z", trimmed.split('.').next().unwrap_or(trimmed))
+        base.to_string()
     };
-    let dt = chrono::DateTime::parse_from_rfc3339(&zoned)
-        .or_else(|_| chrono::DateTime::parse_from_rfc3339(&format!("{zoned}")))
-        .map_err(|_| format!("Invalid datetime: {iso}"))?;
+    if has_timezone(&with_seconds) {
+        Ok(with_seconds)
+    } else {
+        Ok(format!("{with_seconds}Z"))
+    }
+}
+
+fn parse_calendar_datetime(value: &str) -> Result<DateTime<chrono::FixedOffset>, String> {
+    let candidate = calendar_datetime_candidate(value)?;
+    DateTime::parse_from_rfc3339(&candidate).map_err(|_| format!("Invalid datetime: {value}"))
+}
+
+fn normalize_calendar_datetime(value: &str) -> Result<String, String> {
+    let dt = parse_calendar_datetime(value)?;
+    Ok(dt
+        .with_timezone(&chrono::Utc)
+        .to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+fn iso_to_ical_datetime(iso: &str) -> Result<String, String> {
+    let dt = parse_calendar_datetime(iso)?;
     Ok(dt.format("%Y%m%dT%H%M%SZ").to_string())
+}
+
+fn clean_required_text(value: &str, field: &str, max_len: usize) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} is required."));
+    }
+    if trimmed.chars().count() > max_len {
+        return Err(format!("{field} is too long."));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn clean_optional_text(
+    value: Option<String>,
+    field: &str,
+    max_len: usize,
+    allow_empty: bool,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        if allow_empty {
+            return Ok(Some(String::new()));
+        }
+        return Ok(None);
+    }
+    if trimmed.chars().count() > max_len {
+        return Err(format!("{field} is too long."));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn validate_calendar_provider(provider: &str) -> Result<(), String> {
+    match provider {
+        "microsoft" | "google" | "apple" => Ok(()),
+        other => Err(format!("Unknown calendar provider: {other}")),
+    }
+}
+
+fn validate_calendar_id(id: &str) -> Result<String, String> {
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err("Calendar event ID is required.".into());
+    }
+    if trimmed.chars().count() > MAX_CALENDAR_ID_LEN {
+        return Err("Calendar event ID is too long.".into());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_event_url_value(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > MAX_CALENDAR_URL_LEN {
+        return Err("Calendar event URL is too long.".into());
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn validate_create_payload(
+    mut payload: CreateCalendarEventPayload,
+) -> Result<CreateCalendarEventPayload, String> {
+    validate_calendar_provider(&payload.provider)?;
+    payload.title = clean_required_text(&payload.title, "Title", MAX_CALENDAR_TITLE_LEN)?;
+    payload.start = normalize_calendar_datetime(&payload.start)?;
+    payload.end = normalize_calendar_datetime(&payload.end)?;
+    let start = parse_calendar_datetime(&payload.start)?;
+    let end = parse_calendar_datetime(&payload.end)?;
+    if end <= start {
+        return Err("Event end must be after start.".into());
+    }
+    payload.location = clean_optional_text(
+        payload.location,
+        "Location",
+        MAX_CALENDAR_LOCATION_LEN,
+        false,
+    )?;
+    Ok(payload)
+}
+
+fn validate_update_payload(
+    mut payload: UpdateCalendarEventPayload,
+) -> Result<UpdateCalendarEventPayload, String> {
+    validate_calendar_provider(&payload.provider)?;
+    payload.id = validate_calendar_id(&payload.id)?;
+    payload.event_url = validate_event_url_value(payload.event_url)?;
+    if let Some(title) = payload.title {
+        payload.title = Some(clean_required_text(
+            &title,
+            "Title",
+            MAX_CALENDAR_TITLE_LEN,
+        )?);
+    }
+    payload.location = clean_optional_text(
+        payload.location,
+        "Location",
+        MAX_CALENDAR_LOCATION_LEN,
+        true,
+    )?;
+    if let Some(start) = payload.start {
+        payload.start = Some(normalize_calendar_datetime(&start)?);
+    }
+    if let Some(end) = payload.end {
+        payload.end = Some(normalize_calendar_datetime(&end)?);
+    }
+    if let (Some(start), Some(end)) = (&payload.start, &payload.end) {
+        if parse_calendar_datetime(end)? <= parse_calendar_datetime(start)? {
+            return Err("Event end must be after start.".into());
+        }
+    }
+    if payload.title.is_none()
+        && payload.start.is_none()
+        && payload.end.is_none()
+        && payload.location.is_none()
+    {
+        return Err("Nothing to update.".into());
+    }
+    Ok(payload)
+}
+
+fn validate_delete_payload(
+    mut payload: DeleteCalendarEventPayload,
+) -> Result<DeleteCalendarEventPayload, String> {
+    validate_calendar_provider(&payload.provider)?;
+    payload.id = validate_calendar_id(&payload.id)?;
+    payload.event_url = validate_event_url_value(payload.event_url)?;
+    Ok(payload)
 }
 
 fn replace_ical_field(ics: &str, field: &str, value: &str) -> String {
@@ -1248,12 +1622,19 @@ fn replace_ical_field(ics: &str, field: &str, value: &str) -> String {
             lines.push(line.to_string());
         }
     }
+    let mut found = false;
     for line in &mut lines {
         let Some((name_params, _old)) = line.split_once(':') else {
             continue;
         };
         if name_params.split(';').next() == Some(field) {
             *line = format!("{name_params}:{value}");
+            found = true;
+        }
+    }
+    if !found && !value.trim().is_empty() {
+        if let Some(idx) = lines.iter().position(|l| l == "END:VEVENT") {
+            lines.insert(idx, format!("{field}:{value}"));
         }
     }
     lines.join("\r\n")
@@ -1271,6 +1652,14 @@ fn xml_etag(xml: &str) -> Option<String> {
     None
 }
 
+fn escape_ics_text(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace(';', "\\;")
+        .replace(',', "\\,")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
 fn apple_auth(app: &AppHandle) -> Result<(String, String), String> {
     let a = load_auth(app);
     let apple_id = a.apple_id.ok_or("iCloud not connected.")?;
@@ -1278,10 +1667,75 @@ fn apple_auth(app: &AppHandle) -> Result<(String, String), String> {
     Ok((basic_auth(&apple_id, &app_pw), apple_id))
 }
 
+fn apple_auth_and_home(app: &AppHandle) -> Result<(String, String, String), String> {
+    let a = load_auth(app);
+    let apple_id = a.apple_id.ok_or("iCloud not connected.")?;
+    let app_pw = a.apple_app_password.ok_or("iCloud not connected.")?;
+    let home = a.apple_calendar_url.ok_or("iCloud not connected.")?;
+    Ok((basic_auth(&apple_id, &app_pw), apple_id, home))
+}
+
+fn parse_https_url_parts(url: &str) -> Result<(String, Option<u16>, String), String> {
+    let uri: http::Uri = url
+        .parse()
+        .map_err(|_| "Invalid iCloud event URL.".to_string())?;
+    if uri.scheme_str() != Some("https") {
+        return Err("Invalid iCloud event URL.".into());
+    }
+    if uri.query().is_some() {
+        return Err("Invalid iCloud event URL.".into());
+    }
+    let host = uri
+        .host()
+        .ok_or("Invalid iCloud event URL.")?
+        .to_ascii_lowercase();
+    let path = uri.path().to_string();
+    let lower_path = path.to_ascii_lowercase();
+    if path.contains('\\')
+        || lower_path.contains("%2e")
+        || lower_path.contains("%2f")
+        || path
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
+    {
+        return Err("Invalid iCloud event URL.".into());
+    }
+    Ok((host, uri.port_u16(), path))
+}
+
+fn validate_apple_url_under_home(home: &str, candidate: &str) -> Result<(), String> {
+    let (home_host, home_port, home_path) = parse_https_url_parts(home)?;
+    let (candidate_host, candidate_port, candidate_path) = parse_https_url_parts(candidate)?;
+    if candidate_host != home_host || candidate_port != home_port {
+        return Err("iCloud event URL is outside the connected calendar.".into());
+    }
+    let home_prefix = if home_path.ends_with('/') {
+        home_path
+    } else {
+        format!("{home_path}/")
+    };
+    if !candidate_path.starts_with(&home_prefix) {
+        return Err("iCloud event URL is outside the connected calendar.".into());
+    }
+    Ok(())
+}
+
+fn validated_apple_event_url(app: &AppHandle, event_url: &str) -> Result<String, String> {
+    let home = load_auth(app)
+        .apple_calendar_url
+        .ok_or("iCloud not connected.")?;
+    validate_apple_url_under_home(&home, event_url)?;
+    Ok(event_url.to_string())
+}
+
 fn apple_get_ics(app: &AppHandle, event_url: &str) -> Result<(String, String), String> {
-    let (auth, _) = apple_auth(app)?;
+    let (auth, _, home) = apple_auth_and_home(app)?;
+    let event_url = validated_apple_event_url(app, event_url)?;
     let prop_body = r#"<?xml version="1.0" encoding="utf-8"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><c:calendar-data xmlns:c="urn:ietf:params:xml:ns:caldav"/></d:prop></d:propfind>"#;
-    let (status, _, xml) = caldav("PROPFIND", event_url, &auth, "0", prop_body)?;
+    let (status, _, xml) =
+        caldav_with_url_validator("PROPFIND", &event_url, &auth, "0", prop_body, |url| {
+            validate_apple_url_under_home(&home, url)
+        })?;
     if status != 207 && status != 200 {
         return Err(format!("Could not read iCloud event (status {status})."));
     }
@@ -1293,16 +1747,23 @@ fn apple_get_ics(app: &AppHandle, event_url: &str) -> Result<(String, String), S
     Ok((etag, ics))
 }
 
-fn apple_put_ics(app: &AppHandle, event_url: &str, etag: &str, ics: &str) -> Result<(), String> {
+fn apple_put_ics(
+    app: &AppHandle,
+    event_url: &str,
+    etag: Option<&str>,
+    ics: &str,
+) -> Result<(), String> {
     let (auth, _) = apple_auth(app)?;
-    let req = http::Request::builder()
+    let event_url = validated_apple_event_url(app, event_url)?;
+    let mut builder = http::Request::builder()
         .method("PUT")
-        .uri(event_url)
+        .uri(&event_url)
         .header("authorization", &auth)
-        .header("content-type", "text/calendar; charset=utf-8")
-        .header("if-match", etag)
-        .body(ics.to_string())
-        .map_err(|e| e.to_string())?;
+        .header("content-type", "text/calendar; charset=utf-8");
+    if let Some(etag) = etag {
+        builder = builder.header("if-match", etag);
+    }
+    let req = builder.body(ics.to_string()).map_err(|e| e.to_string())?;
     let resp = caldav_agent()
         .run(req)
         .map_err(|e| format!("iCloud update failed: {e}"))?;
@@ -1316,10 +1777,11 @@ fn apple_put_ics(app: &AppHandle, event_url: &str, etag: &str, ics: &str) -> Res
 
 fn apple_delete_event(app: &AppHandle, event_url: &str) -> Result<(), String> {
     let (auth, _) = apple_auth(app)?;
-    let (etag, _) = apple_get_ics(app, event_url)?;
+    let event_url = validated_apple_event_url(app, event_url)?;
+    let (etag, _) = apple_get_ics(app, &event_url)?;
     let req = http::Request::builder()
         .method("DELETE")
-        .uri(event_url)
+        .uri(&event_url)
         .header("authorization", &auth)
         .header("if-match", &etag)
         .body(String::new())
@@ -1334,7 +1796,34 @@ fn apple_delete_event(app: &AppHandle, event_url: &str) -> Result<(), String> {
     Err(format!("iCloud delete failed (status {status})."))
 }
 
-fn google_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) -> Result<(), String> {
+fn google_create_event(
+    app: &AppHandle,
+    payload: &CreateCalendarEventPayload,
+) -> Result<(), String> {
+    let token = google_valid_token(app)?;
+    let body = serde_json::json!({
+        "summary": payload.title,
+        "start": { "dateTime": payload.start, "timeZone": "UTC" },
+        "end": { "dateTime": payload.end, "timeZone": "UTC" },
+        "location": payload.location.clone().unwrap_or_default(),
+    });
+    let resp = ureq::post(GOOGLE_EVENTS_URL)
+        .header("authorization", &format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .send(body.to_string())
+        .map_err(|e| format!("Google create failed: {e}"))?;
+    let status = resp.status().as_u16();
+    if matches!(status, 200 | 201) {
+        return Ok(());
+    }
+    let body = resp.into_body().read_to_string().unwrap_or_default();
+    Err(format!("Google create failed ({status}): {body}"))
+}
+
+fn google_update_event(
+    app: &AppHandle,
+    payload: &UpdateCalendarEventPayload,
+) -> Result<(), String> {
     let token = google_valid_token(app)?;
     let mut patch = serde_json::Map::new();
     if let Some(title) = &payload.title {
@@ -1359,8 +1848,8 @@ fn google_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) ->
         return Err("Nothing to update.".into());
     }
     let url = format!("{GOOGLE_EVENTS_URL}/{}", payload.id);
-    let body = serde_json::to_string(&serde_json::Value::Object(patch))
-        .map_err(|e| e.to_string())?;
+    let body =
+        serde_json::to_string(&serde_json::Value::Object(patch)).map_err(|e| e.to_string())?;
     let resp = ureq::patch(&url)
         .header("authorization", &format!("Bearer {token}"))
         .header("content-type", "application/json")
@@ -1372,7 +1861,7 @@ fn google_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) ->
     }
     let body = resp.into_body().read_to_string().unwrap_or_default();
     if status == 403 {
-        return Err("Google needs write access — disconnect and reconnect your calendar.".into());
+        return Err("Google needs write access. Disconnect and reconnect your calendar.".into());
     }
     Err(format!("Google update failed ({status}): {body}"))
 }
@@ -1389,9 +1878,30 @@ fn google_delete_event(app: &AppHandle, id: &str) -> Result<(), String> {
         return Ok(());
     }
     if status == 403 {
-        return Err("Google needs write access — disconnect and reconnect your calendar.".into());
+        return Err("Google needs write access. Disconnect and reconnect your calendar.".into());
     }
     Err(format!("Google delete failed (status {status})."))
+}
+
+fn ms_create_event(app: &AppHandle, payload: &CreateCalendarEventPayload) -> Result<(), String> {
+    let token = ms_valid_token(app)?;
+    let body = serde_json::json!({
+        "subject": payload.title,
+        "start": { "dateTime": payload.start, "timeZone": "UTC" },
+        "end": { "dateTime": payload.end, "timeZone": "UTC" },
+        "location": { "displayName": payload.location.clone().unwrap_or_default() },
+    });
+    let resp = ureq::post("https://graph.microsoft.com/v1.0/me/events")
+        .header("authorization", &format!("Bearer {token}"))
+        .header("content-type", "application/json")
+        .send(body.to_string())
+        .map_err(|e| format!("Outlook create failed: {e}"))?;
+    let status = resp.status().as_u16();
+    if matches!(status, 200 | 201) {
+        return Ok(());
+    }
+    let body = resp.into_body().read_to_string().unwrap_or_default();
+    Err(format!("Outlook create failed ({status}): {body}"))
 }
 
 fn ms_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) -> Result<(), String> {
@@ -1413,20 +1923,14 @@ fn ms_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) -> Res
         );
     }
     if let Some(loc) = &payload.location {
-        patch.insert(
-            "location".into(),
-            serde_json::json!({ "displayName": loc }),
-        );
+        patch.insert("location".into(), serde_json::json!({ "displayName": loc }));
     }
     if patch.is_empty() {
         return Err("Nothing to update.".into());
     }
-    let url = format!(
-        "https://graph.microsoft.com/v1.0/me/events/{}",
-        payload.id
-    );
-    let body = serde_json::to_string(&serde_json::Value::Object(patch))
-        .map_err(|e| e.to_string())?;
+    let url = format!("https://graph.microsoft.com/v1.0/me/events/{}", payload.id);
+    let body =
+        serde_json::to_string(&serde_json::Value::Object(patch)).map_err(|e| e.to_string())?;
     let resp = ureq::patch(&url)
         .header("authorization", &format!("Bearer {token}"))
         .header("content-type", "application/json")
@@ -1438,7 +1942,7 @@ fn ms_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) -> Res
     }
     let body = resp.into_body().read_to_string().unwrap_or_default();
     if status == 403 {
-        return Err("Outlook needs write access — disconnect and reconnect your calendar.".into());
+        return Err("Outlook needs write access. Disconnect and reconnect your calendar.".into());
     }
     Err(format!("Outlook update failed ({status}): {body}"))
 }
@@ -1455,20 +1959,40 @@ fn ms_delete_event(app: &AppHandle, id: &str) -> Result<(), String> {
         return Ok(());
     }
     if status == 403 {
-        return Err("Outlook needs write access — disconnect and reconnect your calendar.".into());
+        return Err("Outlook needs write access. Disconnect and reconnect your calendar.".into());
     }
     Err(format!("Outlook delete failed (status {status})."))
+}
+
+fn apple_create_event(app: &AppHandle, payload: &CreateCalendarEventPayload) -> Result<(), String> {
+    let a = load_auth(app);
+    let home = a
+        .apple_calendar_url
+        .clone()
+        .ok_or("iCloud not connected.")?;
+    let uid = uuid::Uuid::new_v4().to_string();
+    let event_url = format!("{}/{}.ics", home.trim_end_matches('/'), uid);
+    let start = iso_to_ical_datetime(&payload.start)?;
+    let end = iso_to_ical_datetime(&payload.end)?;
+    let now = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let loc = payload.location.clone().unwrap_or_default();
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Candor//Calendar//EN\r\nBEGIN:VEVENT\r\nUID:{uid}\r\nDTSTAMP:{now}\r\nSUMMARY:{}\r\nDTSTART:{start}\r\nDTEND:{end}\r\nLOCATION:{}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        escape_ics_text(&payload.title),
+        escape_ics_text(&loc),
+    );
+    apple_put_ics(app, &event_url, None, &ics)
 }
 
 fn apple_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) -> Result<(), String> {
     let event_url = payload
         .event_url
         .clone()
-        .ok_or("Missing iCloud event URL — refresh your calendar and try again.")?;
+        .ok_or("Missing iCloud event URL. Refresh your calendar and try again.")?;
     let (etag, ics) = apple_get_ics(app, &event_url)?;
     let mut next = ics.clone();
     if let Some(title) = &payload.title {
-        next = replace_ical_field(&next, "SUMMARY", title);
+        next = replace_ical_field(&next, "SUMMARY", &escape_ics_text(title));
     }
     if let Some(start) = &payload.start {
         let ical = iso_to_ical_datetime(start)?;
@@ -1479,9 +2003,25 @@ fn apple_update_event(app: &AppHandle, payload: &UpdateCalendarEventPayload) -> 
         next = replace_ical_field(&next, "DTEND", &ical);
     }
     if let Some(loc) = &payload.location {
-        next = replace_ical_field(&next, "LOCATION", loc);
+        next = replace_ical_field(&next, "LOCATION", &escape_ics_text(loc));
     }
-    apple_put_ics(app, &event_url, &etag, &next)
+    apple_put_ics(app, &event_url, Some(&etag), &next)
+}
+
+#[tauri::command]
+pub async fn create_calendar_event(
+    app: AppHandle,
+    payload: CreateCalendarEventPayload,
+) -> Result<(), String> {
+    let payload = validate_create_payload(payload)?;
+    tauri::async_runtime::spawn_blocking(move || match payload.provider.as_str() {
+        "microsoft" => ms_create_event(&app, &payload),
+        "google" => google_create_event(&app, &payload),
+        "apple" => apple_create_event(&app, &payload),
+        _ => unreachable!("calendar provider was validated"),
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -1489,11 +2029,12 @@ pub async fn update_calendar_event(
     app: AppHandle,
     payload: UpdateCalendarEventPayload,
 ) -> Result<(), String> {
+    let payload = validate_update_payload(payload)?;
     tauri::async_runtime::spawn_blocking(move || match payload.provider.as_str() {
         "microsoft" => ms_update_event(&app, &payload),
         "google" => google_update_event(&app, &payload),
         "apple" => apple_update_event(&app, &payload),
-        other => Err(format!("Unknown calendar provider: {other}")),
+        _ => unreachable!("calendar provider was validated"),
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1504,16 +2045,17 @@ pub async fn delete_calendar_event(
     app: AppHandle,
     payload: DeleteCalendarEventPayload,
 ) -> Result<(), String> {
+    let payload = validate_delete_payload(payload)?;
     tauri::async_runtime::spawn_blocking(move || match payload.provider.as_str() {
         "microsoft" => ms_delete_event(&app, &payload.id),
         "google" => google_delete_event(&app, &payload.id),
         "apple" => {
             let url = payload
                 .event_url
-                .ok_or("Missing iCloud event URL — refresh your calendar and try again.")?;
+                .ok_or("Missing iCloud event URL. Refresh your calendar and try again.")?;
             apple_delete_event(&app, &url)
         }
-        other => Err(format!("Unknown calendar provider: {other}")),
+        _ => unreachable!("calendar provider was validated"),
     })
     .await
     .map_err(|e| e.to_string())?

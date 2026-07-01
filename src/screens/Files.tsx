@@ -1,20 +1,24 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { View } from "../App";
+import { useEffect, useMemo, useState } from "react";
+import type { SidebarFolderProps, View } from "../App";
 import { Sidebar } from "../components/Sidebar";
-import { FolderTree, type EditingFolderState } from "../components/FolderTree";
-import { FolderActionsDropdown } from "../components/FolderActionsDropdown";
 import { FileEditor } from "../components/FileEditor";
 import {
   getCandorRootPath,
-  loadFolderTree,
-  loadSavedMeetings,
+  loadStorageLibraries,
   moveMeetingToFolder,
   openCandorFolder,
+  pickStorageFolder,
+  changeStorageLibraryPath,
+  setActiveStorageLibrary,
   type FolderTreeNode,
-  type SavedMeeting,
+  type StorageLibrariesState,
 } from "../api/local";
-import { directItemCounts, formatItemCount, takePendingFolderEdit } from "../utils/folderActions";
-import { meetingContextHandler } from "../components/ContextMenu";
+import { FilesExplorerList } from "../components/FilesExplorerList";
+import {
+  flattenFolderTree,
+  folderBreadcrumbPath,
+  formatItemCount,
+} from "../utils/folderActions";
 import type { ContextMenuState } from "../meetingEdit";
 
 interface FilesProps {
@@ -22,6 +26,8 @@ interface FilesProps {
   onOpenMeeting: (id: string) => void;
   refreshKey: number;
   onMeetingContextMenu: (x: number, y: number, target: ContextMenuState["target"]) => void;
+  sidebarFolder: SidebarFolderProps;
+  embedded?: boolean;
 }
 
 function collectFolderIds(node: FolderTreeNode, out: Set<string>) {
@@ -46,50 +52,63 @@ function folderIdsForTree(tree: FolderTreeNode[], selectedId: string): Set<strin
   return out;
 }
 
-function flattenFolders(tree: FolderTreeNode[]): FolderTreeNode[] {
-  const out: FolderTreeNode[] = [];
-  const walk = (nodes: FolderTreeNode[]) => {
-    for (const n of nodes) {
-      out.push(n);
-      walk(n.children);
-    }
-  };
-  walk(tree);
-  return out;
-}
+export function Files({
+  onNavigate,
+  onOpenMeeting,
+  refreshKey,
+  onMeetingContextMenu,
+  sidebarFolder,
+  embedded,
+}: FilesProps) {
+  const {
+    filesTree: tree,
+    filesSelectedFolderId: selectedFolderId,
+    onSelectedFolderChange: setSelectedFolderId,
+    onFilesFolderChange: refresh,
+    filesMeetings: meetings,
+  } = sidebarFolder;
 
-export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextMenu }: FilesProps) {
-  const initialPendingFolderId = takePendingFolderEdit();
-  const [meetings, setMeetings] = useState<SavedMeeting[]>([]);
-  const [tree, setTree] = useState<FolderTreeNode[]>([]);
-  const [selectedFolderId, setSelectedFolderId] = useState<string>(initialPendingFolderId ?? "inbox");
   const [selectedMeetingId, setSelectedMeetingId] = useState<string | null>(null);
   const [candorPath, setCandorPath] = useState("");
-  const [loading, setLoading] = useState(true);
+  const [storage, setStorage] = useState<StorageLibrariesState | null>(null);
   const [dragMeetingId, setDragMeetingId] = useState<string | null>(null);
-  const [editingFolder, setEditingFolder] = useState<EditingFolderState | null>(
-    initialPendingFolderId ? { id: initialPendingFolderId, isNew: true } : null,
-  );
-  const [expandFolderId, setExpandFolderId] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    const [m, t, root] = await Promise.all([
-      loadSavedMeetings(),
-      loadFolderTree(),
-      getCandorRootPath(),
-    ]);
-    setMeetings(m);
-    setTree(t);
-    setCandorPath(root);
-    setLoading(false);
-  }, []);
+  const loading = tree.length === 0 && meetings.length === 0;
+  const activeLibrary = storage?.libraries.find((l) => l.id === storage.activeId);
 
   useEffect(() => {
-    refresh();
-  }, [refresh, refreshKey]);
+    getCandorRootPath().then(setCandorPath).catch(() => {});
+    loadStorageLibraries().then(setStorage).catch(() => {});
+  }, [refreshKey]);
 
-  const itemCounts = useMemo(() => directItemCounts(meetings), [meetings]);
+  const handleChangeLocation = async () => {
+    if (!storage?.activeId) return;
+    const picked = await pickStorageFolder();
+    if (!picked) return;
+    const migrate = window.confirm(
+      "Move existing Candor files to the new folder?\n\nOK = copy everything to the new location\nCancel = use the new folder empty (existing files stay at the old path)",
+    );
+    try {
+      await changeStorageLibraryPath(storage.activeId, picked, migrate);
+      getCandorRootPath().then(setCandorPath).catch(() => {});
+      loadStorageLibraries().then(setStorage).catch(() => {});
+      await refresh();
+    } catch (e) {
+      window.alert(String(e));
+    }
+  };
+
+  const handleSwitchLibrary = async (id: string) => {
+    if (id === storage?.activeId) return;
+    try {
+      await setActiveStorageLibrary(id);
+      loadStorageLibraries().then(setStorage).catch(() => {});
+      getCandorRootPath().then(setCandorPath).catch(() => {});
+      await refresh();
+    } catch (e) {
+      window.alert(String(e));
+    }
+  };
 
   const visibleMeetings = useMemo(() => {
     if (!tree.length) return meetings;
@@ -97,19 +116,11 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
     return meetings.filter((m) => allowed.has(m.folderId ?? "inbox"));
   }, [meetings, tree, selectedFolderId]);
 
-  const flatFolders = useMemo(() => flattenFolders(tree), [tree]);
-  const folderNames = useMemo(() => flatFolders.map((f) => f.name), [flatFolders]);
+  const flatFolders = useMemo(() => flattenFolderTree(tree), [tree]);
   const selectedFolder = flatFolders.find((f) => f.id === selectedFolderId);
-
-  const handleFolderCreated = useCallback(
-    (folderId: string | null, parentId?: string | null) => {
-      if (!folderId) return;
-      setEditingFolder({ id: folderId, isNew: true });
-      setSelectedFolderId(folderId);
-      if (parentId) setExpandFolderId(parentId);
-      refresh();
-    },
-    [refresh],
+  const breadcrumb = useMemo(
+    () => folderBreadcrumbPath(tree, selectedFolderId),
+    [tree, selectedFolderId],
   );
 
   const handleDropOnFolder = async (folderId: string) => {
@@ -124,17 +135,7 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
     }
   };
 
-  return (
-    <div className="screen screen--sidebar">
-      <Sidebar
-        active="Files"
-        onNavigate={onNavigate}
-        filesSelectedFolderId={selectedFolderId}
-        folderNames={folderNames}
-        onFilesFolderChange={refresh}
-        onFolderCreated={handleFolderCreated}
-      />
-
+  const main = (
       <div className="main main--scroll files-layout">
         <div className="library-head files-page-head">
           <div className="files-page-head-text">
@@ -142,94 +143,98 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
             <span className="page-sub">Organize transcripts and notes on your device</span>
           </div>
           <div className="spacer" />
-          <FolderActionsDropdown
-            selectedFolderId={selectedFolderId}
-            folderNames={folderNames}
-            onCreated={handleFolderCreated}
-          />
           <button type="button" className="btn-ghost" onClick={() => openCandorFolder().catch(() => {})}>
             Open in Explorer
           </button>
-          <button type="button" className="btn-ghost" onClick={refresh}>
+          <button type="button" className="btn-ghost" onClick={() => void refresh()}>
             Refresh
           </button>
         </div>
 
         {candorPath && (
           <div className="files-path-banner">
-            <span className="files-path-label">Local storage</span>
-            <code className="files-path-value">{candorPath}</code>
+            <div className="files-path-main">
+              <span className="files-path-label">
+                {activeLibrary?.name ?? "Local storage"}
+              </span>
+              <code className="files-path-value">{candorPath}</code>
+            </div>
+            <div className="files-path-actions">
+              {storage && storage.libraries.length > 1 && (
+                <select
+                  className="files-lib-select"
+                  value={storage.activeId}
+                  onChange={(e) => void handleSwitchLibrary(e.target.value)}
+                  aria-label="Switch storage location"
+                >
+                  {storage.libraries.map((lib) => (
+                    <option key={lib.id} value={lib.id}>
+                      {lib.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+              <button type="button" className="btn-ghost" onClick={() => void handleChangeLocation()}>
+                Change location
+              </button>
+            </div>
           </div>
         )}
 
         <div className="files-split">
-          <aside className="files-pane files-pane--tree">
-            <div className="folder-tree-head">
-              <span className="folder-tree-title">Folders</span>
-            </div>
-            <FolderTree
-              tree={tree}
-              selectedId={selectedFolderId}
-              onSelect={setSelectedFolderId}
-              onChange={refresh}
-              meetings={meetings}
-              itemCounts={itemCounts}
-              editingFolder={editingFolder}
-              onEditingFolderChange={setEditingFolder}
-              expandFolderId={expandFolderId}
-              onExpandFolderIdConsumed={() => setExpandFolderId(null)}
-            />
-          </aside>
-
           <section className="files-pane files-pane--list">
-            <div className="files-list-head">
-              <span className="files-list-title">{selectedFolder?.name ?? "Folder"}</span>
-              <span className="files-list-count">{formatItemCount(visibleMeetings.length)}</span>
-            </div>
-            {loading ? (
-              <div className="library-empty">Loading meetings…</div>
-            ) : visibleMeetings.length === 0 ? (
-              <div className="library-empty">
-                No files in this folder. Record a meeting or drag files here from another folder.
-              </div>
-            ) : (
-              <div className="meeting-list meeting-list--compact">
-                {visibleMeetings.map((m) => (
-                  <button
-                    key={m.id}
-                    type="button"
-                    className={`meeting-row meeting-row--menu ${selectedMeetingId === m.id ? "meeting-row--selected" : ""}`}
-                    draggable
-                    onDragStart={() => setDragMeetingId(m.id)}
-                    onDragEnd={() => setDragMeetingId(null)}
-                    onClick={() => setSelectedMeetingId(m.id)}
-                    onDoubleClick={() => onOpenMeeting(m.id)}
-                    onContextMenu={(e) =>
-                      meetingContextHandler(e, (x, y) =>
-                        onMeetingContextMenu(x, y, { kind: "saved", meeting: m }),
-                      )
-                    }
-                  >
-                    <div className="meeting-main">
-                      <div className="meeting-title-row">
-                        <span className="meeting-title">{m.title}</span>
-                      </div>
-                      <div className="meeting-blurb">{m.blurb}</div>
-                    </div>
-                    <div className="meeting-meta">
-                      <div className="meeting-when">{m.whenLabel}</div>
-                    </div>
-                  </button>
+            <div className="files-explorer">
+              <nav className="files-explorer-breadcrumb" aria-label="Current folder">
+                <button
+                  type="button"
+                  className="files-explorer-crumb"
+                  onClick={() => setSelectedFolderId("inbox")}
+                >
+                  Candor
+                </button>
+                {breadcrumb.map((folder) => (
+                  <span key={folder.id} className="files-explorer-crumb-wrap">
+                    <span className="files-explorer-crumb-sep" aria-hidden="true">
+                      ›
+                    </span>
+                    <button
+                      type="button"
+                      className={`files-explorer-crumb${folder.id === selectedFolderId ? " files-explorer-crumb--current" : ""}`}
+                      onClick={() => setSelectedFolderId(folder.id)}
+                    >
+                      {folder.name}
+                    </button>
+                  </span>
                 ))}
-              </div>
-            )}
+              </nav>
 
-            <div
-              className="files-drop-hint"
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={() => handleDropOnFolder(selectedFolderId)}
-            >
-              Drop here to move into this folder
+              <div className="files-explorer-toolbar">
+                <span className="files-explorer-toolbar-title">
+                  {selectedFolder?.name ?? "Folder"}
+                </span>
+                <span className="files-explorer-toolbar-count">
+                  {formatItemCount(visibleMeetings.length)}
+                </span>
+              </div>
+
+              <FilesExplorerList
+                meetings={visibleMeetings}
+                selectedId={selectedMeetingId}
+                loading={loading}
+                onSelect={setSelectedMeetingId}
+                onOpen={onOpenMeeting}
+                onContextMenu={onMeetingContextMenu}
+                onDragStart={setDragMeetingId}
+                onDragEnd={() => setDragMeetingId(null)}
+              />
+
+              <div
+                className="files-drop-hint"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => handleDropOnFolder(selectedFolderId)}
+              >
+                Drop here to move into this folder
+              </div>
             </div>
           </section>
 
@@ -242,6 +247,13 @@ export function Files({ onNavigate, onOpenMeeting, refreshKey, onMeetingContextM
           </section>
         </div>
       </div>
+  );
+
+  if (embedded) return main;
+  return (
+    <div className="screen screen--sidebar">
+      <Sidebar active="Files" onNavigate={onNavigate} {...sidebarFolder} />
+      {main}
     </div>
   );
 }

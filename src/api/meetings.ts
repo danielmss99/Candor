@@ -1,6 +1,14 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { CalendarEvent } from "../App";
 
+export interface CreateCalendarPayload {
+  provider: string;
+  title: string;
+  start: string;
+  end: string;
+  location?: string | null;
+}
+
 export interface UpdateCalendarPayload {
   id: string;
   provider: string;
@@ -16,6 +24,11 @@ export interface UpdateSavedPayload {
   title?: string;
   date?: string;
   folderId?: string | null;
+}
+
+export async function createCalendarEvent(payload: CreateCalendarPayload): Promise<void> {
+  if (!isTauri()) throw new Error("Calendar editing requires the Candor desktop app.");
+  await invoke("create_calendar_event", { payload });
 }
 
 export async function updateCalendarEvent(payload: UpdateCalendarPayload): Promise<void> {

@@ -4,11 +4,9 @@ on:
   push:
     branches:
       - main
-      - v2
   pull_request:
     branches:
       - main
-      - v2
   workflow_dispatch:
 
 jobs:
@@ -48,17 +46,27 @@ jobs:
         run: npm run build
 
       - name: Build Tauri app
-        run: npm run tauri build
+        shell: pwsh
+        run: .\scripts\tauri-release.ps1 -TargetDir "$env:RUNNER_TEMP\candor-target" -Ci
+        env:
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+
+      - name: Build Microsoft Store candidate
+        if: github.event_name == 'workflow_dispatch'
+        shell: pwsh
+        run: .\scripts\tauri-release.ps1 -Store -TargetDir "$env:RUNNER_TEMP\candor-store-target" -Ci
         env:
           LIBCLANG_PATH: C:\Program Files\LLVM\bin
 
       - name: Upload Windows installers
         uses: actions/upload-artifact@v4
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         with:
           name: candor-windows-${{ github.sha }}
           path: |
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.msi
+            ${{ runner.temp }}\candor-target\release\bundle/**/*.exe
+            ${{ runner.temp }}\candor-target\release\bundle/**/*.msi
+            ${{ runner.temp }}\candor-store-target\release\bundle/**/*.exe
+            ${{ runner.temp }}\candor-store-target\release\bundle/**/*.msi
           if-no-files-found: warn
           retention-days: 14

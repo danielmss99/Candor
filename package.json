@@ -2,14 +2,19 @@
   "name": "candor",
   "private": true,
   "version": "2.0.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "build:all": "npm run build && npm run tauri build",
+    "build:all": "npm run tauri:release",
+    "build:store": "npm run tauri:release -- -Store",
     "preview": "vite preview",
     "tauri": "tauri",
-    "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/tauri-dev.ps1"
+    "tauri:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/tauri-dev.ps1",
+    "tauri:release": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/tauri-release.ps1",
+    "audit:source": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/audit-source-security.ps1",
+    "audit:release": "npm run audit:source && powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/audit-release-artifacts.ps1"
   },
   "dependencies": {
     "@fontsource/jetbrains-mono": "^5.2.8",

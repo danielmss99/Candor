@@ -28,7 +28,7 @@ Desktop meeting recorder — private, on-device Whisper transcription.
 | Summary templates | ✅ Done | Standup, 1:1, sales, retro, client call in Settings |
 | Scratchpad → recap | ✅ Done | Live notes merged in `recapGenerate.ts` |
 | Regenerate summary | ✅ Done | Button on Recap after edits |
-| Privacy settings | ✅ Done | Retention, delete audio, system audio, webhook |
+| Privacy settings | ✅ Done | Retention, delete audio, system audio |
 
 ---
 
@@ -41,8 +41,7 @@ Desktop meeting recorder — private, on-device Whisper transcription.
 | Folder assignment UI | ✅ Done | Context menu → assign folder |
 | Calendar notification | ✅ Done | Toast when meeting starts in 2 min |
 | Start from calendar event | ✅ Done | Pre-fills title, attendees, event id |
-| Webhook on meeting saved | ✅ Done | Optional URL in Settings |
-| Local MCP server | 🟡 Scaffold | `docs/mcp-server.md` — not a running server yet |
+| Local MCP server | ⚪ Deferred | Design note only in `docs/mcp-server.md` |
 | Noise preprocessing | 🟡 Partial | Light high-pass in Rust; RNNoise TODO |
 
 ---
@@ -60,8 +59,8 @@ Desktop meeting recorder — private, on-device Whisper transcription.
 ## Known blockers / honest stubs
 
 1. **RNNoise** — No stable Rust binding wired; light DSP only. Full Krisp-style NC deferred.
-2. **Local MCP server** — Documentation + settings flag only; implement stdio server when needed.
-3. **Retention auto-delete** — Setting stored; scheduled cleanup not implemented yet.
+2. **Local MCP server** — Design note only; implement stdio server when needed.
+3. **Retention auto-delete** — Enforced when the meeting list is loaded, not as a background scheduler.
 4. **macOS loopback** — System audio capture returns None on non-Windows; mic-only on Mac until Core Audio loopback added.
 
 ---

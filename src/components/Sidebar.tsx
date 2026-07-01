@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import type { View } from "../App";
+import type { SidebarFolderProps, View } from "../App";
 import { useUser } from "../user";
 import { Avatar } from "./Avatar";
 import { FolderActionsDropdown } from "./FolderActionsDropdown";
+import { FolderTree } from "./FolderTree";
 import { ScalesLogo } from "./ScalesLogo";
 
 interface NavItem {
@@ -19,29 +20,34 @@ const NAV_MANAGE: NavItem[] = [
   { label: "People", target: "people" },
   { label: "Tasks", target: "actions" },
   { label: "Search", target: "search" },
+  { label: "Dictionary", target: "dictionary" },
 ];
 
-interface SidebarProps {
-  active: "Home" | "Meetings" | "People" | "Files" | "Tasks" | "Search";
+interface SidebarProps extends Partial<SidebarFolderProps> {
+  active: "Home" | "Meetings" | "People" | "Files" | "Tasks" | "Search" | "Dictionary";
   onNavigate: (view: View) => void;
-  /** Selected folder when Files view is open — used by the Files + menu. */
-  filesSelectedFolderId?: string;
-  folderNames?: string[];
-  onFilesFolderChange?: () => void;
-  onFolderCreated?: (folderId: string | null, parentId?: string | null) => void;
 }
 
 export function Sidebar({
   active,
   onNavigate,
+  filesTree,
   filesSelectedFolderId,
+  onFilesFolderSelect,
   folderNames,
   onFilesFolderChange,
   onFolderCreated,
+  filesMeetings,
+  filesItemCounts,
+  filesEditingFolder,
+  onFilesEditingFolderChange,
+  filesExpandFolderId,
+  onFilesExpandFolderIdConsumed,
 }: SidebarProps) {
   const {
     name,
     initials,
+    avatarUrl,
     onEditName,
     onConnectCalendar,
     calendar,
@@ -52,7 +58,16 @@ export function Sidebar({
   const [menuOpen, setMenuOpen] = useState(false);
   const [workOpen, setWorkOpen] = useState(true);
   const [manageOpen, setManageOpen] = useState(true);
+  const [filesTreeOpen, setFilesTreeOpen] = useState(true);
   const wrapRef = useRef<HTMLDivElement>(null);
+
+  const isFilesActive = active === "Files";
+  const showFilesTree = filesTreeOpen && filesTree !== undefined;
+
+  const handleFolderSelect = (folderId: string) => {
+    onFilesFolderSelect?.(folderId);
+    if (!isFilesActive) onNavigate("files");
+  };
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -110,16 +125,11 @@ export function Sidebar({
     </div>
   );
 
-  const isFilesActive = active === "Files";
-
   return (
     <div className="sidebar">
-      <button className="brand" onClick={() => onNavigate("landing")} aria-label="Candor v2">
+      <button className="brand" onClick={() => onNavigate("landing")} aria-label="Candor">
         <ScalesLogo size="sm" />
-        <span className="brand-name">
-          Candor
-          <span className="brand-v2-badge">v2</span>
-        </span>
+        <span className="brand-name">Candor</span>
       </button>
 
       {renderSection("Work", NAV_WORK, workOpen, setWorkOpen)}
@@ -127,10 +137,24 @@ export function Sidebar({
 
       <div className="nav-section nav-section--files">
         <div className={`nav-files-row ${isFilesActive ? "nav-files-row--active" : ""}`}>
+          {filesTree !== undefined && (
+            <button
+              type="button"
+              className="nav-files-chevron"
+              onClick={() => setFilesTreeOpen((o) => !o)}
+              aria-expanded={filesTreeOpen}
+              aria-label={filesTreeOpen ? "Collapse folders" : "Expand folders"}
+            >
+              {filesTreeOpen ? "▾" : "▸"}
+            </button>
+          )}
           <button
             type="button"
             className={`nav-item nav-item--files ${isFilesActive ? "nav-item--active" : ""}`}
-            onClick={() => onNavigate("files")}
+            onClick={() => {
+              onNavigate("files");
+              setFilesTreeOpen(true);
+            }}
           >
             <span className="nav-bullet" />
             Files
@@ -143,9 +167,26 @@ export function Sidebar({
               if (id) onFolderCreated?.(id, parentId);
               onFilesFolderChange?.();
               if (!isFilesActive) onNavigate("files");
+              setFilesTreeOpen(true);
             }}
           />
         </div>
+        {showFilesTree && (
+          <div className="nav-files-tree">
+            <FolderTree
+              tree={filesTree}
+              selectedId={filesSelectedFolderId ?? "inbox"}
+              onSelect={handleFolderSelect}
+              onChange={() => onFilesFolderChange?.()}
+              meetings={filesMeetings}
+              itemCounts={filesItemCounts}
+              editingFolder={filesEditingFolder}
+              onEditingFolderChange={onFilesEditingFolderChange}
+              expandFolderId={filesExpandFolderId}
+              onExpandFolderIdConsumed={onFilesExpandFolderIdConsumed}
+            />
+          </div>
+        )}
       </div>
 
       <div className="sidebar-spacer" />
@@ -181,7 +222,7 @@ export function Sidebar({
                 <span className="account-cal-name">Outlook</span>
                 <button
                   className="account-cal-disc"
-                  onClick={() => act(() => onDisconnect?.("microsoft"))}
+                  onClick={() => act(() => onDisconnect?.("apple"))}
                 >
                   Disconnect
                 </button>
@@ -220,7 +261,13 @@ export function Sidebar({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
         >
-          <Avatar label={initials} bg="var(--coral)" fg="var(--coral-on)" size={26} />
+          <Avatar
+            label={initials}
+            src={avatarUrl}
+            bg="var(--coral)"
+            fg="var(--coral-on)"
+            size={26}
+          />
           <div className="sidebar-user-text">
             <div className="sidebar-user-name">{name}</div>
             <div className="sidebar-user-sub">Account &amp; settings</div>

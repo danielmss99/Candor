@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+use crate::privacy;
+use crate::storage_config;
 use crate::Segment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +58,9 @@ struct FolderStore {
 }
 
 pub const INBOX_FOLDER_ID: &str = "inbox";
+/// Stable on-disk folder name for the root inbox (display name may differ).
+const INBOX_DISK_NAME: &str = "Inbox";
+const DEFAULT_INBOX_DISPLAY_NAME: &str = "Main Folder";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -85,9 +90,25 @@ fn app_data(app: &AppHandle) -> Result<PathBuf, String> {
     app.path().app_data_dir().map_err(|e| e.to_string())
 }
 
-/// User-facing root for organized meeting files: `{app_data}/Candor/`.
+fn audio_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app_data(app)?.join("audio");
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
+}
+
+fn managed_audio_path(app: &AppHandle, audio_path: &str) -> Option<PathBuf> {
+    let root = audio_dir(app).ok()?.canonicalize().ok()?;
+    let audio = Path::new(audio_path).canonicalize().ok()?;
+    if audio.starts_with(root) {
+        Some(audio)
+    } else {
+        None
+    }
+}
+
+/// Active storage library root (user-configurable; defaults to `{app_data}/Candor/`).
 pub fn candor_root(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_data(app)?.join("Candor"))
+    storage_config::active_library_root(app)
 }
 
 pub fn notes_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -107,13 +128,7 @@ fn folders_config_path(app: &AppHandle) -> Result<PathBuf, String> {
 fn sanitize_folder_name(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| {
-            if r#"<>:"/\|?*"#.contains(c) {
-                '_'
-            } else {
-                c
-            }
-        })
+        .map(|c| if r#"<>:"/\|?*"#.contains(c) { '_' } else { c })
         .collect();
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -131,7 +146,7 @@ fn load_folder_store_raw(app: &AppHandle) -> Result<FolderStore, String> {
         return Ok(FolderStore {
             folders: vec![OrgFolder {
                 id: INBOX_FOLDER_ID.into(),
-                name: "Inbox".into(),
+                name: DEFAULT_INBOX_DISPLAY_NAME.into(),
                 parent_id: None,
             }],
         });
@@ -159,7 +174,11 @@ fn folder_rel_segments(folders: &[OrgFolder], id: &str) -> Result<Vec<String>, S
             .iter()
             .find(|f| f.id == fid)
             .ok_or_else(|| format!("Folder not found: {fid}"))?;
-        segments.push(sanitize_folder_name(&folder.name));
+        segments.push(if folder.id == INBOX_FOLDER_ID {
+            INBOX_DISK_NAME.to_string()
+        } else {
+            sanitize_folder_name(&folder.name)
+        });
         current = folder.parent_id.clone();
     }
     segments.reverse();
@@ -196,7 +215,9 @@ fn migrate_legacy_notes(app: &AppHandle) -> Result<(), String> {
             let dest = inbox.join(path.file_name().ok_or("Invalid filename")?);
             if !dest.exists() {
                 fs::rename(&path, &dest).or_else(|_| {
-                    fs::copy(&path, &dest).map(|_| ()).map_err(|e| e.to_string())
+                    fs::copy(&path, &dest)
+                        .map(|_| ())
+                        .map_err(|e| e.to_string())
                 })?;
             }
         }
@@ -213,10 +234,15 @@ pub fn ensure_folder_store(app: &AppHandle) -> Result<Vec<OrgFolder>, String> {
             0,
             OrgFolder {
                 id: INBOX_FOLDER_ID.into(),
-                name: "Inbox".into(),
+                name: DEFAULT_INBOX_DISPLAY_NAME.into(),
                 parent_id: None,
             },
         );
+    }
+    if let Some(inbox) = store.folders.iter_mut().find(|f| f.id == INBOX_FOLDER_ID) {
+        if inbox.name == "Inbox" {
+            inbox.name = DEFAULT_INBOX_DISPLAY_NAME.into();
+        }
     }
     migrate_legacy_notes(app)?;
     sync_disk_folders(app, &store.folders)?;
@@ -225,10 +251,10 @@ pub fn ensure_folder_store(app: &AppHandle) -> Result<Vec<OrgFolder>, String> {
 }
 
 fn meeting_search_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
-    ensure_folder_store(app)?;
-    let mut roots = vec![candor_root(app)?];
+    let _ = ensure_folder_store(app)?;
+    let mut roots = storage_config::all_library_roots(app)?;
     let legacy = legacy_notes_dir(app);
-    if legacy.exists() {
+    if legacy.exists() && !roots.iter().any(|r| r == &legacy) {
         roots.push(legacy);
     }
     Ok(roots)
@@ -288,7 +314,11 @@ fn resolve_target_dir(app: &AppHandle, folder_id: Option<&str>) -> Result<PathBu
     folder_disk_path(&root, &folders, fid)
 }
 
-fn move_meeting_file(app: &AppHandle, path: &Path, folder_id: Option<&str>) -> Result<PathBuf, String> {
+fn move_meeting_file(
+    app: &AppHandle,
+    path: &Path,
+    folder_id: Option<&str>,
+) -> Result<PathBuf, String> {
     let target_dir = resolve_target_dir(app, folder_id)?;
     fs::create_dir_all(&target_dir).map_err(|e| e.to_string())?;
     let filename = path
@@ -301,14 +331,20 @@ fn move_meeting_file(app: &AppHandle, path: &Path, folder_id: Option<&str>) -> R
             fs::remove_file(&dest).ok();
         }
         fs::rename(path, &dest).or_else(|_| {
-            fs::copy(path, &dest).map(|_| ()).map_err(|e| e.to_string())?;
+            fs::copy(path, &dest)
+                .map(|_| ())
+                .map_err(|e| e.to_string())?;
             fs::remove_file(path).map_err(|e| e.to_string())
         })?;
     }
     Ok(dest)
 }
 
-fn build_folder_tree(folders: &[OrgFolder], root: &Path, parent_id: Option<&str>) -> Vec<FolderTreeNode> {
+fn build_folder_tree(
+    folders: &[OrgFolder],
+    root: &Path,
+    parent_id: Option<&str>,
+) -> Vec<FolderTreeNode> {
     folders
         .iter()
         .filter(|f| f.parent_id.as_deref() == parent_id)
@@ -534,19 +570,29 @@ pub fn save_note_file(
         .clone()
         .unwrap_or_else(|| Uuid::new_v4().to_string());
     let folder_id = opts.folder_id.unwrap_or(INBOX_FOLDER_ID);
-    let filename = format!("{}-{}.md", now.format("%Y-%m-%d-%H%M%S"), &id[..8.min(id.len())]);
+    let filename = format!(
+        "{}-{}.md",
+        now.format("%Y-%m-%d-%H%M%S"),
+        &id[..8.min(id.len())]
+    );
     let path = dir.join(filename);
 
-    let title = opts.title_override.map(str::trim).filter(|t| !t.is_empty()).map(str::to_string).or_else(|| {
-        segs.first().map(|s| {
-            let t = s.text.trim();
-            if t.len() > 60 {
-                format!("{}…", &t[..57])
-            } else {
-                t.to_string()
-            }
+    let title = opts
+        .title_override
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            segs.first().map(|s| {
+                let t = s.text.trim();
+                if t.len() > 60 {
+                    format!("{}…", &t[..57])
+                } else {
+                    t.to_string()
+                }
+            })
         })
-    }).unwrap_or_else(|| format!("Recording {}", now.format("%b %-d, %Y")));
+        .unwrap_or_else(|| format!("Recording {}", now.format("%b %-d, %Y")));
 
     let mut md = String::new();
     md.push_str("---\n");
@@ -643,16 +689,60 @@ fn meeting_from_file(path: &Path) -> Option<SavedMeeting> {
     })
 }
 
+fn enforce_retention(app: &AppHandle) -> Result<(), String> {
+    let days = privacy::load_privacy(app).retention_days;
+    if days == 0 {
+        return Ok(());
+    }
+    let cutoff = Local::now() - chrono::Duration::days(days as i64);
+    let mut files = Vec::new();
+    for root in meeting_search_roots(app)? {
+        collect_md_files(&root, &mut files)?;
+    }
+    for path in files {
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(_) => continue,
+        };
+        let (meta, _) = parse_frontmatter(&raw);
+        if meta
+            .get("status")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s == "recording_draft")
+        {
+            continue;
+        }
+        let Some(date) = meta.get("date").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(dt) = DateTime::parse_from_rfc3339(date) else {
+            continue;
+        };
+        let local: DateTime<Local> = dt.into();
+        if local >= cutoff {
+            continue;
+        }
+        if let Some(audio) = meta
+            .get("audio_path")
+            .and_then(|v| v.as_str())
+            .and_then(|p| managed_audio_path(app, p))
+        {
+            let _ = fs::remove_file(audio);
+        }
+        let _ = fs::remove_file(&path);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn list_meetings(app: AppHandle) -> Result<Vec<SavedMeeting>, String> {
+    enforce_retention(&app)?;
     let mut files = Vec::new();
     for root in meeting_search_roots(&app)? {
         collect_md_files(&root, &mut files)?;
     }
-    let mut meetings: Vec<SavedMeeting> = files
-        .iter()
-        .filter_map(|p| meeting_from_file(p))
-        .collect();
+    let mut meetings: Vec<SavedMeeting> =
+        files.iter().filter_map(|p| meeting_from_file(p)).collect();
     meetings.sort_by(|a, b| b.date.cmp(&a.date));
     Ok(meetings)
 }
@@ -687,8 +777,8 @@ pub fn read_meeting(app: AppHandle, id: String) -> Result<MeetingDetail, String>
         audio_path: meta
             .get("audio_path")
             .and_then(|v| v.as_str())
-            .map(str::to_string)
-            .filter(|p| Path::new(p).exists()),
+            .and_then(|p| managed_audio_path(&app, p))
+            .map(|p| p.to_string_lossy().into_owned()),
         folder_id: meta
             .get("folder_id")
             .and_then(|v| v.as_str())
@@ -772,7 +862,10 @@ pub struct UpdateSavedMeetingPayload {
 }
 
 #[tauri::command]
-pub fn update_saved_meeting(app: AppHandle, payload: UpdateSavedMeetingPayload) -> Result<(), String> {
+pub fn update_saved_meeting(
+    app: AppHandle,
+    payload: UpdateSavedMeetingPayload,
+) -> Result<(), String> {
     let path = meeting_path_by_id(&app, &payload.id)?;
     let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let (mut meta, body) = parse_frontmatter(&raw);
@@ -939,7 +1032,7 @@ pub fn list_storage_folders(app: AppHandle) -> Result<Vec<StorageFolder>, String
         },
         StorageFolder {
             id: "notes".into(),
-            label: "Meeting notes (Inbox)".into(),
+            label: "Meeting notes (Main Folder)".into(),
             description: "Default folder for new transcripts and recaps".into(),
             path: notes.to_string_lossy().into_owned(),
         },
@@ -991,8 +1084,8 @@ pub fn meeting_audio_path(app: &AppHandle, id: &str) -> Result<Option<String>, S
     Ok(meta
         .get("audio_path")
         .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .filter(|p| Path::new(p).exists()))
+        .and_then(|p| managed_audio_path(app, p))
+        .map(|p| p.to_string_lossy().into_owned()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1025,7 +1118,9 @@ pub fn load_active_recording(app: &AppHandle) -> Result<Option<ActiveRecording>,
         return Ok(None);
     }
     let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    serde_json::from_str(&raw).map_err(|e| e.to_string()).map(Some)
+    serde_json::from_str(&raw)
+        .map_err(|e| e.to_string())
+        .map(Some)
 }
 
 pub fn clear_active_recording(app: &AppHandle) -> Result<(), String> {
@@ -1129,9 +1224,6 @@ pub fn create_folder(
 
 #[tauri::command]
 pub fn rename_folder(app: AppHandle, id: String, name: String) -> Result<OrgFolder, String> {
-    if id == INBOX_FOLDER_ID {
-        return Err("Cannot rename the Inbox folder".into());
-    }
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err("Folder name cannot be empty".into());
@@ -1141,6 +1233,14 @@ pub fn rename_folder(app: AppHandle, id: String, name: String) -> Result<OrgFold
         .iter()
         .position(|f| f.id == id)
         .ok_or_else(|| "Folder not found".to_string())?;
+
+    if id == INBOX_FOLDER_ID {
+        folders[idx].name = trimmed.to_string();
+        let updated = folders[idx].clone();
+        save_folder_store(&app, &FolderStore { folders })?;
+        return Ok(updated);
+    }
+
     let root = candor_root(&app)?;
     let old_path = folder_disk_path(&root, &folders, &id)?;
     folders[idx].name = trimmed.to_string();
@@ -1159,7 +1259,12 @@ pub fn rename_folder(app: AppHandle, id: String, name: String) -> Result<OrgFold
         }
     }
     let updated = folders[idx].clone();
-    save_folder_store(&app, &FolderStore { folders: folders.clone() })?;
+    save_folder_store(
+        &app,
+        &FolderStore {
+            folders: folders.clone(),
+        },
+    )?;
     sync_disk_folders(&app, &folders)?;
     Ok(updated)
 }
@@ -1254,7 +1359,12 @@ pub fn move_folder(
         }
     }
     let updated = folders[idx].clone();
-    save_folder_store(&app, &FolderStore { folders: folders.clone() })?;
+    save_folder_store(
+        &app,
+        &FolderStore {
+            folders: folders.clone(),
+        },
+    )?;
     sync_disk_folders(&app, &folders)?;
     Ok(updated)
 }
@@ -1283,4 +1393,60 @@ pub fn open_candor_folder(app: AppHandle) -> Result<(), String> {
     fs::create_dir_all(&path).map_err(|e| e.to_string())?;
     tauri_plugin_opener::open_path(path.to_string_lossy().to_string(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_storage_libraries(
+    app: AppHandle,
+) -> Result<storage_config::StorageLibrariesState, String> {
+    storage_config::load_storage_libraries(&app)
+}
+
+#[tauri::command]
+pub fn pick_storage_folder() -> Result<Option<String>, String> {
+    storage_config::pick_folder_dialog()
+}
+
+#[tauri::command]
+pub fn add_storage_library(
+    app: AppHandle,
+    name: String,
+    path: String,
+) -> Result<storage_config::StorageLibrary, String> {
+    storage_config::add_library(&app, name, path)
+}
+
+#[tauri::command]
+pub fn set_active_storage_library(
+    app: AppHandle,
+    id: String,
+) -> Result<storage_config::StorageLibrariesState, String> {
+    storage_config::set_active_library(&app, id)
+}
+
+#[tauri::command]
+pub fn change_storage_library_path(
+    app: AppHandle,
+    id: String,
+    path: String,
+    migrate: bool,
+) -> Result<storage_config::StorageLibrary, String> {
+    storage_config::change_library_path(&app, id, path, migrate)
+}
+
+#[tauri::command]
+pub fn rename_storage_library(
+    app: AppHandle,
+    id: String,
+    name: String,
+) -> Result<storage_config::StorageLibrary, String> {
+    storage_config::rename_library(&app, id, name)
+}
+
+#[tauri::command]
+pub fn remove_storage_library(
+    app: AppHandle,
+    id: String,
+) -> Result<storage_config::StorageLibrariesState, String> {
+    storage_config::remove_library(&app, id)
 }

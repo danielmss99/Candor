@@ -13,13 +13,16 @@ import { Live } from "./screens/LiveTranscription";
 import { Recap } from "./screens/Recap";
 import { People } from "./screens/People";
 import { Files } from "./screens/Files";
+import { Dictionary } from "./screens/Dictionary";
 import { RecordingBar } from "./components/RecordingBar";
 import { ConnectCalendarModal } from "./components/ConnectCalendarModal";
 import { NamePrompt } from "./components/NamePrompt";
 import { SettingsModal, type Theme } from "./components/SettingsModal";
 import { loadMeetingDetail, loadPrivacySettings, stopRecordingWithNotes, checkRecordingRecovery, recoverPartialRecording } from "./api/local";
+import { applyTheme, loadThemeMode, loadThemeOverrides, saveThemeMode } from "./theme";
 import { formatRecordingTime } from "./utils/time";
 import { invokeError } from "./api/calendar";
+import { createCalendarEvent } from "./api/meetings";
 import {
   loadCompletedActions,
   loadUserTasks,
@@ -36,7 +39,7 @@ import { MeetingMenuHost } from "./components/MeetingMenuHost";
 import { CommandPalette } from "./components/CommandPalette";
 import { KeyboardShortcuts } from "./components/KeyboardShortcuts";
 import type { ContextMenuState, MeetingTarget } from "./meetingEdit";
-import { UserContext, deriveUser, NAME_KEY } from "./user";
+import { UserContext, deriveUser, NAME_KEY, loadProfileImage } from "./user";
 import {
   loadOnboarding,
   patchOnboarding,
@@ -46,8 +49,18 @@ import {
   type OnboardingState,
 } from "./v2/metadata";
 import { resolveActionId } from "./api/actions";
-import { loadSavedMeetings, pickAndImportAudio } from "./api/local";
+import {
+  loadFolderTree,
+  loadSavedMeetings,
+  pickAndImportAudio,
+  type FolderTreeNode,
+  type SavedMeeting,
+} from "./api/local";
 import { loadSummaryTemplate } from "./v2/summaryTemplates";
+import type { EditingFolderState } from "./components/FolderTree";
+import { directItemCounts, flattenFolderTree, takePendingFolderEdit } from "./utils/folderActions";
+import { dictionaryPrompt } from "./v2/dictionary";
+import { Sidebar } from "./components/Sidebar";
 
 export type View =
   | "landing"
@@ -57,8 +70,25 @@ export type View =
   | "files"
   | "actions"
   | "search"
+  | "dictionary"
   | "live"
   | "recap";
+
+export interface SidebarFolderProps {
+  filesTree: FolderTreeNode[];
+  filesSelectedFolderId: string;
+  onFilesFolderSelect: (folderId: string) => void;
+  onSelectedFolderChange: (folderId: string) => void;
+  folderNames: string[];
+  onFilesFolderChange: () => void;
+  onFolderCreated: (folderId: string | null, parentId?: string | null) => void;
+  filesMeetings: SavedMeeting[];
+  filesItemCounts: Record<string, number>;
+  filesEditingFolder: EditingFolderState | null;
+  onFilesEditingFolderChange: (state: EditingFolderState | null) => void;
+  filesExpandFolderId: string | null;
+  onFilesExpandFolderIdConsumed: () => void;
+}
 export interface TranscriptSegment {
   time: string;
   text: string;
@@ -84,7 +114,40 @@ type Rec = "idle" | "preparing" | "countdown" | "recording" | "transcribing";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const RECORDING_SESSION_KEY = "candor-v2.recording-session";
+const WORKSPACE_VIEWS = new Set<View>([
+  "home",
+  "library",
+  "people",
+  "files",
+  "actions",
+  "search",
+  "dictionary",
+]);
+
+const RECORDING_SESSION_KEY = "candor.recording-session";
+
+function sidebarActive(
+  view: View,
+): "Home" | "Meetings" | "People" | "Files" | "Tasks" | "Search" | "Dictionary" {
+  switch (view) {
+    case "home":
+      return "Home";
+    case "library":
+      return "Meetings";
+    case "people":
+      return "People";
+    case "files":
+      return "Files";
+    case "actions":
+      return "Tasks";
+    case "search":
+      return "Search";
+    case "dictionary":
+      return "Dictionary";
+    default:
+      return "Home";
+  }
+}
 
 function format(elapsed: number): string {
   return formatRecordingTime(elapsed);
@@ -131,6 +194,19 @@ function App() {
   } | null>(null);
   const [recovering, setRecovering] = useState(false);
 
+  const initialPendingFolderIdRef = useRef(takePendingFolderEdit());
+  const [folderTree, setFolderTree] = useState<FolderTreeNode[]>([]);
+  const [folderMeetings, setFolderMeetings] = useState<SavedMeeting[]>([]);
+  const [selectedFolderId, setSelectedFolderId] = useState<string>(
+    () => initialPendingFolderIdRef.current ?? "inbox",
+  );
+  const [editingFolder, setEditingFolder] = useState<EditingFolderState | null>(() =>
+    initialPendingFolderIdRef.current
+      ? { id: initialPendingFolderIdRef.current, isNew: true }
+      : null,
+  );
+  const [expandFolderId, setExpandFolderId] = useState<string | null>(null);
+
   // Navigation context for search + recap
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedMeetingId, setSelectedMeetingId] = useState("q3-roadmap");
@@ -142,6 +218,15 @@ function App() {
   const [calError, setCalError] = useState<string | null>(null);
   const [showConnect, setShowConnect] = useState(false);
   const calConnected = calStatus.microsoft || calStatus.google || calStatus.apple;
+  const connectedCalendarProviders = useMemo(
+    () =>
+      [
+        calStatus.microsoft ? "microsoft" : null,
+        calStatus.google ? "google" : null,
+        calStatus.apple ? "apple" : null,
+      ].filter((p): p is string => Boolean(p)),
+    [calStatus],
+  );
 
   // User name — asked once on first run, persisted in localStorage.
   const [userName, setUserName] = useState<string>(() => localStorage.getItem(NAME_KEY) || "");
@@ -154,16 +239,17 @@ function App() {
 
   // Settings + theme
   const [showSettings, setShowSettings] = useState(false);
-  const [theme, setThemeState] = useState<Theme>(
-    () => (localStorage.getItem("candor-v2.theme") as Theme) || "light",
-  );
+  const [theme, setThemeState] = useState<Theme>(() => loadThemeMode());
   const changeTheme = useCallback((t: Theme) => {
-    localStorage.setItem("candor-v2.theme", t);
+    saveThemeMode(t);
     setThemeState(t);
+    applyTheme(t, loadThemeOverrides());
   }, []);
   useEffect(() => {
-    document.documentElement.setAttribute("data-theme", theme);
+    applyTheme(theme, loadThemeOverrides());
   }, [theme]);
+
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(() => loadProfileImage());
 
   const signOut = useCallback(() => {
     if (!window.confirm("Sign out? This clears your name and disconnects your calendars.")) return;
@@ -204,6 +290,20 @@ function App() {
       setCalError(invokeError(e));
     }
   }, []);
+
+  const createCalendarMeeting = useCallback(
+    async (payload: {
+      provider: string;
+      title: string;
+      start: string;
+      end: string;
+      location?: string | null;
+    }) => {
+      await createCalendarEvent(payload);
+      await refreshCalendar();
+    },
+    [refreshCalendar],
+  );
 
   const disconnectCalendar = useCallback(
     async (provider: "microsoft" | "google" | "apple") => {
@@ -260,6 +360,74 @@ function App() {
       setPaletteMeetings(m.map((x) => ({ id: x.id, title: x.title }))),
     );
   }, [meetingsRefreshKey]);
+
+  const refreshFolderData = useCallback(async () => {
+    const [meetings, tree] = await Promise.all([loadSavedMeetings(), loadFolderTree()]);
+    setFolderMeetings(meetings);
+    setFolderTree(tree);
+  }, []);
+
+  useEffect(() => {
+    if (!userName) return;
+    void refreshFolderData();
+  }, [userName, refreshFolderData, meetingsRefreshKey]);
+
+  const folderNames = useMemo(
+    () => flattenFolderTree(folderTree).map((f) => f.name),
+    [folderTree],
+  );
+  const folderItemCounts = useMemo(() => directItemCounts(folderMeetings), [folderMeetings]);
+
+  const selectFolder = useCallback((folderId: string) => {
+    setSelectedFolderId(folderId);
+    setView("files");
+  }, []);
+
+  const setFolderSelection = useCallback((folderId: string) => {
+    setSelectedFolderId(folderId);
+  }, []);
+
+  const handleFolderCreated = useCallback(
+    (folderId: string | null, parentId?: string | null) => {
+      if (!folderId) return;
+      setEditingFolder({ id: folderId, isNew: true });
+      setSelectedFolderId(folderId);
+      if (parentId) setExpandFolderId(parentId);
+      void refreshFolderData();
+    },
+    [refreshFolderData],
+  );
+
+  const sidebarFolder: SidebarFolderProps = useMemo(
+    () => ({
+      filesTree: folderTree,
+      filesSelectedFolderId: selectedFolderId,
+      onFilesFolderSelect: selectFolder,
+      onSelectedFolderChange: setFolderSelection,
+      folderNames,
+      onFilesFolderChange: refreshFolderData,
+      onFolderCreated: handleFolderCreated,
+      filesMeetings: folderMeetings,
+      filesItemCounts: folderItemCounts,
+      filesEditingFolder: editingFolder,
+      onFilesEditingFolderChange: setEditingFolder,
+      filesExpandFolderId: expandFolderId,
+      onFilesExpandFolderIdConsumed: () => setExpandFolderId(null),
+    }),
+    [
+      folderTree,
+      selectedFolderId,
+      selectFolder,
+      setFolderSelection,
+      folderNames,
+      refreshFolderData,
+      handleFolderCreated,
+      folderMeetings,
+      folderItemCounts,
+      editingFolder,
+      expandFolderId,
+    ],
+  );
 
   const recapCtx = useCallback(
     (partial: {
@@ -546,6 +714,41 @@ function App() {
         return;
       }
 
+      if (segments.length > 0) {
+        setActiveRecap(
+          generateRecapFromRecording(
+            recapCtx({
+              transcript: segments,
+              sessionNotes: notes,
+              durationSeconds: duration,
+              recordedAt: new Date(),
+              titleOverride: recordingEvent?.title,
+            }),
+          ),
+        );
+        setRecapTranscript(segments);
+        setSelectedMeetingId(meetingId ?? `recording-${Date.now()}`);
+        if (meetingId && isTauri()) {
+          setRecapRenameTarget({
+            kind: "saved",
+            meeting: {
+              id: meetingId,
+              title: recordingEvent?.title ?? "Recording",
+              date: new Date().toISOString(),
+              whenLabel: "",
+              blurb: "",
+              durationMinutes: Math.max(1, Math.round(duration / 60)),
+              path: "",
+            },
+          });
+        } else {
+          setRecapRenameTarget(null);
+        }
+        setJumpTimestamp(null);
+        setView("recap");
+        return;
+      }
+
       if (meetingId && isTauri()) {
         const detail = await loadMeetingDetail(meetingId);
         if (detail) {
@@ -716,6 +919,7 @@ function App() {
       const result = await stopRecordingWithNotes(notes.trim() || null, duration, {
         titleOverride: eventTitle,
         calendarEventId: recordingEvent?.id,
+        initialPrompt: dictionaryPrompt(),
       });
       setTranscript(result.segments);
       const txErr =
@@ -723,7 +927,7 @@ function App() {
           ? result.transcriptionError ?? "Transcription failed"
           : null;
       if (result.meetingId) {
-        saveMoments(result.meetingId, liveMoments);
+        void saveMoments(result.meetingId, liveMoments);
         if (result.status === "complete") {
           const recap = generateRecapFromRecording(
             recapCtx({
@@ -750,7 +954,7 @@ function App() {
       patchOnboarding({ firstRecording: true });
       setOnboarding(loadOnboarding());
       setMeetingsRefreshKey((k) => k + 1);
-      await navigateToRecapAfterRecording({
+      void navigateToRecapAfterRecording({
         meetingId: result.meetingId,
         segments: result.segments,
         notes,
@@ -815,6 +1019,7 @@ function App() {
     <UserContext.Provider
       value={{
         ...deriveUser(userName),
+        avatarUrl,
         onEditName: () => setEditingName(true),
         onConnectCalendar: () => setShowConnect(true),
         calendar: calStatus,
@@ -826,73 +1031,104 @@ function App() {
       {view === "landing" && (
         <Landing onNavigate={navigate} onStartRecording={startRecording} />
       )}
-      {view !== "landing" && (
-        <div key={view} className="workspace-view">
-      {view === "home" && (
-        <Home
-          onNavigate={navigate}
-          onStartRecording={startRecording}
-          onOpenMeeting={openMeeting}
-          calendarConnected={calConnected}
-          events={events}
-          onConnectCalendar={() => setShowConnect(true)}
-          onRecordEvent={startRecordingFromEvent}
-          completedIds={completedIds}
-          onCompleteAction={completeAction}
-          userTasks={userTasks}
-          onMeetingContextMenu={openMeetingContextMenu}
-          meetingsRefreshKey={meetingsRefreshKey}
-          onboarding={onboarding}
-        />
-      )}
-      {view === "library" && (
-        <Library
-          onNavigate={navigate}
-          onStartRecording={startRecording}
-          onOpenMeeting={openMeeting}
-          onSearch={openSearch}
-          calendarConnected={calConnected}
-          events={events}
-          onConnectCalendar={() => setShowConnect(true)}
-          onRecordEvent={startRecordingFromEvent}
-          meetingsRefreshKey={meetingsRefreshKey}
-          onMeetingContextMenu={openMeetingContextMenu}
-          onImportAudio={importAudio}
-        />
-      )}
-      {view === "people" && <People onNavigate={navigate} onOpenMeeting={openMeeting} />}
-      {view === "files" && (
-        <Files
-          onNavigate={navigate}
-          onOpenMeeting={openMeeting}
-          refreshKey={meetingsRefreshKey}
-          onMeetingContextMenu={openMeetingContextMenu}
-        />
-      )}
-      {view === "actions" && (
-        <Tasks
-          onNavigate={navigate}
-          completedIds={completedIds}
-          completedActions={completedActions}
-          onCompleteAction={completeAction}
-          onUncompleteAction={uncompleteAction}
-          userTasks={userTasks}
-          onAddTask={addUserTask}
-          onJumpToMeeting={jumpToMeeting}
-          onTaskCompleted={() => {
-            patchOnboarding({ taskCompleted: true });
-            setOnboarding(loadOnboarding());
-          }}
-        />
-      )}
-      {view === "search" && (
-        <Search
-          onNavigate={navigate}
-          query={searchQuery}
-          onQueryChange={setSearchQuery}
-          onJump={jumpToMeeting}
-          meetingsRefreshKey={meetingsRefreshKey}
-        />
+      {WORKSPACE_VIEWS.has(view) && (
+        <div className="screen screen--sidebar workspace-shell">
+          <Sidebar active={sidebarActive(view)} onNavigate={navigate} {...sidebarFolder} />
+          <div className="main main--scroll workspace-content">
+            {view === "home" && (
+              <Home
+                embedded
+                onNavigate={navigate}
+                onStartRecording={startRecording}
+                onOpenMeeting={openMeeting}
+                calendarConnected={calConnected}
+                events={events}
+                connectedProviders={connectedCalendarProviders}
+                onConnectCalendar={() => setShowConnect(true)}
+                onCreateCalendarEvent={createCalendarMeeting}
+                onRecordEvent={startRecordingFromEvent}
+                completedIds={completedIds}
+                onCompleteAction={completeAction}
+                userTasks={userTasks}
+                onMeetingContextMenu={openMeetingContextMenu}
+                meetingsRefreshKey={meetingsRefreshKey}
+                onboarding={onboarding}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+            {view === "library" && (
+              <Library
+                embedded
+                onNavigate={navigate}
+                onStartRecording={startRecording}
+                onOpenMeeting={openMeeting}
+                onSearch={openSearch}
+                calendarConnected={calConnected}
+                events={events}
+                onConnectCalendar={() => setShowConnect(true)}
+                onRecordEvent={startRecordingFromEvent}
+                meetingsRefreshKey={meetingsRefreshKey}
+                onMeetingContextMenu={openMeetingContextMenu}
+                onImportAudio={importAudio}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+            {view === "people" && (
+              <People
+                embedded
+                onNavigate={navigate}
+                onOpenMeeting={openMeeting}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+            {view === "files" && (
+              <Files
+                embedded
+                onNavigate={navigate}
+                onOpenMeeting={openMeeting}
+                refreshKey={meetingsRefreshKey}
+                onMeetingContextMenu={openMeetingContextMenu}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+            {view === "actions" && (
+              <Tasks
+                embedded
+                onNavigate={navigate}
+                completedIds={completedIds}
+                completedActions={completedActions}
+                onCompleteAction={completeAction}
+                onUncompleteAction={uncompleteAction}
+                userTasks={userTasks}
+                onAddTask={addUserTask}
+                onJumpToMeeting={jumpToMeeting}
+                onTaskCompleted={() => {
+                  patchOnboarding({ taskCompleted: true });
+                  setOnboarding(loadOnboarding());
+                }}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+            {view === "search" && (
+              <Search
+                embedded
+                onNavigate={navigate}
+                query={searchQuery}
+                onQueryChange={setSearchQuery}
+                onJump={jumpToMeeting}
+                meetingsRefreshKey={meetingsRefreshKey}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+            {view === "dictionary" && (
+              <Dictionary
+                embedded
+                onNavigate={navigate}
+                sidebarFolder={sidebarFolder}
+              />
+            )}
+          </div>
+        </div>
       )}
       {view === "live" && (
         <Live
@@ -926,8 +1162,6 @@ function App() {
           processingMessage={recapProcessingMessage}
           transcriptionError={transcriptionError}
         />
-      )}
-        </div>
       )}
 
       {rec !== "idle" && (
@@ -1076,6 +1310,13 @@ function App() {
           theme={theme}
           onThemeChange={changeTheme}
           onClose={() => setShowSettings(false)}
+          userInitials={deriveUser(userName).initials}
+          avatarUrl={avatarUrl}
+          onAvatarChange={setAvatarUrl}
+          onStorageChange={() => {
+            setMeetingsRefreshKey((k) => k + 1);
+            void refreshFolderData();
+          }}
         />
       )}
 

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import type { View } from "../App";
+import type { SidebarFolderProps, View } from "../App";
 import { Avatar } from "../components/Avatar";
 import { Sidebar } from "../components/Sidebar";
 import type { CompletedAction, UserTask } from "../api/actions";
@@ -28,6 +28,8 @@ interface TasksProps {
   userTasks: UserTask[];
   onAddTask: (params: { text: string; owner: string; dueDate?: string; meeting?: string }) => void;
   onTaskCompleted?: () => void;
+  sidebarFolder: SidebarFolderProps;
+  embedded?: boolean;
 }
 
 function ownerAvatar(owner: string) {
@@ -65,6 +67,8 @@ export function Tasks({
   userTasks,
   onAddTask,
   onTaskCompleted,
+  sidebarFolder,
+  embedded,
 }: TasksProps) {
   const { initials } = useUser();
   const [filter, setFilter] = useState<Filter>("Open");
@@ -164,10 +168,7 @@ export function Tasks({
     [openItems],
   );
 
-  return (
-    <div className="screen screen--sidebar">
-      <Sidebar active="Tasks" onNavigate={onNavigate} />
-
+  const main = (
       <div className="main main--scroll">
         <div className="library-head tasks-head">
           <div>
@@ -381,6 +382,13 @@ export function Tasks({
           )}
         </div>
       </div>
+  );
+
+  if (embedded) return main;
+  return (
+    <div className="screen screen--sidebar">
+      <Sidebar active="Tasks" onNavigate={onNavigate} {...sidebarFolder} />
+      {main}
     </div>
   );
 }
