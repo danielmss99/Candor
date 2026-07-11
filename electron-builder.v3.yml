@@ -1,0 +1,41 @@
+appId: com.candor.v3
+productName: Candor v3 M0
+directories:
+  output: release-v3
+  buildResources: build
+files:
+  - dist-v3/electron/**/*
+  - dist-v3/renderer/**/*
+  - package.json
+extraResources:
+  - from: crates/candor-core/target/release
+    to: bin
+    filter:
+      - candor-core
+      - candor-core.exe
+asar: true
+npmRebuild: false
+publish: null
+win:
+  icon: build/icon.ico
+  target:
+    - nsis
+mac:
+  icon: build/icon.icns
+  target:
+    - dmg
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  minimumSystemVersion: "13.0"
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+  binaries:
+    - Contents/Resources/bin/candor-core
+  extendInfo:
+    NSMicrophoneUsageDescription: Candor records your microphone only when you start a local recording.
+    NSScreenCaptureUsageDescription: Candor uses Screen & System Audio Recording permission to capture meeting audio only when you start a local recording. Audio stays on this Mac.
+linux:
+  icon: build/icons
+  target:
+    - AppImage
+    - deb
