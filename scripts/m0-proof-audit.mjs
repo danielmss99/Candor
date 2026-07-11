@@ -191,19 +191,26 @@ function validateMacosManagedPf(payload, failures) {
   const managed = payload?.managedPf;
   requireField(managed?.requested === true, "managedPf.requested must be true", failures);
   requireField(
-    payload?.denyMechanism === "managed-pf user-scoped deny plus PKTAP process attribution",
-    "denyMechanism must be managed-pf user-scoped deny plus PKTAP process attribution",
+    payload?.denyMechanism ===
+      "managed-pf user-scoped deny with PFLOG blocked-attempt and PKTAP escape attribution",
+    "denyMechanism must combine managed PF, PFLOG blocked-attempt attribution, and PKTAP escape attribution",
     failures,
   );
   requireField(typeof managed?.anchor === "string" && managed.anchor.length > 0, "managedPf.anchor must be recorded", failures);
   requireField(
-    typeof managed?.rules === "string" && managed.rules.includes("block drop out quick"),
+    typeof managed?.rules === "string" &&
+      managed.rules.includes("block drop out log (user) quick"),
     "managedPf.rules must include the outbound block rule",
     failures,
   );
   requireField(
     typeof managed?.rules === "string" && managed.rules.includes(" user "),
     "managedPf.rules must scope the deny rule to the invoking desktop user",
+    failures,
+  );
+  requireField(
+    typeof managed?.rules === "string" && managed.rules.includes("log (user)"),
+    "managedPf.rules must log blocked socket UID and PID evidence",
     failures,
   );
   requireField(managed?.anchorLoaded === true, "managed PF anchor must be loaded", failures);
@@ -1426,7 +1433,7 @@ function runSelfTest() {
   const validManagedMacosProof = {
     ok: true,
     proofKind: "m0-network-deny-macos",
-    denyMechanism: "managed-pf user-scoped deny plus PKTAP process attribution",
+    denyMechanism: "managed-pf user-scoped deny with PFLOG blocked-attempt and PKTAP escape attribution",
     applicationUidNonRoot: true,
     applicationRunsAsRoot: false,
     interface: "pktap,all",
@@ -1434,10 +1441,15 @@ function runSelfTest() {
     denyLayerProbe: { ...minimalValidDenyLayerProbe(), pid: 1234 },
     packetAttribution: {
       captureInterface: "pktap,all",
+      blockedCaptureInterface: "pflog0",
       complete: true,
       packetOverflowCount: 0,
+      blockedPacketOverflowCount: 0,
       tcpdumpExitedBeforeCleanup: false,
+      pflogExitedBeforeCleanup: false,
       applicationPacketCount: 0,
+      applicationEscapedPacketCount: 0,
+      applicationBlockedPacketCount: 0,
       denyProbeCaptured: true,
       denyProbePacketCount: 1,
       observedProcesses: [{ pid: 2000, ppid: 1999, command: "Candor v3 M0" }],
@@ -1445,7 +1457,7 @@ function runSelfTest() {
     managedPf: {
       requested: true,
       anchor: "com.apple/candor-v3-m0-network-deny-123",
-      rules: "block drop out quick proto { tcp udp } all user 501",
+      rules: "block drop out log (user) quick proto { tcp udp } all user 501",
       anchorLoaded: true,
       anchorFlushed: true,
       enableTokenReleased: true,
@@ -1454,7 +1466,10 @@ function runSelfTest() {
     smokeProof: validSmoke,
   };
   const validManagedMacosFailures = validateNetworkProof("macos", validManagedMacosProof);
-  assertSelfTest(validManagedMacosFailures.length === 0, "valid managed macOS network proof should pass");
+  assertSelfTest(
+    validManagedMacosFailures.length === 0,
+    `valid managed macOS network proof should pass. Actual failures: ${validManagedMacosFailures.join("; ")}`,
+  );
 
   const staleManagedMacosProof = cloneJson(validManagedMacosProof);
   staleManagedMacosProof.managedPf.anchorFlushed = false;
@@ -1585,15 +1600,35 @@ function validateNetworkProof(osName, payload) {
       "packetAttribution.captureInterface must be pktap,all",
       failures,
     );
+    if (payload?.managedPf?.requested === true) {
+      requireField(
+        attribution?.blockedCaptureInterface === "pflog0",
+        "packetAttribution.blockedCaptureInterface must be pflog0",
+        failures,
+      );
+    }
     requireField(attribution?.complete === true, "PKTAP process attribution must be complete", failures);
     requireField(attribution?.packetOverflowCount === 0, "PKTAP packet capture must not overflow", failures);
+    if (payload?.managedPf?.requested === true) {
+      requireField(attribution?.blockedPacketOverflowCount === 0, "PFLOG packet capture must not overflow", failures);
+    }
     requireField(
       attribution?.tcpdumpExitedBeforeCleanup === false,
       "PKTAP capture must remain active through the packaged smoke",
       failures,
     );
+    if (payload?.managedPf?.requested === true) {
+      requireField(
+        attribution?.pflogExitedBeforeCleanup === false,
+        "PFLOG capture must remain active through the packaged smoke",
+        failures,
+      );
+    }
     requireField(
-      attribution?.applicationPacketCount === 0 && payload?.packetCount === 0,
+      attribution?.applicationPacketCount === 0 &&
+        attribution?.applicationEscapedPacketCount === 0 &&
+        (!payload?.managedPf?.requested || attribution?.applicationBlockedPacketCount === 0) &&
+        payload?.packetCount === 0,
       "Candor-attributed outbound packet count must be zero",
       failures,
     );
@@ -1610,7 +1645,7 @@ function validateNetworkProof(osName, payload) {
       );
       requireField(
         attribution?.denyProbeCaptured === true && attribution?.denyProbePacketCount > 0,
-        "PKTAP must capture the blocked sentinel with process attribution",
+        "PFLOG must capture the blocked sentinel with process attribution",
         failures,
       );
     }

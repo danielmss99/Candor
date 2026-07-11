@@ -85,12 +85,27 @@ function parseDenyProbeOutput(text) {
 
 function parsePktapPacket(line) {
   const metadata = line.match(/\((.*)\)\s+(?:IP|IP6)\b/)?.[1] ?? "";
-  const processMatch = metadata.match(/(?:^|,\s*)proc\s+(.+):(\d+)(?:,|$)/);
+  const processMatch = metadata.match(/(?:^|,\s*)proc\s+([^,]+):(\d+)(?:,|$)/);
+  const effectiveProcessMatch = metadata.match(/(?:^|,\s*)eproc\s+([^,]+):(\d+)(?:,|$)/);
   return {
     line,
     processName: processMatch?.[1]?.trim() ?? null,
     pid: processMatch ? Number.parseInt(processMatch[2], 10) : null,
+    effectiveProcessName: effectiveProcessMatch?.[1]?.trim() ?? null,
+    effectivePid: effectiveProcessMatch
+      ? Number.parseInt(effectiveProcessMatch[2], 10)
+      : null,
     direction: /(?:^|,\s*)out(?:,|$)/.test(metadata) ? "out" : null,
+  };
+}
+
+function parsePflogPacket(line) {
+  const identity = line.match(/\[\s*uid\s+(\d+),\s*pid\s+(\d+)\s*\]/);
+  return {
+    line,
+    uid: identity ? Number.parseInt(identity[1], 10) : null,
+    pid: identity ? Number.parseInt(identity[2], 10) : null,
+    direction: /\bblock\s+out\b/.test(line) ? "out" : null,
   };
 }
 
@@ -136,6 +151,23 @@ function runPacketParserSelfTest() {
     parsed.direction !== "out"
   ) {
     throw new Error("macOS PKTAP packet parser self-test failed");
+  }
+  const delegated = parsePktapPacket(
+    "00:00:00.000000 (proc mDNSResponder:184, eproc Candor v3 M0:77620, out) IP 10.0.0.1.1 > 1.1.1.1.53",
+  );
+  if (
+    delegated.processName !== "mDNSResponder" ||
+    delegated.pid !== 184 ||
+    delegated.effectiveProcessName !== "Candor v3 M0" ||
+    delegated.effectivePid !== 77620
+  ) {
+    throw new Error("macOS PKTAP effective-process parser self-test failed");
+  }
+  const blocked = parsePflogPacket(
+    "00:00:00.000000 rule 0/(match) [uid 501, pid 83664] block out on en0: 10.0.0.1.1 > 1.1.1.1.443",
+  );
+  if (blocked.uid !== 501 || blocked.pid !== 83664 || blocked.direction !== "out") {
+    throw new Error("macOS PFLOG packet parser self-test failed");
   }
 }
 
@@ -231,7 +263,7 @@ const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-darwin-${proces
 const networkProofPath = join(proofDir, `m0-network-deny-macos-${timestamp}.json`);
 const captureInterface = "pktap,all";
 const pfAnchor = `com.apple/candor-v3-m0-network-deny-${process.pid}`;
-const pfRules = `block drop out quick proto { tcp udp } all user ${invokingUid}\n`;
+const pfRules = `block drop out log (user) quick proto { tcp udp } all user ${invokingUid}\n`;
 const pfState = {
   requested: managedPf,
   anchor: managedPf ? pfAnchor : null,
@@ -336,6 +368,40 @@ tcpdump.on("error", (error) => {
   tcpdumpSpawnError = error;
 });
 
+const pflogDump = managedPf
+  ? spawn("tcpdump", ["-n", "-l", "-e", "-ttt", "-i", "pflog0"], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+  : null;
+const blockedPackets = [];
+let blockedPacketOverflowCount = 0;
+let pflogBuffer = "";
+let pflogError = "";
+let pflogSpawnError = null;
+let pflogExitedBeforeCleanup = false;
+if (pflogDump) {
+  pflogDump.stdout.on("data", (chunk) => {
+    pflogBuffer += chunk.toString("utf8");
+    let newlineIndex = pflogBuffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = pflogBuffer.slice(0, newlineIndex).trim();
+      pflogBuffer = pflogBuffer.slice(newlineIndex + 1);
+      if (line) {
+        if (blockedPackets.length < maxCapturedPackets) blockedPackets.push(line);
+        else blockedPacketOverflowCount += 1;
+      }
+      newlineIndex = pflogBuffer.indexOf("\n");
+    }
+  });
+  pflogDump.stderr.on("data", (chunk) => {
+    pflogError += chunk.toString("utf8");
+  });
+  pflogDump.on("error", (error) => {
+    pflogSpawnError = error;
+  });
+}
+
 let stdout = "";
 let stderr = "";
 let smokeExit = { code: null, signal: null };
@@ -380,7 +446,11 @@ try {
     };
   }
 
-  if ((!managedPf || denyLayerProbe.blocked === true) && !tcpdumpSpawnError) {
+  if (
+    (!managedPf || denyLayerProbe.blocked === true) &&
+    !tcpdumpSpawnError &&
+    (!managedPf || !pflogSpawnError)
+  ) {
     const forwardedEnvironment = {
       CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
       GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
@@ -434,10 +504,20 @@ try {
     if (!tcpdumpExitedBeforeCleanup) tcpdump.kill("SIGINT");
     await waitForExit(tcpdump).catch(() => null);
   }
+  if (pflogDump && !pflogSpawnError) {
+    pflogExitedBeforeCleanup = pflogDump.exitCode !== null || pflogDump.signalCode !== null;
+    if (!pflogExitedBeforeCleanup) pflogDump.kill("SIGINT");
+    await waitForExit(pflogDump).catch(() => null);
+  }
   const trailingPacket = packetBuffer.trim();
   if (trailingPacket) {
     if (packets.length < maxCapturedPackets) packets.push(trailingPacket);
     else packetOverflowCount += 1;
+  }
+  const trailingBlockedPacket = pflogBuffer.trim();
+  if (trailingBlockedPacket) {
+    if (blockedPackets.length < maxCapturedPackets) blockedPackets.push(trailingBlockedPacket);
+    else blockedPacketOverflowCount += 1;
   }
   cleanupManagedPfDeny();
 }
@@ -446,32 +526,66 @@ const smokeProof = existsSync(smokeProofPath)
   ? JSON.parse(readFileSync(smokeProofPath, "utf8"))
   : null;
 const parsedPackets = packets.map(parsePktapPacket);
+const parsedBlockedPackets = blockedPackets.map(parsePflogPacket);
 const observedProcessIds = new Set(observedProcesses.keys());
-const applicationPackets = parsedPackets.filter(
-  (packet) => observedProcessIds.has(packet.pid) || isCandorProcessName(packet.processName),
+const escapedApplicationPackets = parsedPackets.filter(
+  (packet) =>
+    observedProcessIds.has(packet.pid) ||
+    observedProcessIds.has(packet.effectivePid) ||
+    isCandorProcessName(packet.processName) ||
+    isCandorProcessName(packet.effectiveProcessName),
 );
-const denyProbePackets = parsedPackets.filter(
+const blockedApplicationPackets = parsedBlockedPackets.filter(
+  (packet) => packet.uid === invokingUid && observedProcessIds.has(packet.pid),
+);
+const denyProbePackets = parsedBlockedPackets.filter(
   (packet) => Number.isInteger(denyLayerProbe.pid) && packet.pid === denyLayerProbe.pid,
 );
 const packetsWithoutProcessMetadata = parsedPackets.filter(
   (packet) =>
     packet.direction !== "out" ||
-    !Number.isInteger(packet.pid) ||
-    typeof packet.processName !== "string" ||
-    packet.processName.length === 0,
+    ((!Number.isInteger(packet.pid) ||
+      typeof packet.processName !== "string" ||
+      packet.processName.length === 0) &&
+      (!Number.isInteger(packet.effectivePid) ||
+        typeof packet.effectiveProcessName !== "string" ||
+        packet.effectiveProcessName.length === 0)),
 );
+const blockedPacketsWithoutProcessMetadata = parsedBlockedPackets.filter(
+  (packet) =>
+    packet.direction !== "out" ||
+    !Number.isInteger(packet.uid) ||
+    !Number.isInteger(packet.pid),
+);
+const applicationPacketCount =
+  escapedApplicationPackets.length + blockedApplicationPackets.length;
 const packetAttribution = {
   captureInterface,
+  blockedCaptureInterface: managedPf ? "pflog0" : null,
   metadataSource: "macOS PKTAP process name, PID, and direction",
+  blockedMetadataSource: managedPf ? "PF log(user) UID and PID" : null,
   observedPacketCount: parsedPackets.length,
+  blockedAttemptPacketCount: parsedBlockedPackets.length,
   packetOverflowCount,
-  applicationPacketCount: applicationPackets.length,
-  applicationPacketSamples: applicationPackets.slice(0, 50),
-  hostBackgroundPacketCount: parsedPackets.length - applicationPackets.length - denyProbePackets.length,
+  blockedPacketOverflowCount,
+  applicationPacketCount,
+  applicationEscapedPacketCount: escapedApplicationPackets.length,
+  applicationBlockedPacketCount: blockedApplicationPackets.length,
+  applicationPacketSamples: [
+    ...escapedApplicationPackets.map((packet) => ({ capture: "pktap", ...packet })),
+    ...blockedApplicationPackets.map((packet) => ({ capture: "pflog0", ...packet })),
+  ].slice(0, 50),
+  hostBackgroundPacketCount: parsedPackets.length - escapedApplicationPackets.length,
   hostBackgroundPacketSamples: parsedPackets
-    .filter((packet) => !applicationPackets.includes(packet) && !denyProbePackets.includes(packet))
+    .filter((packet) => !escapedApplicationPackets.includes(packet))
+    .slice(0, 25),
+  blockedHostBackgroundPacketCount:
+    parsedBlockedPackets.length - blockedApplicationPackets.length - denyProbePackets.length,
+  blockedHostBackgroundPacketSamples: parsedBlockedPackets
+    .filter((packet) => !blockedApplicationPackets.includes(packet) && !denyProbePackets.includes(packet))
     .slice(0, 25),
   packetsWithoutProcessMetadata: packetsWithoutProcessMetadata.slice(0, 25),
+  blockedPacketsWithoutProcessMetadata: blockedPacketsWithoutProcessMetadata.slice(0, 25),
   observedProcesses: [...observedProcesses.values()].sort((left, right) => left.pid - right.pid),
   denyProbePacketCount: denyProbePackets.length,
   denyProbeCaptured: !managedPf || denyProbePackets.length > 0,
@@ -479,8 +593,14 @@ const packetAttribution = {
     !tcpdumpSpawnError &&
     !tcpdumpExitedBeforeCleanup &&
     packetOverflowCount === 0 &&
-    packetsWithoutProcessMetadata.length === 0,
+    packetsWithoutProcessMetadata.length === 0 &&
+    (!managedPf ||
+      (!pflogSpawnError &&
+        !pflogExitedBeforeCleanup &&
+        blockedPacketOverflowCount === 0 &&
+        blockedPacketsWithoutProcessMetadata.length === 0)),
   tcpdumpExitedBeforeCleanup,
+  pflogExitedBeforeCleanup,
 };
 
 const proof = {
@@ -490,7 +610,7 @@ const proof = {
     (!managedPf || denyLayerProbe.blocked === true) &&
     packetAttribution.denyProbeCaptured &&
     packetAttribution.complete &&
-    applicationPackets.length === 0 &&
+    applicationPacketCount === 0 &&
     (!managedPf ||
       (pfState.anchorLoaded &&
         pfState.anchorFlushed &&
@@ -499,7 +619,7 @@ const proof = {
   proofKind: "m0-network-deny-macos",
   generatedAt: new Date().toISOString(),
   denyMechanism: managedPf
-    ? "managed-pf user-scoped deny plus PKTAP process attribution"
+    ? "managed-pf user-scoped deny with PFLOG blocked-attempt and PKTAP escape attribution"
     : "operator-confirmed external deny layer plus PKTAP process attribution",
   applicationUidNonRoot: invokingUid > 0,
   applicationRunsAsRoot: false,
@@ -509,13 +629,15 @@ const proof = {
   interface: captureInterface,
   smokeProofPath,
   denyLayerProbe,
-  packetCount: applicationPackets.length,
-  packetSamples: applicationPackets.map((packet) => packet.line),
+  packetCount: applicationPacketCount,
+  packetSamples: packetAttribution.applicationPacketSamples.map((packet) => packet.line),
   packetAttribution,
   stdout: stdout.trim(),
   stderr: stderr.trim(),
   tcpdumpStderr: tcpdumpError.trim(),
   tcpdumpSpawnError: tcpdumpSpawnError?.message ?? null,
+  pflogStderr: pflogError.trim(),
+  pflogSpawnError: pflogSpawnError?.message ?? null,
   smokeProof,
 };
 writeJson(networkProofPath, proof);
@@ -524,7 +646,7 @@ if (managedPf && denyLayerProbe.blocked !== true) {
   throw new Error(`macOS deny-layer sentinel connected or did not prove blocked. Proof written to ${networkProofPath}`);
 }
 if (!packetAttribution.denyProbeCaptured) {
-  throw new Error(`macOS PKTAP did not capture the blocked sentinel with its process PID. Proof written to ${networkProofPath}`);
+  throw new Error(`macOS PFLOG did not capture the blocked sentinel with its process PID. Proof written to ${networkProofPath}`);
 }
 if (!packetAttribution.complete) {
   throw new Error(`macOS PKTAP process attribution was incomplete. Proof written to ${networkProofPath}`);
@@ -532,8 +654,8 @@ if (!packetAttribution.complete) {
 if (smokeExit.code !== 0) {
   throw new Error(`macOS packaged smoke failed under confirmed deny layer. Proof written to ${networkProofPath}`);
 }
-if (applicationPackets.length > 0) {
-  throw new Error(`macOS PKTAP observed Candor-attributed outbound packets. Proof written to ${networkProofPath}`);
+if (applicationPacketCount > 0) {
+  throw new Error(`macOS PFLOG or PKTAP observed Candor-attributed outbound packets. Proof written to ${networkProofPath}`);
 }
 if (!smokeProof?.ok) {
   throw new Error(`macOS smoke proof missing or failed: ${smokeProofPath}`);

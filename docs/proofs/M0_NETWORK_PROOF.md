@@ -61,14 +61,15 @@ background calls are disabled for M0.
   fresh network namespace and records `denyLayerProbe.blocked: true`.
 - macOS proof runner exists at `scripts/m0-network-deny-macos.mjs`. In managed
   mode it enables a per-run PF anchor under `com.apple/`, loads a temporary
-  user-scoped outbound TCP/UDP block rule, and captures `pktap,all` process
-  metadata with `tcpdump`. The proof gates only packets attributed to the
-  Candor process tree, while retaining hosted-runner background packets as
-  diagnostics. It writes
+  user-scoped outbound TCP/UDP block rule with `log (user)`. A `pflog0`
+  capture records blocked socket UID/PID evidence, while a simultaneous
+  `pktap,all` capture records any packets that escape PF with process metadata.
+  The proof gates only packets attributed to the Candor process tree, while
+  retaining hosted-runner background packets as diagnostics. It writes
   `release-v3/proofs/m0-network-deny-macos-<timestamp>.json`, then flushes the
   anchor and releases the PF enable token in `finally`. Managed-PF mode also
   runs a small outbound TCP sentinel, records `denyLayerProbe.blocked: true`,
-  and requires PKTAP to capture that sentinel with its PID before accepting the
+  and requires PFLOG to capture that sentinel with its PID before accepting the
   proof. Manual external deny mode still exists for Little Snitch, PF, or an
   equivalent deny layer and remains operator-attested plus PKTAP process
   attribution.
@@ -200,9 +201,10 @@ presence for `bash`, `tcpdump`, `pfctl`, `ps`, and `node`, plus separate
 Managed-PF proof artifacts must include `denyLayerProbe.blocked: true`,
 `managedPf.anchorLoaded: true`, `managedPf.anchorFlushed: true`, and
 `managedPf.enableTokenReleased: true`. They must also show a captured sentinel,
-complete PKTAP process attribution, the observed Candor process tree, and zero
-Candor-attributed outbound TCP/UDP packets. External-deny fallback artifacts
-are accepted only with explicit `externalDenyConfirmed: true`, complete PKTAP
+complete PFLOG and PKTAP process attribution, the observed Candor process tree,
+and zero blocked or escaped Candor-attributed outbound TCP/UDP packets.
+External-deny fallback artifacts are accepted only with explicit
+`externalDenyConfirmed: true`, complete PKTAP
 attribution, and the same zero-Candor-packet result.
 
 ## Exit Audit
@@ -299,7 +301,7 @@ Windows: staged=PASS smoke=PASS artifact=PASS network=FAIL manifest=PASS
 | OS | Build ID | Tool | Tested Actions | Outbound Attempts | Result |
 | --- | --- | --- | --- | --- | --- |
 | Windows | Pending | `scripts/m0-network-deny-windows.ps1` plus Windows Firewall/WFP capture | Launch, status, quit, enabled app/core outbound block rules, zero observed TCP connections, zero observed UDP endpoints | Pending | Pending |
-| macOS | Pending | `scripts/m0-network-deny-macos.mjs --managed-pf` plus PF/PKTAP | Launch, status, quit, user-scoped TCP/UDP deny, captured PID-tagged sentinel, zero Candor-attributed packets, anchor cleanup | Pending | Pending |
+| macOS | Pending | `scripts/m0-network-deny-macos.mjs --managed-pf` plus PF/PFLOG/PKTAP | Launch, status, quit, user-scoped TCP/UDP deny, captured PID-tagged sentinel, zero blocked or escaped Candor-attributed packets, anchor cleanup | Pending | Pending |
 | Linux | Pending | `scripts/m0-network-deny-linux.mjs` with `unshare --net` | Launch, status, quit | Pending | Pending |
 
 ## Exit Standard
