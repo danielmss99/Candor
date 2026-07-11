@@ -148,8 +148,9 @@ non-root desktop user. The Linux job installs the native build and runtime
 packages needed for the Rust audio stack, SQLCipher key storage checks,
 Electron smoke, `xvfb-run`, and `unshare`.
 
-The macOS build runner is pinned to `macos-26-arm64` and asserts an SDK major
-version of at least 26. The current `apple-metal` dependency contains SDK 26
+The macOS build runner is pinned to GitHub's `macos-26` workflow label, which
+selects the `macOS-26-arm64` hosted image, and asserts an SDK major version of
+at least 26. The current `apple-metal` dependency contains SDK 26
 symbol references that an older SDK cannot parse, even though those calls are
 runtime guarded. This build-host requirement is distinct from the app runtime
 contract: the build exports `MACOSX_DEPLOYMENT_TARGET=13.0`, the packaged app

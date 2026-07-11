@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-26-arm64, ubuntu-latest]
+        os: [windows-latest, macos-26, ubuntu-latest]
 
     steps:
       - name: Checkout

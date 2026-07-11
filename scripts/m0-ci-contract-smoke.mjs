@@ -70,7 +70,7 @@ function requireOrder(before, after, label) {
 }
 
 const requiredPatterns = [
-  ["os: [windows-latest, macos-26-arm64, ubuntu-latest]", "three-OS matrix with pinned macOS SDK"],
+  ["os: [windows-latest, macos-26, ubuntu-latest]", "three-OS matrix with pinned macOS SDK"],
   ["fail-fast: false", "non-short-circuiting matrix"],
   ["node-version: 22", "Electron-compatible Node.js version"],
   ["sudo apt-get install -y", "Linux native dependency install"],
@@ -248,6 +248,7 @@ requireFileOrder(
 for (const [pattern, label] of [
   ["node-version: 20", "Electron-incompatible Node.js version"],
   ["macos-latest", "drifting macOS runner label"],
+  ["macos-26-arm64", "macOS image name used as a workflow runner label"],
   ["--no-sandbox", "Chromium sandbox bypass flag"],
   ["ELECTRON_DISABLE_SANDBOX", "Chromium sandbox bypass environment variable"],
   ["enforce_strict_m0", "optional strict input"],
