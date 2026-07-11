@@ -191,14 +191,19 @@ function validateMacosManagedPf(payload, failures) {
   const managed = payload?.managedPf;
   requireField(managed?.requested === true, "managedPf.requested must be true", failures);
   requireField(
-    payload?.denyMechanism === "managed-pf-anchor plus tcpdump capture",
-    "denyMechanism must be managed-pf-anchor plus tcpdump capture",
+    payload?.denyMechanism === "managed-pf user-scoped deny plus PKTAP process attribution",
+    "denyMechanism must be managed-pf user-scoped deny plus PKTAP process attribution",
     failures,
   );
   requireField(typeof managed?.anchor === "string" && managed.anchor.length > 0, "managedPf.anchor must be recorded", failures);
   requireField(
     typeof managed?.rules === "string" && managed.rules.includes("block drop out quick"),
     "managedPf.rules must include the outbound block rule",
+    failures,
+  );
+  requireField(
+    typeof managed?.rules === "string" && managed.rules.includes(" user "),
+    "managedPf.rules must scope the deny rule to the invoking desktop user",
     failures,
   );
   requireField(managed?.anchorLoaded === true, "managed PF anchor must be loaded", failures);
@@ -1036,6 +1041,7 @@ function minimalValidReleaseArtifactSmokeProof() {
         },
       ],
     },
+    releaseGaps: ["production signing is verified by the separate release-signing gate"],
     failures: [],
   };
 }
@@ -1417,49 +1423,76 @@ function runSelfTest() {
     "Windows network proof must report prerequisite failures without cascading rule checks",
   );
 
-  const validManagedMacosFailures = validateNetworkProof("macos", {
+  const validManagedMacosProof = {
     ok: true,
     proofKind: "m0-network-deny-macos",
-    denyMechanism: "managed-pf-anchor plus tcpdump capture",
+    denyMechanism: "managed-pf user-scoped deny plus PKTAP process attribution",
     applicationUidNonRoot: true,
     applicationRunsAsRoot: false,
+    interface: "pktap,all",
     packetCount: 0,
-    denyLayerProbe: minimalValidDenyLayerProbe(),
+    denyLayerProbe: { ...minimalValidDenyLayerProbe(), pid: 1234 },
+    packetAttribution: {
+      captureInterface: "pktap,all",
+      complete: true,
+      packetOverflowCount: 0,
+      tcpdumpExitedBeforeCleanup: false,
+      applicationPacketCount: 0,
+      denyProbeCaptured: true,
+      denyProbePacketCount: 1,
+      observedProcesses: [{ pid: 2000, ppid: 1999, command: "Candor v3 M0" }],
+    },
     managedPf: {
       requested: true,
       anchor: "com.apple/candor-v3-m0-network-deny-123",
-      rules: "block drop out quick proto { tcp udp } from any to any",
+      rules: "block drop out quick proto { tcp udp } all user 501",
       anchorLoaded: true,
       anchorFlushed: true,
       enableTokenReleased: true,
       cleanupError: null,
     },
     smokeProof: validSmoke,
-  });
+  };
+  const validManagedMacosFailures = validateNetworkProof("macos", validManagedMacosProof);
   assertSelfTest(validManagedMacosFailures.length === 0, "valid managed macOS network proof should pass");
 
-  const staleManagedMacosFailures = validateNetworkProof("macos", {
-    ok: true,
-    proofKind: "m0-network-deny-macos",
-    denyMechanism: "managed-pf-anchor plus tcpdump capture",
-    applicationUidNonRoot: true,
-    applicationRunsAsRoot: false,
-    packetCount: 0,
-    denyLayerProbe: minimalValidDenyLayerProbe(),
-    managedPf: {
-      requested: true,
-      anchor: "com.apple/candor-v3-m0-network-deny-123",
-      rules: "block drop out quick proto { tcp udp } from any to any",
-      anchorLoaded: true,
-      anchorFlushed: false,
-      enableTokenReleased: true,
-      cleanupError: null,
-    },
-    smokeProof: validSmoke,
-  });
+  const staleManagedMacosProof = cloneJson(validManagedMacosProof);
+  staleManagedMacosProof.managedPf.anchorFlushed = false;
+  const staleManagedMacosFailures = validateNetworkProof("macos", staleManagedMacosProof);
   assertSelfTest(
     staleManagedMacosFailures.some((failure) => failure.includes("managed PF anchor must be flushed")),
     "managed macOS network proof must fail without PF cleanup evidence",
+  );
+
+  const leakingManagedMacosProof = cloneJson(validManagedMacosProof);
+  leakingManagedMacosProof.packetCount = 1;
+  leakingManagedMacosProof.packetAttribution.applicationPacketCount = 1;
+  const leakingManagedMacosFailures = validateNetworkProof("macos", leakingManagedMacosProof);
+  assertSelfTest(
+    leakingManagedMacosFailures.some((failure) =>
+      failure.includes("Candor-attributed outbound packet count must be zero"),
+    ),
+    "managed macOS network proof must fail for a Candor-attributed outbound packet",
+  );
+
+  const overflowManagedMacosProof = cloneJson(validManagedMacosProof);
+  overflowManagedMacosProof.packetAttribution.complete = false;
+  overflowManagedMacosProof.packetAttribution.packetOverflowCount = 1;
+  const overflowManagedMacosFailures = validateNetworkProof("macos", overflowManagedMacosProof);
+  assertSelfTest(
+    overflowManagedMacosFailures.some((failure) => failure.includes("PKTAP packet capture must not overflow")),
+    "managed macOS network proof must fail when PKTAP evidence overflows",
+  );
+
+  const truncatedManagedMacosProof = cloneJson(validManagedMacosProof);
+  truncatedManagedMacosProof.packetAttribution.complete = false;
+  truncatedManagedMacosProof.packetAttribution.tcpdumpExitedBeforeCleanup = true;
+  const truncatedManagedMacosFailures = validateNetworkProof("macos", truncatedManagedMacosProof);
+  assertSelfTest(
+    truncatedManagedMacosFailures.some((failure) =>
+      failure.includes("PKTAP capture must remain active through the packaged smoke"),
+    ),
+    "managed macOS network proof must fail when PKTAP exits before the smoke ends",
   );
 
   const staleNetworkPayload = cloneJson(validSmoke);
@@ -1540,12 +1573,47 @@ function validateNetworkProof(osName, payload) {
     } else {
       requireField(payload?.externalDenyConfirmed === true, "external deny layer must be confirmed", failures);
       requireField(
-        payload?.denyMechanism === "operator-confirmed external deny layer plus tcpdump capture",
-        "denyMechanism must be operator-confirmed external deny layer plus tcpdump capture",
+        payload?.denyMechanism === "operator-confirmed external deny layer plus PKTAP process attribution",
+        "denyMechanism must be operator-confirmed external deny layer plus PKTAP process attribution",
         failures,
       );
     }
-    requireField(payload?.packetCount === 0, "tcpdump packet count must be zero", failures);
+    const attribution = payload?.packetAttribution;
+    requireField(payload?.interface === "pktap,all", "macOS capture interface must be pktap,all", failures);
+    requireField(
+      attribution?.captureInterface === "pktap,all",
+      "packetAttribution.captureInterface must be pktap,all",
+      failures,
+    );
+    requireField(attribution?.complete === true, "PKTAP process attribution must be complete", failures);
+    requireField(attribution?.packetOverflowCount === 0, "PKTAP packet capture must not overflow", failures);
+    requireField(
+      attribution?.tcpdumpExitedBeforeCleanup === false,
+      "PKTAP capture must remain active through the packaged smoke",
+      failures,
+    );
+    requireField(
+      attribution?.applicationPacketCount === 0 && payload?.packetCount === 0,
+      "Candor-attributed outbound packet count must be zero",
+      failures,
+    );
+    requireField(
+      Array.isArray(attribution?.observedProcesses) && attribution.observedProcesses.length > 0,
+      "PKTAP proof must record the observed Candor process tree",
+      failures,
+    );
+    if (payload?.managedPf?.requested === true) {
+      requireField(
+        Number.isInteger(payload?.denyLayerProbe?.pid) && payload.denyLayerProbe.pid > 0,
+        "managed PF deny probe must record its process PID",
+        failures,
+      );
+      requireField(
+        attribution?.denyProbeCaptured === true && attribution?.denyProbePacketCount > 0,
+        "PKTAP must capture the blocked sentinel with process attribution",
+        failures,
+      );
+    }
   }
 
   return failures;

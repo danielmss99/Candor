@@ -54,13 +54,10 @@ function resolveExecutable(explicitPath) {
   return executable;
 }
 
-function defaultInterface() {
-  const result = spawnSync("route", ["-n", "get", "default"], { encoding: "utf8" });
-  const match = result.stdout.match(/interface:\s*(\S+)/);
-  return match?.[1] ?? "en0";
-}
-
 function waitForExit(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolvePromise, rejectPromise) => {
     child.once("error", rejectPromise);
     child.once("exit", (code, signal) => resolvePromise({ code, signal }));
@@ -86,6 +83,64 @@ function parseDenyProbeOutput(text) {
   return JSON.parse(text.slice(start, end + 1));
 }
 
+function parsePktapPacket(line) {
+  const metadata = line.match(/\((.*)\)\s+(?:IP|IP6)\b/)?.[1] ?? "";
+  const processMatch = metadata.match(/(?:^|,\s*)proc\s+(.+):(\d+)(?:,|$)/);
+  return {
+    line,
+    processName: processMatch?.[1]?.trim() ?? null,
+    pid: processMatch ? Number.parseInt(processMatch[2], 10) : null,
+    direction: /(?:^|,\s*)out(?:,|$)/.test(metadata) ? "out" : null,
+  };
+}
+
+function processTreeSnapshot(rootPid) {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+  const result = spawnSync("ps", ["-axo", "pid=,ppid=,comm="], { encoding: "utf8" });
+  if (result.status !== 0) return [];
+  const processes = result.stdout
+    .split(/\r?\n/)
+    .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/))
+    .filter(Boolean)
+    .map((match) => ({
+      pid: Number.parseInt(match[1], 10),
+      ppid: Number.parseInt(match[2], 10),
+      command: match[3].trim(),
+    }));
+  const descendants = new Set([rootPid]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const process of processes) {
+      if (descendants.has(process.ppid) && !descendants.has(process.pid)) {
+        descendants.add(process.pid);
+        changed = true;
+      }
+    }
+  }
+  return processes.filter((process) => descendants.has(process.pid));
+}
+
+function isCandorProcessName(name) {
+  const normalized = String(name ?? "").trim().toLowerCase();
+  return normalized === "candor-core" || normalized.startsWith("candor v3 m0");
+}
+
+function runPacketParserSelfTest() {
+  const parsed = parsePktapPacket(
+    "00:00:00.000000 (en0, proc Candor v3 M0 Helper (Renderer):77619, out, so) IP 10.0.0.1.1 > 1.1.1.1.443",
+  );
+  if (
+    parsed.processName !== "Candor v3 M0 Helper (Renderer)" ||
+    parsed.pid !== 77619 ||
+    parsed.direction !== "out"
+  ) {
+    throw new Error("macOS PKTAP packet parser self-test failed");
+  }
+}
+
+runPacketParserSelfTest();
+
 function denyProbeScript() {
   return `
 const net = require("node:net");
@@ -98,6 +153,7 @@ function finish(blocked, reason) {
   socket.destroy();
   console.log(JSON.stringify({
     attempted: true,
+    pid: process.pid,
     target: "1.1.1.1:443",
     blocked,
     reason: String(reason ?? ""),
@@ -118,13 +174,13 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "route", "node"];
+const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "node"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
   const commands = Object.fromEntries(proofCommands.map((command) => [command, commandExists(command)]));
   const root = typeof process.getuid === "function" ? process.getuid() === 0 : false;
-  const baseCommandsAvailable = ["bash", "tcpdump", "route", "node"].every((command) => commands[command]);
+  const baseCommandsAvailable = ["bash", "tcpdump", "ps", "node"].every((command) => commands[command]);
   console.log(
     JSON.stringify(
       {
@@ -156,7 +212,7 @@ if (typeof process.getuid !== "function" || process.getuid() !== 0) {
 if (!externalDenyConfirmed && !managedPf) {
   throw new Error("Refusing to claim macOS network-deny proof without --managed-pf or --external-deny-confirmed.");
 }
-for (const command of ["bash", "sudo", "tcpdump", "route", "node"]) {
+for (const command of ["bash", "sudo", "tcpdump", "ps", "node"]) {
   if (!commandExists(command)) throw new Error(`Required command not found: ${command}`);
 }
 if (managedPf && !commandExists("pfctl")) {
@@ -173,9 +229,9 @@ const executable = resolveExecutable(explicitAppPath);
 const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-darwin-${process.arch}.json`);
 const networkProofPath = join(proofDir, `m0-network-deny-macos-${timestamp}.json`);
-const iface = defaultInterface();
+const captureInterface = "pktap,all";
 const pfAnchor = `com.apple/candor-v3-m0-network-deny-${process.pid}`;
-const pfRules = "block drop out quick proto { tcp udp } from any to any\n";
+const pfRules = `block drop out quick proto { tcp udp } all user ${invokingUid}\n`;
 const pfState = {
   requested: managedPf,
   anchor: managedPf ? pfAnchor : null,
@@ -239,98 +295,202 @@ mkdirSync(proofDir, { recursive: true });
 
 enableManagedPfDeny();
 
-const denyProbeResult = managedPf
-  ? spawnSync(process.execPath, ["-e", denyProbeScript()], {
-      cwd: repoRoot,
-      encoding: "utf8",
-    })
-  : null;
-const denyLayerProbe = denyProbeResult
-  ? {
-      ...parseDenyProbeOutput(denyProbeResult.stdout),
-      exitCode: denyProbeResult.status,
-      signal: denyProbeResult.signal,
-      stderr: denyProbeResult.stderr.trim(),
-      error: denyProbeResult.error ? denyProbeResult.error.message : null,
-    }
-  : {
-      attempted: false,
-      blocked: null,
-      skippedReason: "external-deny-confirmed mode is operator-attested",
-    };
-
-const tcpdump = spawn("tcpdump", ["-n", "-l", "-i", iface, "tcp or udp"], {
+const tcpdump = spawn("tcpdump", [
+  "-n",
+  "-l",
+  "-k",
+  "NPD",
+  "-i",
+  captureInterface,
+  "-Q",
+  "dir=out",
+  "tcp or udp",
+], {
   cwd: repoRoot,
   stdio: ["ignore", "pipe", "pipe"],
 });
 const packets = [];
+const maxCapturedPackets = 5000;
+let packetOverflowCount = 0;
+let packetBuffer = "";
 let tcpdumpError = "";
+let tcpdumpSpawnError = null;
+let tcpdumpExitedBeforeCleanup = false;
 tcpdump.stdout.on("data", (chunk) => {
-  const lines = chunk.toString("utf8").split(/\r?\n/).filter(Boolean);
-  for (const line of lines) {
-    if (packets.length < 200) packets.push(line);
+  packetBuffer += chunk.toString("utf8");
+  let newlineIndex = packetBuffer.indexOf("\n");
+  while (newlineIndex >= 0) {
+    const line = packetBuffer.slice(0, newlineIndex).trim();
+    packetBuffer = packetBuffer.slice(newlineIndex + 1);
+    if (line) {
+      if (packets.length < maxCapturedPackets) packets.push(line);
+      else packetOverflowCount += 1;
+    }
+    newlineIndex = packetBuffer.indexOf("\n");
   }
 });
 tcpdump.stderr.on("data", (chunk) => {
   tcpdumpError += chunk.toString("utf8");
 });
-
-await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
+tcpdump.on("error", (error) => {
+  tcpdumpSpawnError = error;
+});
 
 let stdout = "";
 let stderr = "";
 let smokeExit = { code: null, signal: null };
+let denyLayerProbe = {
+  attempted: false,
+  blocked: null,
+  skippedReason: "external-deny-confirmed mode is operator-attested",
+};
+const observedProcesses = new Map();
 try {
-  const forwardedEnvironment = {
-    CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
-    GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
-    GITHUB_WORKFLOW: process.env.GITHUB_WORKFLOW,
-    GITHUB_RUN_ID: process.env.GITHUB_RUN_ID,
-    GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT,
-    GITHUB_JOB: process.env.GITHUB_JOB,
-    GITHUB_SHA: process.env.GITHUB_SHA,
-    GITHUB_REF: process.env.GITHUB_REF,
-    RUNNER_OS: process.env.RUNNER_OS,
-  };
-  const environmentArguments = Object.entries(forwardedEnvironment)
-    .filter(([, value]) => typeof value === "string" && value.length > 0)
-    .map(([name, value]) => `${name}=${value}`);
-  const smoke = spawn("sudo", [
-    "-u",
-    invokingUser,
-    "-H",
-    "env",
-    ...environmentArguments,
-    process.execPath,
-    "scripts/m0-packaged-smoke.mjs",
-  ], {
-    cwd: repoRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  smoke.stdout.on("data", (chunk) => {
-    stdout += chunk.toString("utf8");
-  });
-  smoke.stderr.on("data", (chunk) => {
-    stderr += chunk.toString("utf8");
-  });
-
-  smokeExit = await waitForExit(smoke);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
+
+  if (managedPf) {
+    let probeStdout = "";
+    let probeStderr = "";
+    const probe = spawn("sudo", [
+      "-u",
+      invokingUser,
+      "-H",
+      "env",
+      process.execPath,
+      "-e",
+      denyProbeScript(),
+    ], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    probe.stdout.on("data", (chunk) => {
+      probeStdout += chunk.toString("utf8");
+    });
+    probe.stderr.on("data", (chunk) => {
+      probeStderr += chunk.toString("utf8");
+    });
+    const probeExit = await waitForExit(probe);
+    denyLayerProbe = {
+      ...parseDenyProbeOutput(probeStdout),
+      controllerPid: probe.pid ?? null,
+      exitCode: probeExit.code,
+      signal: probeExit.signal,
+      stderr: probeStderr.trim(),
+      error: null,
+    };
+  }
+
+  if ((!managedPf || denyLayerProbe.blocked === true) && !tcpdumpSpawnError) {
+    const forwardedEnvironment = {
+      CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
+      GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+      GITHUB_WORKFLOW: process.env.GITHUB_WORKFLOW,
+      GITHUB_RUN_ID: process.env.GITHUB_RUN_ID,
+      GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT,
+      GITHUB_JOB: process.env.GITHUB_JOB,
+      GITHUB_SHA: process.env.GITHUB_SHA,
+      GITHUB_REF: process.env.GITHUB_REF,
+      RUNNER_OS: process.env.RUNNER_OS,
+    };
+    const environmentArguments = Object.entries(forwardedEnvironment)
+      .filter(([, value]) => typeof value === "string" && value.length > 0)
+      .map(([name, value]) => `${name}=${value}`);
+    const smoke = spawn("sudo", [
+      "-u",
+      invokingUser,
+      "-H",
+      "env",
+      ...environmentArguments,
+      process.execPath,
+      "scripts/m0-packaged-smoke.mjs",
+    ], {
+      cwd: repoRoot,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const observeProcessTree = () => {
+      for (const process of processTreeSnapshot(smoke.pid)) {
+        observedProcesses.set(process.pid, process);
+      }
+    };
+    observeProcessTree();
+    const processObserver = setInterval(observeProcessTree, 100);
+    smoke.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    smoke.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    try {
+      smokeExit = await waitForExit(smoke);
+    } finally {
+      clearInterval(processObserver);
+    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
+  }
 } finally {
-  tcpdump.kill("SIGINT");
-  await waitForExit(tcpdump).catch(() => null);
+  if (!tcpdumpSpawnError) {
+    tcpdumpExitedBeforeCleanup = tcpdump.exitCode !== null || tcpdump.signalCode !== null;
+    if (!tcpdumpExitedBeforeCleanup) tcpdump.kill("SIGINT");
+    await waitForExit(tcpdump).catch(() => null);
+  }
+  const trailingPacket = packetBuffer.trim();
+  if (trailingPacket) {
+    if (packets.length < maxCapturedPackets) packets.push(trailingPacket);
+    else packetOverflowCount += 1;
+  }
   cleanupManagedPfDeny();
 }
 
 const smokeProof = existsSync(smokeProofPath)
   ? JSON.parse(readFileSync(smokeProofPath, "utf8"))
   : null;
+const parsedPackets = packets.map(parsePktapPacket);
+const observedProcessIds = new Set(observedProcesses.keys());
+const applicationPackets = parsedPackets.filter(
+  (packet) => observedProcessIds.has(packet.pid) || isCandorProcessName(packet.processName),
+);
+const denyProbePackets = parsedPackets.filter(
+  (packet) => Number.isInteger(denyLayerProbe.pid) && packet.pid === denyLayerProbe.pid,
+);
+const packetsWithoutProcessMetadata = parsedPackets.filter(
+  (packet) =>
+    packet.direction !== "out" ||
+    !Number.isInteger(packet.pid) ||
+    typeof packet.processName !== "string" ||
+    packet.processName.length === 0,
+);
+const packetAttribution = {
+  captureInterface,
+  metadataSource: "macOS PKTAP process name, PID, and direction",
+  observedPacketCount: parsedPackets.length,
+  packetOverflowCount,
+  applicationPacketCount: applicationPackets.length,
+  applicationPacketSamples: applicationPackets.slice(0, 50),
+  hostBackgroundPacketCount: parsedPackets.length - applicationPackets.length - denyProbePackets.length,
+  hostBackgroundPacketSamples: parsedPackets
+    .filter((packet) => !applicationPackets.includes(packet) && !denyProbePackets.includes(packet))
+    .slice(0, 25),
+  packetsWithoutProcessMetadata: packetsWithoutProcessMetadata.slice(0, 25),
+  observedProcesses: [...observedProcesses.values()].sort((left, right) => left.pid - right.pid),
+  denyProbePacketCount: denyProbePackets.length,
+  denyProbeCaptured: !managedPf || denyProbePackets.length > 0,
+  complete:
+    !tcpdumpSpawnError &&
+    !tcpdumpExitedBeforeCleanup &&
+    packetOverflowCount === 0 &&
+    packetsWithoutProcessMetadata.length === 0,
+  tcpdumpExitedBeforeCleanup,
+};
 
 const proof = {
   ok:
     smokeExit.code === 0 &&
+    smokeProof?.ok === true &&
     (!managedPf || denyLayerProbe.blocked === true) &&
-    packets.length === 0 &&
+    packetAttribution.denyProbeCaptured &&
+    packetAttribution.complete &&
+    applicationPackets.length === 0 &&
     (!managedPf ||
       (pfState.anchorLoaded &&
         pfState.anchorFlushed &&
@@ -339,34 +499,41 @@ const proof = {
   proofKind: "m0-network-deny-macos",
   generatedAt: new Date().toISOString(),
   denyMechanism: managedPf
-    ? "managed-pf-anchor plus tcpdump capture"
-    : "operator-confirmed external deny layer plus tcpdump capture",
+    ? "managed-pf user-scoped deny plus PKTAP process attribution"
+    : "operator-confirmed external deny layer plus PKTAP process attribution",
   applicationUidNonRoot: invokingUid > 0,
   applicationRunsAsRoot: false,
   externalDenyConfirmed,
   managedPf: pfState,
   executable,
-  interface: iface,
+  interface: captureInterface,
   smokeProofPath,
   denyLayerProbe,
-  packetCount: packets.length,
-  packetSamples: packets,
+  packetCount: applicationPackets.length,
+  packetSamples: applicationPackets.map((packet) => packet.line),
+  packetAttribution,
   stdout: stdout.trim(),
   stderr: stderr.trim(),
   tcpdumpStderr: tcpdumpError.trim(),
+  tcpdumpSpawnError: tcpdumpSpawnError?.message ?? null,
   smokeProof,
 };
 writeJson(networkProofPath, proof);
 
-if (denyProbeResult?.error) throw denyProbeResult.error;
 if (managedPf && denyLayerProbe.blocked !== true) {
   throw new Error(`macOS deny-layer sentinel connected or did not prove blocked. Proof written to ${networkProofPath}`);
+}
+if (!packetAttribution.denyProbeCaptured) {
+  throw new Error(`macOS PKTAP did not capture the blocked sentinel with its process PID. Proof written to ${networkProofPath}`);
+}
+if (!packetAttribution.complete) {
+  throw new Error(`macOS PKTAP process attribution was incomplete. Proof written to ${networkProofPath}`);
 }
 if (smokeExit.code !== 0) {
   throw new Error(`macOS packaged smoke failed under confirmed deny layer. Proof written to ${networkProofPath}`);
 }
-if (packets.length > 0) {
-  throw new Error(`macOS tcpdump observed outbound packets. Proof written to ${networkProofPath}`);
+if (applicationPackets.length > 0) {
+  throw new Error(`macOS PKTAP observed Candor-attributed outbound packets. Proof written to ${networkProofPath}`);
 }
 if (!smokeProof?.ok) {
   throw new Error(`macOS smoke proof missing or failed: ${smokeProofPath}`);

@@ -52,6 +52,9 @@ match the corresponding unpacked app payload hashes before M0 packaging can
 pass. Windows inspection prefers electron-builder's managed 7-Zip binary over
 an arbitrary system `PATH` copy so NSIS extraction layout is reproducible on
 developer machines and hosted runners.
+On macOS, signing and entitlement findings are recorded separately as
+`releaseGaps`: they do not invalidate M0's structural package proof, but strict
+artifact smoke and the M5 release-signing gate still reject those gaps.
 
 `npm run m0:packaged-smoke` writes a machine-readable proof artifact to
 `release-v3/proofs/m0-packaged-runtime-smoke-<platform>-<arch>.json`.
@@ -140,11 +143,11 @@ The GitHub Actions matrix now builds release-shaped artifacts and then runs real
 Windows, Linux, and macOS network-deny proofs by default. Windows uses temporary
 outbound firewall rules for the packaged app and sidecar. Linux runs the
 packaged smoke inside an ephemeral network namespace. macOS uses a temporary
-managed PF anchor plus tcpdump capture. Linux and managed-PF macOS proofs must
-also record a blocked outbound deny-layer sentinel before the packaged smoke
-proof is accepted. The Linux namespace and macOS PF/tcpdump controls stay
-privileged, while the packaged app is explicitly dropped back to the invoking
-non-root desktop user. The Linux job installs the native build and runtime
+managed PF anchor plus PKTAP process-attributed capture. Linux and managed-PF
+macOS proofs must also record a blocked outbound deny-layer sentinel before the
+packaged smoke proof is accepted. The Linux namespace and macOS PF/PKTAP
+controls stay privileged, while the packaged app is explicitly dropped back to
+the invoking non-root desktop user. The Linux job installs the native build and runtime
 packages needed for the Rust audio stack, SQLCipher key storage checks,
 Electron smoke, `xvfb-run`, and `unshare`.
 
@@ -157,10 +160,12 @@ contract: the build exports `MACOSX_DEPLOYMENT_TARGET=13.0`, the packaged app
 declares `LSMinimumSystemVersion` 13.0, and the DMG smoke verifies that plist
 value.
 
-The workflow's `m0-proof-audit` job downloads every matrix artifact and writes a
+The workflow uploads installers and proof receipts as separate artifacts. Its
+`m0-proof-audit` job downloads only the small proof receipts and writes a
 combined `m0-combined-proof-audit-summary.json` so the full OS proof set can be
-checked in one place. It then runs strict audit mode every time. The workflow
-fails until Windows, Linux, and macOS all have valid staged-verification,
+checked without transferring every installer again. It then runs strict audit
+mode every time. The workflow fails until Windows, Linux, and macOS all have
+valid staged-verification,
 packaged-smoke, release-artifact-smoke, network-deny, and artifact-manifest
 proofs, with staged verification, packaged smoke, and package manifest proof
 agreeing on source identity and the manifest proving the platform release

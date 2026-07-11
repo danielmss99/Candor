@@ -404,8 +404,8 @@ try {
       canCreateFirewallRules = ($administrator -and $netSecurityAvailable)
     }
     temporaryFirewallRules = @($ruleEvidence)
-    observedTcpConnections = @($observedTcp)
-    observedUdpEndpoints = @($observedUdp)
+    observedTcpConnections = $observedTcp.ToArray()
+    observedUdpEndpoints = $observedUdp.ToArray()
     stdout = $stdout.Trim()
     stderr = $stderr.Trim()
     smokeProof = $smokeProof

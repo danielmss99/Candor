@@ -246,7 +246,7 @@ if ($administrator) {
       proofDir = $resolvedProofDir
       runnerValidation = $validation
       latestNetworkProof = Get-LatestWindowsNetworkProof $resolvedProofDir
-      steps = @($steps)
+      steps = $steps.ToArray()
       error = $errorMessage
     }
     Write-JsonFile $receiptPath $receipt

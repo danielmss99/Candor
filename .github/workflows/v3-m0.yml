@@ -131,7 +131,18 @@ jobs:
 
       - name: Run macOS network-deny proof
         if: runner.os == 'macOS'
-        run: sudo env "PATH=$PATH" node scripts/m0-network-deny-macos.mjs --managed-pf
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+            "GITHUB_WORKFLOW=$GITHUB_WORKFLOW" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "GITHUB_JOB=$GITHUB_JOB" \
+            "GITHUB_SHA=$GITHUB_SHA" \
+            "GITHUB_REF=$GITHUB_REF" \
+            "RUNNER_OS=$RUNNER_OS" \
+            node scripts/m0-network-deny-macos.mjs --managed-pf
 
       - name: Validate Linux network proof runner
         if: runner.os == 'Linux'
@@ -139,7 +150,18 @@ jobs:
 
       - name: Run Linux network-deny proof
         if: runner.os == 'Linux'
-        run: sudo env "PATH=$PATH" node scripts/m0-network-deny-linux.mjs
+        run: |
+          sudo env \
+            "PATH=$PATH" \
+            "GITHUB_ACTIONS=$GITHUB_ACTIONS" \
+            "GITHUB_WORKFLOW=$GITHUB_WORKFLOW" \
+            "GITHUB_RUN_ID=$GITHUB_RUN_ID" \
+            "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+            "GITHUB_JOB=$GITHUB_JOB" \
+            "GITHUB_SHA=$GITHUB_SHA" \
+            "GITHUB_REF=$GITHUB_REF" \
+            "RUNNER_OS=$RUNNER_OS" \
+            node scripts/m0-network-deny-linux.mjs
 
       - name: Write M0 artifact manifest
         if: always()
@@ -149,13 +171,24 @@ jobs:
         if: always()
         run: npm run m0:proof-audit -- --write release-v3/proofs/m0-proof-audit-summary.json
 
-      - name: Upload M0 package and proofs
+      - name: Upload M0 proof receipts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: candor-v3-m0-${{ matrix.os }}-${{ github.sha }}
-          path: release-v3/
+          name: candor-v3-m0-proof-${{ matrix.os }}-${{ github.sha }}
+          path: release-v3/proofs/
           if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload M0 packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: candor-v3-m0-package-${{ matrix.os }}-${{ github.sha }}
+          path: |
+            release-v3/**
+            !release-v3/proofs/**
+          if-no-files-found: warn
           retention-days: 14
 
   m0-proof-audit:
@@ -172,10 +205,10 @@ jobs:
         with:
           node-version: 22
 
-      - name: Download M0 package artifacts
+      - name: Download M0 proof receipts
         uses: actions/download-artifact@v4
         with:
-          pattern: candor-v3-m0-*
+          pattern: candor-v3-m0-proof-*
           path: collected-m0-artifacts
 
       - name: Audit combined M0 proofs

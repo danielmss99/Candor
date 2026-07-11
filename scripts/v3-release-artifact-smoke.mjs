@@ -464,18 +464,17 @@ function macosDmgSmoke() {
         sidecarEntitlements.ok &&
         `${sidecarEntitlements.stdout}\n${sidecarEntitlements.stderr}`.includes(entitlementKey);
 
-      const signaturePresent = signing.appVerified || signing.sidecarVerified;
-      if (!signaturePresent) {
-        signingGaps.push("M0 app and sidecar are unsigned; production signing remains a release gate");
-      } else {
-        if (!signing.appVerified) failures.push("signed macOS app bundle failed strict codesign verification");
-        if (!signing.sidecarVerified) failures.push("signed candor-core sidecar failed strict codesign verification");
-        if (!signing.appAudioInputEntitlement) {
-          failures.push("signed macOS app bundle is missing the audio-input entitlement");
-        }
-        if (!signing.sidecarAudioInputEntitlement) {
-          failures.push("signed candor-core sidecar is missing the audio-input entitlement");
-        }
+      if (!signing.appVerified) {
+        signingGaps.push("macOS app bundle failed strict codesign verification");
+      }
+      if (!signing.sidecarVerified) {
+        signingGaps.push("candor-core sidecar failed strict codesign verification");
+      }
+      if (!signing.appAudioInputEntitlement) {
+        signingGaps.push("macOS app bundle is missing the audio-input entitlement");
+      }
+      if (!signing.sidecarAudioInputEntitlement) {
+        signingGaps.push("candor-core sidecar is missing the audio-input entitlement");
       }
     }
 
@@ -628,8 +627,14 @@ const currentPlatform =
         ? linuxPackageSmoke()
     : unsupportedCurrentPlatformSmoke();
 
+const releaseGaps = Array.isArray(currentPlatform.signingGaps)
+  ? currentPlatform.signingGaps
+  : [];
+const structuralFailures = currentPlatform.failures ?? [];
+const strictFailures = strict ? releaseGaps : [];
+
 const proof = {
-  ok: currentPlatform.ok === true,
+  ok: currentPlatform.ok === true && strictFailures.length === 0,
   proofKind: "v3-release-artifact-smoke",
   generatedAt: new Date().toISOString(),
   platform: process.platform,
@@ -642,7 +647,8 @@ const proof = {
   rawPathExposed: false,
   keyMaterialExposedToRenderer: false,
   currentPlatform,
-  failures: currentPlatform.failures ?? [],
+  releaseGaps,
+  failures: [...structuralFailures, ...strictFailures],
 };
 
 mkdirSync(dirname(outputPath), { recursive: true });
@@ -650,6 +656,9 @@ writeFileSync(outputPath, `${JSON.stringify(proof, null, 2)}\n`, "utf8");
 
 if (proof.ok) {
   console.log(`V3 release artifact smoke passed. Proof written to ${outputPath}.`);
+  for (const gap of proof.releaseGaps) {
+    console.log(`- release gap: ${gap}`);
+  }
 } else {
   console.log(`V3 release artifact smoke recorded gaps. Proof written to ${outputPath}.`);
   for (const failure of proof.failures) {
