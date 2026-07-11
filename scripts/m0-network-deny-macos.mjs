@@ -111,6 +111,22 @@ function parsePfRuleStats(text) {
   };
 }
 
+function parseTcpdumpCaptureStats(text) {
+  const captured = text.match(/(\d+)\s+packets? captured/);
+  const received = text.match(/(\d+)\s+packets? received by filter/);
+  const kernelDropped = text.match(/(\d+)\s+packets? dropped by kernel/);
+  const metadataFilterDropped = text.match(/(\d+)\s+drops? by metadata filter/);
+  return {
+    parsed: Boolean(captured && received && kernelDropped),
+    captured: captured ? Number.parseInt(captured[1], 10) : null,
+    receivedByFilter: received ? Number.parseInt(received[1], 10) : null,
+    kernelDropped: kernelDropped ? Number.parseInt(kernelDropped[1], 10) : null,
+    metadataFilterDropped: metadataFilterDropped
+      ? Number.parseInt(metadataFilterDropped[1], 10)
+      : 0,
+  };
+}
+
 function processTreeSnapshot(rootPid) {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
   const result = spawnSync("ps", ["-axo", "pid=,ppid=,uid=,gid=,comm="], { encoding: "utf8" });
@@ -176,6 +192,21 @@ function runPacketParserSelfTest() {
   if (!ruleStats.parsed || ruleStats.ruleCount !== 2 || ruleStats.packets !== 3 || ruleStats.bytes !== 180) {
     throw new Error("macOS PF rule counter parser self-test failed");
   }
+  const captureStats = parseTcpdumpCaptureStats(`
+0 packets captured
+15 packets received by filter
+0 packets dropped by kernel
+15 drops by metadata filter
+`);
+  if (
+    !captureStats.parsed ||
+    captureStats.captured !== 0 ||
+    captureStats.receivedByFilter !== 15 ||
+    captureStats.kernelDropped !== 0 ||
+    captureStats.metadataFilterDropped !== 15
+  ) {
+    throw new Error("macOS PKTAP capture statistics parser self-test failed");
+  }
 }
 
 runPacketParserSelfTest();
@@ -215,13 +246,15 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "node"];
+const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "sysctl", "node"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
   const commands = Object.fromEntries(proofCommands.map((command) => [command, commandExists(command)]));
   const root = typeof process.getuid === "function" ? process.getuid() === 0 : false;
-  const baseCommandsAvailable = ["bash", "tcpdump", "ps", "node"].every((command) => commands[command]);
+  const baseCommandsAvailable = ["bash", "tcpdump", "ps", "sysctl", "node"].every(
+    (command) => commands[command],
+  );
   console.log(
     JSON.stringify(
       {
@@ -257,7 +290,7 @@ if (typeof process.getuid !== "function" || process.getuid() !== 0) {
 if (!externalDenyConfirmed && !managedPf) {
   throw new Error("Refusing to claim macOS network-deny proof without --managed-pf or --external-deny-confirmed.");
 }
-for (const command of ["bash", "sudo", "tcpdump", "ps", "node"]) {
+for (const command of ["bash", "sudo", "tcpdump", "ps", "sysctl", "node"]) {
   if (!commandExists(command)) throw new Error(`Required command not found: ${command}`);
 }
 if (managedPf && !commandExists("pfctl")) {
@@ -324,6 +357,26 @@ const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-darwin-${process.arch}.json`);
 const networkProofPath = join(proofDir, `m0-network-deny-macos-${timestamp}.json`);
 const captureInterface = "pktap,all";
+const candorProcessNames = [
+  "Candor v3 M0",
+  "Candor v3 M0 Hel",
+  "Candor v3 M0 Helper",
+  "Candor v3 M0 Helper (Renderer)",
+  "Candor v3 M0 Helper (GPU)",
+  "Candor v3 M0 Helper (Plugin)",
+  "candor-core",
+];
+const processMetadataFilter = `dir=out and (${candorProcessNames
+  .flatMap((name) => [`proc = '${name}'`, `eproc = '${name}'`])
+  .join(" or ")})`;
+const bpfMaxBufferBytes = Number.parseInt(
+  runCommand("sysctl", ["-n", "net.bpf.maxbufsize"]).stdout.trim(),
+  10,
+);
+if (!Number.isInteger(bpfMaxBufferBytes) || bpfMaxBufferBytes < 1024) {
+  throw new Error("macOS did not report a valid net.bpf.maxbufsize value");
+}
+const captureBufferKib = Math.floor(bpfMaxBufferBytes / 1024);
 const pfAnchor = `com.apple/candor-v3-m0-network-deny-${process.pid}`;
 const pfRules = `block drop out quick proto { tcp udp } all user ${invokingUid} group ${executionGid}\n`;
 const pfState = {
@@ -414,12 +467,16 @@ enableManagedPfDeny();
 const tcpdump = spawn("tcpdump", [
   "-n",
   "-l",
+  "-B",
+  String(captureBufferKib),
+  "-s",
+  "256",
   "-k",
   "NPD",
   "-i",
   captureInterface,
   "-Q",
-  "dir=out",
+  processMetadataFilter,
   "tcp or udp",
 ], {
   cwd: repoRoot,
@@ -568,6 +625,7 @@ const smokeProof = existsSync(smokeProofPath)
   ? JSON.parse(readFileSync(smokeProofPath, "utf8"))
   : null;
 const parsedPackets = packets.map(parsePktapPacket);
+const captureStats = parseTcpdumpCaptureStats(tcpdumpError);
 const observedProcessIds = new Set(observedProcesses.keys());
 const observedProcessList = [...observedProcesses.values()].sort((left, right) => left.pid - right.pid);
 const escapedApplicationPackets = parsedPackets.filter(
@@ -595,6 +653,8 @@ const applicationBlockedPacketCount = managedPf ? (pfState.applicationRuleStats?
 const applicationPacketCount = escapedApplicationPackets.length + applicationBlockedPacketCount;
 const packetAttribution = {
   captureInterface,
+  processMetadataFilter,
+  captureStats,
   metadataSource: "macOS PKTAP process name, PID, and direction",
   blockedMetadataSource: managedPf
     ? "PF per-rule packet counters scoped to an isolated execution GID"
@@ -623,6 +683,9 @@ const packetAttribution = {
   complete:
     !tcpdumpSpawnError &&
     !tcpdumpExitedBeforeCleanup &&
+    captureStats.parsed &&
+    captureStats.kernelDropped === 0 &&
+    captureStats.captured === parsedPackets.length &&
     packetOverflowCount === 0 &&
     packetsWithoutProcessMetadata.length === 0 &&
     observedProcessList.length > 0 &&
@@ -672,6 +735,12 @@ const proof = {
   managedPf: pfState,
   executable,
   interface: captureInterface,
+  captureConfiguration: {
+    bpfMaxBufferBytes,
+    requestedBufferKib: captureBufferKib,
+    snapshotLengthBytes: 256,
+    processMetadataFilter,
+  },
   smokeProofPath,
   denyLayerProbe,
   packetCount: applicationPacketCount,

@@ -1481,10 +1481,26 @@ function runSelfTest() {
       processTreeComplete: true,
     },
     interface: "pktap,all",
+    captureConfiguration: {
+      bpfMaxBufferBytes: 524288,
+      requestedBufferKib: 512,
+      snapshotLengthBytes: 256,
+      processMetadataFilter:
+        "dir=out and (proc = 'Candor v3 M0' or eproc = 'Candor v3 M0' or proc = 'candor-core')",
+    },
     packetCount: 0,
     denyLayerProbe: { ...minimalValidDenyLayerProbe(), pid: 1234, uid: 501, gid: 62000 },
     packetAttribution: {
       captureInterface: "pktap,all",
+      processMetadataFilter:
+        "dir=out and (proc = 'Candor v3 M0' or eproc = 'Candor v3 M0' or proc = 'candor-core')",
+      captureStats: {
+        parsed: true,
+        captured: 0,
+        receivedByFilter: 12,
+        kernelDropped: 0,
+        metadataFilterDropped: 12,
+      },
       blockedMetadataSource: "PF per-rule packet counters scoped to an isolated execution GID",
       complete: true,
       packetOverflowCount: 0,
@@ -1497,6 +1513,7 @@ function runSelfTest() {
       denyProbePacketCount: 1,
       observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor v3 M0" }],
       processIdentityMismatches: [],
+      observedPacketCount: 0,
     },
     managedPf: {
       requested: true,
@@ -1575,6 +1592,17 @@ function runSelfTest() {
   assertSelfTest(
     overflowManagedMacosFailures.some((failure) => failure.includes("PKTAP packet capture must not overflow")),
     "managed macOS network proof must fail when PKTAP evidence overflows",
+  );
+
+  const droppedManagedMacosProof = cloneJson(validManagedMacosProof);
+  droppedManagedMacosProof.packetAttribution.complete = false;
+  droppedManagedMacosProof.packetAttribution.captureStats.kernelDropped = 1;
+  const droppedManagedMacosFailures = validateNetworkProof("macos", droppedManagedMacosProof);
+  assertSelfTest(
+    droppedManagedMacosFailures.some((failure) =>
+      failure.includes("PKTAP capture statistics must be complete with zero kernel drops"),
+    ),
+    "managed macOS network proof must fail when the kernel drops PKTAP evidence",
   );
 
   const truncatedManagedMacosProof = cloneJson(validManagedMacosProof);
@@ -1676,6 +1704,32 @@ function validateNetworkProof(osName, payload) {
     requireField(
       attribution?.captureInterface === "pktap,all",
       "packetAttribution.captureInterface must be pktap,all",
+      failures,
+    );
+    requireField(
+      Number.isInteger(payload?.captureConfiguration?.bpfMaxBufferBytes) &&
+        payload.captureConfiguration.bpfMaxBufferBytes >= 1024 &&
+        payload.captureConfiguration.requestedBufferKib ===
+          Math.floor(payload.captureConfiguration.bpfMaxBufferBytes / 1024) &&
+        payload.captureConfiguration.snapshotLengthBytes === 256,
+      "PKTAP capture must use the maximum permitted BPF buffer and bounded snapshot length",
+      failures,
+    );
+    requireField(
+      typeof attribution?.processMetadataFilter === "string" &&
+        attribution.processMetadataFilter.includes("dir=out") &&
+        attribution.processMetadataFilter.includes("Candor v3 M0") &&
+        attribution.processMetadataFilter.includes("candor-core") &&
+        attribution.processMetadataFilter ===
+          payload?.captureConfiguration?.processMetadataFilter,
+      "PKTAP capture must be filtered to outbound Candor process identities",
+      failures,
+    );
+    requireField(
+      attribution?.captureStats?.parsed === true &&
+        attribution.captureStats.kernelDropped === 0 &&
+        attribution.captureStats.captured === attribution?.observedPacketCount,
+      "PKTAP capture statistics must be complete with zero kernel drops",
       failures,
     );
     if (payload?.managedPf?.requested === true) {

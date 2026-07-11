@@ -66,9 +66,11 @@ background calls are disabled for M0.
   GID. PF per-rule counters prove the sentinel was blocked and that the app made
   zero blocked attempts after the counters were reset. A simultaneous
   `pktap,all` capture records any packets that escape PF with process metadata.
-  The proof verifies that the observed Candor process tree retains the isolated
-  UID/GID and retains hosted-runner background packets only as diagnostics. It
-  writes
+  Its metadata filter admits only Candor, helper, or core process identities;
+  the maximum kernel-permitted BPF buffer, a bounded snapshot length, and parsed
+  tcpdump counters make any kernel packet drop a hard failure. The proof also
+  verifies that the observed Candor process tree retains the isolated UID/GID.
+  It writes
   `release-v3/proofs/m0-network-deny-macos-<timestamp>.json`, then flushes the
   anchor and releases the PF enable token in `finally`. Managed-PF mode also
   runs a small outbound TCP sentinel, records `denyLayerProbe.blocked: true`,
@@ -198,7 +200,7 @@ npm run m0:network-deny:macos -- --validate-only
 ```
 
 Validate-only output includes `validateOnlyIsNotNetworkProof: true`, command
-presence for `bash`, `tcpdump`, `pfctl`, `ps`, and `node`, plus
+presence for `bash`, `tcpdump`, `pfctl`, `ps`, `sysctl`, and `node`, plus
 separate `canRunManagedPfProof` and `canRunExternalDenyProof` booleans.
 
 Managed-PF proof artifacts must include `denyLayerProbe.blocked: true`,
@@ -206,8 +208,8 @@ Managed-PF proof artifacts must include `denyLayerProbe.blocked: true`,
 `managedPf.enableTokenReleased: true`. They must also show non-zero sentinel
 rule counters, a zero application counter baseline, zero final application rule
 counters, complete PKTAP process attribution, an identity-consistent Candor
-process tree, and zero blocked or escaped Candor-attributed outbound TCP/UDP
-packets.
+process tree, parsed capture statistics with zero kernel drops, and zero blocked
+or escaped Candor-attributed outbound TCP/UDP packets.
 External-deny fallback artifacts are accepted only with explicit
 `externalDenyConfirmed: true`, complete PKTAP
 attribution, and the same zero-Candor-packet result.
