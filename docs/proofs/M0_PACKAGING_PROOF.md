@@ -148,6 +148,14 @@ non-root desktop user. The Linux job installs the native build and runtime
 packages needed for the Rust audio stack, SQLCipher key storage checks,
 Electron smoke, `xvfb-run`, and `unshare`.
 
+The macOS build runner is pinned to `macos-26-arm64` and asserts an SDK major
+version of at least 26. The current `apple-metal` dependency contains SDK 26
+symbol references that an older SDK cannot parse, even though those calls are
+runtime guarded. This build-host requirement is distinct from the app runtime
+contract: the build exports `MACOSX_DEPLOYMENT_TARGET=13.0`, the packaged app
+declares `LSMinimumSystemVersion` 13.0, and the DMG smoke verifies that plist
+value.
+
 The workflow's `m0-proof-audit` job downloads every matrix artifact and writes a
 combined `m0-combined-proof-audit-summary.json` so the full OS proof set can be
 checked in one place. It then runs strict audit mode every time. The workflow

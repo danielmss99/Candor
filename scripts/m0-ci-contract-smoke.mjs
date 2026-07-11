@@ -70,7 +70,7 @@ function requireOrder(before, after, label) {
 }
 
 const requiredPatterns = [
-  ["os: [windows-latest, macos-latest, ubuntu-latest]", "three-OS matrix"],
+  ["os: [windows-latest, macos-26-arm64, ubuntu-latest]", "three-OS matrix with pinned macOS SDK"],
   ["fail-fast: false", "non-short-circuiting matrix"],
   ["node-version: 22", "Electron-compatible Node.js version"],
   ["sudo apt-get install -y", "Linux native dependency install"],
@@ -79,6 +79,10 @@ const requiredPatterns = [
   ["iproute2", "Linux network namespace interface dependency"],
   ["util-linux", "Linux unshare dependency"],
   ["xvfb", "Linux Electron smoke dependency"],
+  ["Verify macOS build SDK", "pinned macOS SDK verification"],
+  ['xcrun --sdk macosx --show-sdk-version', "macOS SDK version discovery"],
+  ['test "$sdk_major" -ge 26', "macOS SDK 26 minimum"],
+  ['echo "MACOSX_DEPLOYMENT_TARGET=13.0" >> "$GITHUB_ENV"', "macOS 13 deployment target"],
   ["npm run v3:verify", "staged local verifier"],
   ["npm run electron:v3:dist", "release artifact build"],
   ["Configure Linux Chromium sandbox for runtime proof", "Linux sandbox preparation"],
@@ -241,6 +245,7 @@ requireFileOrder(
 
 for (const [pattern, label] of [
   ["node-version: 20", "Electron-incompatible Node.js version"],
+  ["macos-latest", "drifting macOS runner label"],
   ["--no-sandbox", "Chromium sandbox bypass flag"],
   ["ELECTRON_DISABLE_SANDBOX", "Chromium sandbox bypass environment variable"],
   ["enforce_strict_m0", "optional strict input"],

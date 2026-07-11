@@ -44,7 +44,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        os: [windows-latest, macos-26-arm64, ubuntu-latest]
 
     steps:
       - name: Checkout
@@ -58,6 +58,14 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify macOS build SDK
+        if: runner.os == 'macOS'
+        run: |
+          xcodebuild -version
+          sdk_major="$(xcrun --sdk macosx --show-sdk-version | cut -d. -f1)"
+          test "$sdk_major" -ge 26
+          echo "MACOSX_DEPLOYMENT_TARGET=13.0" >> "$GITHUB_ENV"
 
       - name: Install Linux native dependencies
         if: runner.os == 'Linux'
