@@ -192,37 +192,56 @@ function validateMacosManagedPf(payload, failures) {
   requireField(managed?.requested === true, "managedPf.requested must be true", failures);
   requireField(
     payload?.denyMechanism ===
-      "managed-pf user-scoped deny with PFLOG blocked-attempt and PKTAP escape attribution",
-    "denyMechanism must combine managed PF, PFLOG blocked-attempt attribution, and PKTAP escape attribution",
+      "managed-pf isolated-group deny with per-rule blocked-attempt counters and PKTAP escape attribution",
+    "denyMechanism must combine isolated-group PF counters and PKTAP escape attribution",
     failures,
   );
   requireField(typeof managed?.anchor === "string" && managed.anchor.length > 0, "managedPf.anchor must be recorded", failures);
   requireField(
     typeof managed?.rules === "string" &&
-      managed.rules.includes("block drop out log (user) quick"),
+      managed.rules.includes("block drop out quick"),
     "managedPf.rules must include the outbound block rule",
     failures,
   );
   requireField(
-    typeof managed?.rules === "string" && managed.rules.includes(" user "),
+    typeof managed?.rules === "string" &&
+      Number.isInteger(payload?.executionIdentity?.uid) &&
+      managed.rules.includes(` user ${payload.executionIdentity.uid}`),
     "managedPf.rules must scope the deny rule to the invoking desktop user",
     failures,
   );
   requireField(
-    typeof managed?.rules === "string" && managed.rules.includes("log (user)"),
-    "managedPf.rules must log blocked socket UID and PID evidence",
+    typeof managed?.rules === "string" &&
+      Number.isInteger(managed?.executionGid) &&
+      managed.rules.includes(` group ${managed.executionGid}`),
+    "managedPf.rules must scope the deny rule to the isolated execution group",
     failures,
   );
   requireField(managed?.anchorLoaded === true, "managed PF anchor must be loaded", failures);
   requireField(
-    managed?.pflogInterface === "pflog0",
-    "managed PF proof must record the pflog0 interface",
+    Number.isInteger(managed?.executionGid) && managed.executionGid > 0,
+    "managed PF proof must record the isolated execution GID",
     failures,
   );
-  requireField(managed?.pflogInterfaceReady === true, "pflog0 must be available during capture", failures);
   requireField(
-    managed?.pflogInterfaceCreated !== true || managed?.pflogInterfaceDestroyed === true,
-    "a proof-created pflog0 interface must be destroyed",
+    managed?.countersReset === true,
+    "managed PF application counters must be reset after the sentinel",
+    failures,
+  );
+  requireField(
+    managed?.sentinelRuleStats?.parsed === true && managed.sentinelRuleStats.packets > 0,
+    "managed PF sentinel counters must record blocked packets",
+    failures,
+  );
+  requireField(
+    managed?.applicationBaselineRuleStats?.parsed === true &&
+      managed.applicationBaselineRuleStats.packets === 0,
+    "managed PF application counter baseline must be zero",
+    failures,
+  );
+  requireField(
+    managed?.applicationRuleStats?.parsed === true && managed.applicationRuleStats.packets === 0,
+    "managed PF application counters must remain zero",
     failures,
   );
   requireField(managed?.anchorFlushed === true, "managed PF anchor must be flushed", failures);
@@ -1444,37 +1463,46 @@ function runSelfTest() {
   const validManagedMacosProof = {
     ok: true,
     proofKind: "m0-network-deny-macos",
-    denyMechanism: "managed-pf user-scoped deny with PFLOG blocked-attempt and PKTAP escape attribution",
+    denyMechanism:
+      "managed-pf isolated-group deny with per-rule blocked-attempt counters and PKTAP escape attribution",
     applicationUidNonRoot: true,
     applicationRunsAsRoot: false,
+    executionIdentity: {
+      user: "runner",
+      uid: 501,
+      gid: 62000,
+      groups: [62000],
+      isolatedGid: 62000,
+      processTreeComplete: true,
+    },
     interface: "pktap,all",
     packetCount: 0,
-    denyLayerProbe: { ...minimalValidDenyLayerProbe(), pid: 1234 },
+    denyLayerProbe: { ...minimalValidDenyLayerProbe(), pid: 1234, uid: 501, gid: 62000 },
     packetAttribution: {
       captureInterface: "pktap,all",
-      blockedCaptureInterface: "pflog0",
+      blockedMetadataSource: "PF per-rule packet counters scoped to an isolated execution GID",
       complete: true,
       packetOverflowCount: 0,
-      blockedPacketOverflowCount: 0,
       tcpdumpExitedBeforeCleanup: false,
-      pflogExitedBeforeCleanup: false,
       applicationPacketCount: 0,
       applicationEscapedPacketCount: 0,
       applicationBlockedPacketCount: 0,
-      denyProbeCaptured: true,
+      applicationBaselinePacketCount: 0,
+      denyProbeCounted: true,
       denyProbePacketCount: 1,
-      observedProcesses: [{ pid: 2000, ppid: 1999, command: "Candor v3 M0" }],
+      observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor v3 M0" }],
+      processIdentityMismatches: [],
     },
     managedPf: {
       requested: true,
       anchor: "com.apple/candor-v3-m0-network-deny-123",
-      rules: "block drop out log (user) quick proto { tcp udp } all user 501",
+      rules: "block drop out quick proto { tcp udp } all user 501 group 62000",
       anchorLoaded: true,
-      pflogInterface: "pflog0",
-      pflogInterfaceInitiallyPresent: false,
-      pflogInterfaceCreated: true,
-      pflogInterfaceReady: true,
-      pflogInterfaceDestroyed: true,
+      executionGid: 62000,
+      sentinelRuleStats: { parsed: true, ruleCount: 1, packets: 1, bytes: 64 },
+      applicationBaselineRuleStats: { parsed: true, ruleCount: 1, packets: 0, bytes: 0 },
+      applicationRuleStats: { parsed: true, ruleCount: 1, packets: 0, bytes: 0 },
+      countersReset: true,
       anchorFlushed: true,
       enableTokenReleased: true,
       cleanupError: null,
@@ -1495,14 +1523,33 @@ function runSelfTest() {
     "managed macOS network proof must fail without PF cleanup evidence",
   );
 
-  const leakedPflogManagedMacosProof = cloneJson(validManagedMacosProof);
-  leakedPflogManagedMacosProof.managedPf.pflogInterfaceDestroyed = false;
-  const leakedPflogManagedMacosFailures = validateNetworkProof("macos", leakedPflogManagedMacosProof);
+  const staleCounterManagedMacosProof = cloneJson(validManagedMacosProof);
+  staleCounterManagedMacosProof.managedPf.applicationRuleStats.packets = 1;
+  const staleCounterManagedMacosFailures = validateNetworkProof("macos", staleCounterManagedMacosProof);
   assertSelfTest(
-    leakedPflogManagedMacosFailures.some((failure) =>
-      failure.includes("proof-created pflog0 interface must be destroyed"),
+    staleCounterManagedMacosFailures.some((failure) =>
+      failure.includes("managed PF application counters must remain zero"),
     ),
-    "managed macOS network proof must fail when its disposable pflog0 interface leaks",
+    "managed macOS network proof must fail when its isolated-group PF counters record an attempt",
+  );
+
+  const escapedIdentityManagedMacosProof = cloneJson(validManagedMacosProof);
+  escapedIdentityManagedMacosProof.executionIdentity.processTreeComplete = false;
+  escapedIdentityManagedMacosProof.packetAttribution.processIdentityMismatches = [
+    { pid: 2001, uid: 501, gid: 20, command: "Candor v3 M0 Helper" },
+  ];
+  const escapedIdentityManagedMacosFailures = validateNetworkProof(
+    "macos",
+    escapedIdentityManagedMacosProof,
+  );
+  assertSelfTest(
+    escapedIdentityManagedMacosFailures.some((failure) =>
+      failure.includes("must retain the isolated non-root execution identity"),
+    ) &&
+      escapedIdentityManagedMacosFailures.some((failure) =>
+        failure.includes("must not escape the isolated execution identity"),
+      ),
+    "managed macOS network proof must fail when a packaged process escapes the isolated GID",
   );
 
   const leakingManagedMacosProof = cloneJson(validManagedMacosProof);
@@ -1628,28 +1675,27 @@ function validateNetworkProof(osName, payload) {
     );
     if (payload?.managedPf?.requested === true) {
       requireField(
-        attribution?.blockedCaptureInterface === "pflog0",
-        "packetAttribution.blockedCaptureInterface must be pflog0",
+        attribution?.blockedMetadataSource ===
+          "PF per-rule packet counters scoped to an isolated execution GID",
+        "blocked-attempt evidence must come from isolated-group PF counters",
+        failures,
+      );
+      requireField(
+        payload?.executionIdentity?.uid > 0 &&
+          payload?.executionIdentity?.gid === payload?.managedPf?.executionGid &&
+          payload?.executionIdentity?.isolatedGid === payload?.managedPf?.executionGid &&
+          payload?.executionIdentity?.processTreeComplete === true,
+        "macOS packaged process tree must retain the isolated non-root execution identity",
         failures,
       );
     }
     requireField(attribution?.complete === true, "PKTAP process attribution must be complete", failures);
     requireField(attribution?.packetOverflowCount === 0, "PKTAP packet capture must not overflow", failures);
-    if (payload?.managedPf?.requested === true) {
-      requireField(attribution?.blockedPacketOverflowCount === 0, "PFLOG packet capture must not overflow", failures);
-    }
     requireField(
       attribution?.tcpdumpExitedBeforeCleanup === false,
       "PKTAP capture must remain active through the packaged smoke",
       failures,
     );
-    if (payload?.managedPf?.requested === true) {
-      requireField(
-        attribution?.pflogExitedBeforeCleanup === false,
-        "PFLOG capture must remain active through the packaged smoke",
-        failures,
-      );
-    }
     requireField(
       attribution?.applicationPacketCount === 0 &&
         attribution?.applicationEscapedPacketCount === 0 &&
@@ -1663,6 +1709,12 @@ function validateNetworkProof(osName, payload) {
       "PKTAP proof must record the observed Candor process tree",
       failures,
     );
+    requireField(
+      Array.isArray(attribution?.processIdentityMismatches) &&
+        attribution.processIdentityMismatches.length === 0,
+      "Candor process tree must not escape the isolated execution identity",
+      failures,
+    );
     if (payload?.managedPf?.requested === true) {
       requireField(
         Number.isInteger(payload?.denyLayerProbe?.pid) && payload.denyLayerProbe.pid > 0,
@@ -1670,8 +1722,19 @@ function validateNetworkProof(osName, payload) {
         failures,
       );
       requireField(
-        attribution?.denyProbeCaptured === true && attribution?.denyProbePacketCount > 0,
-        "PFLOG must capture the blocked sentinel with process attribution",
+        payload?.denyLayerProbe?.uid === payload?.executionIdentity?.uid &&
+          payload?.denyLayerProbe?.gid === payload?.executionIdentity?.isolatedGid,
+        "managed PF deny probe must run under the isolated execution identity",
+        failures,
+      );
+      requireField(
+        attribution?.denyProbeCounted === true && attribution?.denyProbePacketCount > 0,
+        "isolated-group PF counters must record the blocked sentinel",
+        failures,
+      );
+      requireField(
+        attribution?.applicationBaselinePacketCount === 0,
+        "isolated-group PF application counter baseline must be zero",
         failures,
       );
     }

@@ -99,28 +99,32 @@ function parsePktapPacket(line) {
   };
 }
 
-function parsePflogPacket(line) {
-  const identity = line.match(/\[\s*uid\s+(\d+),\s*pid\s+(\d+)\s*\]/);
+function parsePfRuleStats(text) {
+  const packetMatches = [...text.matchAll(/\bPackets:\s*(\d+)/g)];
+  const byteMatches = [...text.matchAll(/\bBytes:\s*(\d+)/g)];
   return {
-    line,
-    uid: identity ? Number.parseInt(identity[1], 10) : null,
-    pid: identity ? Number.parseInt(identity[2], 10) : null,
-    direction: /\bblock\s+out\b/.test(line) ? "out" : null,
+    parsed: packetMatches.length > 0,
+    ruleCount: packetMatches.length,
+    packets: packetMatches.reduce((total, match) => total + Number.parseInt(match[1], 10), 0),
+    bytes: byteMatches.reduce((total, match) => total + Number.parseInt(match[1], 10), 0),
+    raw: text.trim(),
   };
 }
 
 function processTreeSnapshot(rootPid) {
   if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
-  const result = spawnSync("ps", ["-axo", "pid=,ppid=,comm="], { encoding: "utf8" });
+  const result = spawnSync("ps", ["-axo", "pid=,ppid=,uid=,gid=,comm="], { encoding: "utf8" });
   if (result.status !== 0) return [];
   const processes = result.stdout
     .split(/\r?\n/)
-    .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/))
+    .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/))
     .filter(Boolean)
     .map((match) => ({
       pid: Number.parseInt(match[1], 10),
       ppid: Number.parseInt(match[2], 10),
-      command: match[3].trim(),
+      uid: Number.parseInt(match[3], 10),
+      gid: Number.parseInt(match[4], 10),
+      command: match[5].trim(),
     }));
   const descendants = new Set([rootPid]);
   let changed = true;
@@ -163,11 +167,12 @@ function runPacketParserSelfTest() {
   ) {
     throw new Error("macOS PKTAP effective-process parser self-test failed");
   }
-  const blocked = parsePflogPacket(
-    "00:00:00.000000 rule 0/(match) [uid 501, pid 83664] block out on en0: 10.0.0.1.1 > 1.1.1.1.443",
-  );
-  if (blocked.uid !== 501 || blocked.pid !== 83664 || blocked.direction !== "out") {
-    throw new Error("macOS PFLOG packet parser self-test failed");
+  const ruleStats = parsePfRuleStats(`
+block drop out quick proto tcp all user = 501 group = 62000
+  [ Evaluations: 42        Packets: 3         Bytes: 180         States: 0     ]
+`);
+  if (!ruleStats.parsed || ruleStats.ruleCount !== 1 || ruleStats.packets !== 3 || ruleStats.bytes !== 180) {
+    throw new Error("macOS PF rule counter parser self-test failed");
   }
 }
 
@@ -186,6 +191,8 @@ function finish(blocked, reason) {
   console.log(JSON.stringify({
     attempted: true,
     pid: process.pid,
+    uid: process.getuid(),
+    gid: process.getgid(),
     target: "1.1.1.1:443",
     blocked,
     reason: String(reason ?? ""),
@@ -206,7 +213,7 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ifconfig", "ps", "node"];
+const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "node"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
@@ -229,8 +236,7 @@ if (validateOnly) {
           process.platform === "darwin" &&
           root &&
           baseCommandsAvailable &&
-          commands.pfctl &&
-          commands.ifconfig,
+          commands.pfctl,
         canRunExternalDenyProof: process.platform === "darwin" && root && baseCommandsAvailable,
       },
       null,
@@ -255,14 +261,60 @@ for (const command of ["bash", "sudo", "tcpdump", "ps", "node"]) {
 if (managedPf && !commandExists("pfctl")) {
   throw new Error("Required command not found: pfctl");
 }
-if (managedPf && !commandExists("ifconfig")) {
-  throw new Error("Required command not found: ifconfig");
-}
-
 const invokingUser = process.env.SUDO_USER?.trim();
 const invokingUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
 if (!invokingUser || invokingUser === "root" || !Number.isInteger(invokingUid) || invokingUid <= 0) {
   throw new Error("macOS network-deny proof requires sudo from a non-root user so the app runs with desktop-user custody.");
+}
+
+function selectUnusedExecutionGid() {
+  const result = spawnSync("ps", ["-axo", "gid="], { encoding: "utf8" });
+  if (result.status !== 0) {
+    throw new Error(`Unable to enumerate active macOS process groups: ${result.stderr.trim()}`);
+  }
+  const used = new Set(
+    result.stdout
+      .split(/\r?\n/)
+      .map((value) => Number.parseInt(value.trim(), 10))
+      .filter(Number.isInteger),
+  );
+  for (let offset = 0; offset < 5000; offset += 1) {
+    const candidate = 60000 + ((process.pid + offset) % 5000);
+    if (!used.has(candidate)) return candidate;
+  }
+  throw new Error("Unable to reserve an unused execution GID for the macOS proof");
+}
+
+const executionGid = selectUnusedExecutionGid();
+const invokingHome = runCommand("sudo", ["-u", invokingUser, "-H", "sh", "-c", 'printf "%s" "$HOME"']).stdout.trim();
+const executionEnvironment = {
+  ...process.env,
+  HOME: invokingHome,
+  USER: invokingUser,
+  LOGNAME: invokingUser,
+};
+const identityResult = spawnSync(
+  process.execPath,
+  [
+    "-e",
+    "console.log(JSON.stringify({ uid: process.getuid(), gid: process.getgid(), groups: process.getgroups() }))",
+  ],
+  {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: executionEnvironment,
+    uid: invokingUid,
+    gid: executionGid,
+  },
+);
+if (identityResult.error || identityResult.status !== 0) {
+  throw new Error(
+    `Unable to launch the macOS proof identity: ${identityResult.error?.message ?? identityResult.stderr.trim()}`,
+  );
+}
+const executionIdentity = JSON.parse(identityResult.stdout.trim());
+if (executionIdentity.uid !== invokingUid || executionIdentity.gid !== executionGid) {
+  throw new Error("macOS proof identity did not retain the requested non-root UID and isolated GID");
 }
 
 const executable = resolveExecutable(explicitAppPath);
@@ -271,7 +323,7 @@ const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-darwin-${proces
 const networkProofPath = join(proofDir, `m0-network-deny-macos-${timestamp}.json`);
 const captureInterface = "pktap,all";
 const pfAnchor = `com.apple/candor-v3-m0-network-deny-${process.pid}`;
-const pfRules = `block drop out log (user) quick proto { tcp udp } all user ${invokingUid}\n`;
+const pfRules = `block drop out quick proto { tcp udp } all user ${invokingUid} group ${executionGid}\n`;
 const pfState = {
   requested: managedPf,
   anchor: managedPf ? pfAnchor : null,
@@ -279,43 +331,36 @@ const pfState = {
   enabled: false,
   enableToken: null,
   anchorLoaded: false,
-  pflogInterface: managedPf ? "pflog0" : null,
-  pflogInterfaceInitiallyPresent: null,
-  pflogInterfaceCreated: false,
-  pflogInterfaceReady: false,
-  pflogInterfaceDestroyed: false,
+  executionGid: managedPf ? executionGid : null,
+  sentinelRuleStats: null,
+  applicationBaselineRuleStats: null,
+  applicationRuleStats: null,
+  countersReset: false,
   anchorFlushed: false,
   enableTokenReleased: false,
   cleanupError: null,
 };
 
-function interfaceExists(name) {
-  const result = spawnSync("ifconfig", [name], {
-    cwd: repoRoot,
-    encoding: "utf8",
-  });
-  return result.status === 0;
+function readManagedPfRuleStats() {
+  if (!managedPf) return null;
+  const result = runCommand("pfctl", ["-a", pfAnchor, "-v", "-v", "-s", "rules"]);
+  const stats = parsePfRuleStats(result.stdout);
+  if (!stats.parsed || stats.ruleCount !== 1) {
+    throw new Error(`Unable to parse the managed PF rule counters: ${result.stdout.trim()}`);
+  }
+  return stats;
 }
 
-function ensureManagedPflogInterface() {
+function resetManagedPfRuleStats() {
   if (!managedPf) return;
-  pfState.pflogInterfaceInitiallyPresent = interfaceExists("pflog0");
-  if (!pfState.pflogInterfaceInitiallyPresent) {
-    runCommand("ifconfig", ["pflog0", "create"]);
-    pfState.pflogInterfaceCreated = true;
-  }
-  runCommand("ifconfig", ["pflog0", "up"]);
-  pfState.pflogInterfaceReady = interfaceExists("pflog0");
-  if (!pfState.pflogInterfaceReady) {
-    throw new Error("pflog0 was not available after setup");
-  }
+  runCommand("pfctl", ["-a", pfAnchor, "-z"]);
+  pfState.countersReset = true;
 }
 
 function enableManagedPfDeny() {
   if (!managedPf) return;
 
   try {
-    ensureManagedPflogInterface();
     const enable = runCommand("pfctl", ["-E"]);
     pfState.enabled = true;
     const tokenMatch = `${enable.stdout}\n${enable.stderr}`.match(/Token\s*:\s*([^\s]+)/i);
@@ -358,14 +403,6 @@ function cleanupManagedPfDeny() {
     pfState.enableTokenReleased = true;
   }
 
-  if (pfState.pflogInterfaceCreated) {
-    try {
-      runCommand("ifconfig", ["pflog0", "destroy"]);
-      pfState.pflogInterfaceDestroyed = true;
-    } catch (error) {
-      pfState.cleanupError = [pfState.cleanupError, error.message].filter(Boolean).join("; ");
-    }
-  }
 }
 
 mkdirSync(proofDir, { recursive: true });
@@ -413,43 +450,10 @@ tcpdump.on("error", (error) => {
   tcpdumpSpawnError = error;
 });
 
-const pflogDump = managedPf
-  ? spawn("tcpdump", ["-n", "-l", "-e", "-vv", "-ttt", "-i", "pflog0"], {
-      cwd: repoRoot,
-      stdio: ["ignore", "pipe", "pipe"],
-    })
-  : null;
-const blockedPackets = [];
-let blockedPacketOverflowCount = 0;
-let pflogBuffer = "";
-let pflogError = "";
-let pflogSpawnError = null;
-let pflogExitedBeforeCleanup = false;
-if (pflogDump) {
-  pflogDump.stdout.on("data", (chunk) => {
-    pflogBuffer += chunk.toString("utf8");
-    let newlineIndex = pflogBuffer.indexOf("\n");
-    while (newlineIndex >= 0) {
-      const line = pflogBuffer.slice(0, newlineIndex).trim();
-      pflogBuffer = pflogBuffer.slice(newlineIndex + 1);
-      if (line) {
-        if (blockedPackets.length < maxCapturedPackets) blockedPackets.push(line);
-        else blockedPacketOverflowCount += 1;
-      }
-      newlineIndex = pflogBuffer.indexOf("\n");
-    }
-  });
-  pflogDump.stderr.on("data", (chunk) => {
-    pflogError += chunk.toString("utf8");
-  });
-  pflogDump.on("error", (error) => {
-    pflogSpawnError = error;
-  });
-}
-
 let stdout = "";
 let stderr = "";
 let smokeExit = { code: null, signal: null };
+let proofExecutionError = null;
 let denyLayerProbe = {
   attempted: false,
   blocked: null,
@@ -462,17 +466,12 @@ try {
   if (managedPf) {
     let probeStdout = "";
     let probeStderr = "";
-    const probe = spawn("sudo", [
-      "-u",
-      invokingUser,
-      "-H",
-      "env",
-      process.execPath,
-      "-e",
-      denyProbeScript(),
-    ], {
+    const probe = spawn(process.execPath, ["-e", denyProbeScript()], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
+      env: executionEnvironment,
+      uid: invokingUid,
+      gid: executionGid,
     });
     probe.stdout.on("data", (chunk) => {
       probeStdout += chunk.toString("utf8");
@@ -489,12 +488,19 @@ try {
       stderr: probeStderr.trim(),
       error: null,
     };
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+    pfState.sentinelRuleStats = readManagedPfRuleStats();
+    resetManagedPfRuleStats();
+    pfState.applicationBaselineRuleStats = readManagedPfRuleStats();
   }
 
   if (
-    (!managedPf || denyLayerProbe.blocked === true) &&
-    !tcpdumpSpawnError &&
-    (!managedPf || !pflogSpawnError)
+    (!managedPf ||
+      (denyLayerProbe.blocked === true &&
+        pfState.sentinelRuleStats?.packets > 0 &&
+        pfState.countersReset &&
+        pfState.applicationBaselineRuleStats?.packets === 0)) &&
+    !tcpdumpSpawnError
   ) {
     const forwardedEnvironment = {
       CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
@@ -507,20 +513,16 @@ try {
       GITHUB_REF: process.env.GITHUB_REF,
       RUNNER_OS: process.env.RUNNER_OS,
     };
-    const environmentArguments = Object.entries(forwardedEnvironment)
-      .filter(([, value]) => typeof value === "string" && value.length > 0)
-      .map(([name, value]) => `${name}=${value}`);
-    const smoke = spawn("sudo", [
-      "-u",
-      invokingUser,
-      "-H",
-      "env",
-      ...environmentArguments,
-      process.execPath,
-      "scripts/m0-packaged-smoke.mjs",
-    ], {
+    const smokeEnvironment = { ...executionEnvironment };
+    for (const [name, value] of Object.entries(forwardedEnvironment)) {
+      if (typeof value === "string" && value.length > 0) smokeEnvironment[name] = value;
+    }
+    const smoke = spawn(process.execPath, ["scripts/m0-packaged-smoke.mjs"], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
+      env: smokeEnvironment,
+      uid: invokingUid,
+      gid: executionGid,
     });
     const observeProcessTree = () => {
       for (const process of processTreeSnapshot(smoke.pid)) {
@@ -542,27 +544,20 @@ try {
       clearInterval(processObserver);
     }
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 750));
+    if (managedPf) pfState.applicationRuleStats = readManagedPfRuleStats();
   }
+} catch (error) {
+  proofExecutionError = error instanceof Error ? error.message : String(error);
 } finally {
   if (!tcpdumpSpawnError) {
     tcpdumpExitedBeforeCleanup = tcpdump.exitCode !== null || tcpdump.signalCode !== null;
     if (!tcpdumpExitedBeforeCleanup) tcpdump.kill("SIGINT");
     await waitForExit(tcpdump).catch(() => null);
   }
-  if (pflogDump && !pflogSpawnError) {
-    pflogExitedBeforeCleanup = pflogDump.exitCode !== null || pflogDump.signalCode !== null;
-    if (!pflogExitedBeforeCleanup) pflogDump.kill("SIGINT");
-    await waitForExit(pflogDump).catch(() => null);
-  }
   const trailingPacket = packetBuffer.trim();
   if (trailingPacket) {
     if (packets.length < maxCapturedPackets) packets.push(trailingPacket);
     else packetOverflowCount += 1;
-  }
-  const trailingBlockedPacket = pflogBuffer.trim();
-  if (trailingBlockedPacket) {
-    if (blockedPackets.length < maxCapturedPackets) blockedPackets.push(trailingBlockedPacket);
-    else blockedPacketOverflowCount += 1;
   }
   cleanupManagedPfDeny();
 }
@@ -571,20 +566,14 @@ const smokeProof = existsSync(smokeProofPath)
   ? JSON.parse(readFileSync(smokeProofPath, "utf8"))
   : null;
 const parsedPackets = packets.map(parsePktapPacket);
-const parsedBlockedPackets = blockedPackets.map(parsePflogPacket);
 const observedProcessIds = new Set(observedProcesses.keys());
+const observedProcessList = [...observedProcesses.values()].sort((left, right) => left.pid - right.pid);
 const escapedApplicationPackets = parsedPackets.filter(
   (packet) =>
     observedProcessIds.has(packet.pid) ||
     observedProcessIds.has(packet.effectivePid) ||
     isCandorProcessName(packet.processName) ||
     isCandorProcessName(packet.effectiveProcessName),
-);
-const blockedApplicationPackets = parsedBlockedPackets.filter(
-  (packet) => packet.uid === invokingUid && observedProcessIds.has(packet.pid),
-);
-const denyProbePackets = parsedBlockedPackets.filter(
-  (packet) => Number.isInteger(denyLayerProbe.pid) && packet.pid === denyLayerProbe.pid,
 );
 const packetsWithoutProcessMetadata = parsedPackets.filter(
   (packet) =>
@@ -596,80 +585,84 @@ const packetsWithoutProcessMetadata = parsedPackets.filter(
         typeof packet.effectiveProcessName !== "string" ||
         packet.effectiveProcessName.length === 0)),
 );
-const blockedPacketsWithoutProcessMetadata = parsedBlockedPackets.filter(
-  (packet) =>
-    packet.direction !== "out" ||
-    !Number.isInteger(packet.uid) ||
-    !Number.isInteger(packet.pid),
+const processIdentityMismatches = observedProcessList.filter(
+  (process) => process.uid !== invokingUid || process.gid !== executionGid,
 );
-const applicationPacketCount =
-  escapedApplicationPackets.length + blockedApplicationPackets.length;
+const denyProbePacketCount = managedPf ? (pfState.sentinelRuleStats?.packets ?? 0) : 0;
+const applicationBlockedPacketCount = managedPf ? (pfState.applicationRuleStats?.packets ?? 0) : 0;
+const applicationPacketCount = escapedApplicationPackets.length + applicationBlockedPacketCount;
 const packetAttribution = {
   captureInterface,
-  blockedCaptureInterface: managedPf ? "pflog0" : null,
   metadataSource: "macOS PKTAP process name, PID, and direction",
-  blockedMetadataSource: managedPf ? "PF log(user) UID and PID" : null,
+  blockedMetadataSource: managedPf
+    ? "PF per-rule packet counters scoped to an isolated execution GID"
+    : null,
   observedPacketCount: parsedPackets.length,
-  blockedAttemptPacketCount: parsedBlockedPackets.length,
+  blockedAttemptPacketCount: applicationBlockedPacketCount,
   packetOverflowCount,
-  blockedPacketOverflowCount,
   applicationPacketCount,
   applicationEscapedPacketCount: escapedApplicationPackets.length,
-  applicationBlockedPacketCount: blockedApplicationPackets.length,
-  applicationPacketSamples: [
-    ...escapedApplicationPackets.map((packet) => ({ capture: "pktap", ...packet })),
-    ...blockedApplicationPackets.map((packet) => ({ capture: "pflog0", ...packet })),
-  ].slice(0, 50),
+  applicationBlockedPacketCount,
+  applicationPacketSamples: escapedApplicationPackets
+    .map((packet) => ({ capture: "pktap", ...packet }))
+    .slice(0, 50),
   hostBackgroundPacketCount: parsedPackets.length - escapedApplicationPackets.length,
   hostBackgroundPacketSamples: parsedPackets
     .filter((packet) => !escapedApplicationPackets.includes(packet))
     .slice(0, 25),
-  blockedHostBackgroundPacketCount:
-    parsedBlockedPackets.length - blockedApplicationPackets.length - denyProbePackets.length,
-  blockedHostBackgroundPacketSamples: parsedBlockedPackets
-    .filter((packet) => !blockedApplicationPackets.includes(packet) && !denyProbePackets.includes(packet))
-    .slice(0, 25),
   packetsWithoutProcessMetadata: packetsWithoutProcessMetadata.slice(0, 25),
-  blockedPacketsWithoutProcessMetadata: blockedPacketsWithoutProcessMetadata.slice(0, 25),
-  observedProcesses: [...observedProcesses.values()].sort((left, right) => left.pid - right.pid),
-  denyProbePacketCount: denyProbePackets.length,
-  denyProbeCaptured: !managedPf || denyProbePackets.length > 0,
+  observedProcesses: observedProcessList,
+  processIdentityMismatches: processIdentityMismatches.slice(0, 25),
+  denyProbePacketCount,
+  denyProbeCounted: !managedPf || denyProbePacketCount > 0,
+  applicationBaselinePacketCount: managedPf
+    ? (pfState.applicationBaselineRuleStats?.packets ?? null)
+    : null,
   complete:
     !tcpdumpSpawnError &&
     !tcpdumpExitedBeforeCleanup &&
     packetOverflowCount === 0 &&
     packetsWithoutProcessMetadata.length === 0 &&
+    observedProcessList.length > 0 &&
+    processIdentityMismatches.length === 0 &&
     (!managedPf ||
-      (!pflogSpawnError &&
-        !pflogExitedBeforeCleanup &&
-        blockedPacketOverflowCount === 0 &&
-        blockedPacketsWithoutProcessMetadata.length === 0)),
+      (pfState.sentinelRuleStats?.parsed === true &&
+        pfState.applicationBaselineRuleStats?.parsed === true &&
+        pfState.applicationBaselineRuleStats.packets === 0 &&
+        pfState.applicationRuleStats?.parsed === true)),
   tcpdumpExitedBeforeCleanup,
-  pflogExitedBeforeCleanup,
 };
 
 const proof = {
   ok:
+    !proofExecutionError &&
     smokeExit.code === 0 &&
     smokeProof?.ok === true &&
     (!managedPf || denyLayerProbe.blocked === true) &&
-    packetAttribution.denyProbeCaptured &&
+    packetAttribution.denyProbeCounted &&
     packetAttribution.complete &&
     applicationPacketCount === 0 &&
     (!managedPf ||
       (pfState.anchorLoaded &&
-        pfState.pflogInterfaceReady &&
-        (!pfState.pflogInterfaceCreated || pfState.pflogInterfaceDestroyed) &&
+        pfState.countersReset &&
         pfState.anchorFlushed &&
         pfState.enableTokenReleased &&
         !pfState.cleanupError)),
   proofKind: "m0-network-deny-macos",
   generatedAt: new Date().toISOString(),
   denyMechanism: managedPf
-    ? "managed-pf user-scoped deny with PFLOG blocked-attempt and PKTAP escape attribution"
+    ? "managed-pf isolated-group deny with per-rule blocked-attempt counters and PKTAP escape attribution"
     : "operator-confirmed external deny layer plus PKTAP process attribution",
-  applicationUidNonRoot: invokingUid > 0,
-  applicationRunsAsRoot: false,
+  applicationUidNonRoot: executionIdentity.uid > 0,
+  applicationRunsAsRoot: executionIdentity.uid === 0,
+  executionIdentity: {
+    user: invokingUser,
+    uid: executionIdentity.uid,
+    gid: executionIdentity.gid,
+    groups: executionIdentity.groups,
+    isolatedGid: executionGid,
+    processTreeComplete: observedProcessList.length > 0 && processIdentityMismatches.length === 0,
+  },
   externalDenyConfirmed,
   managedPf: pfState,
   executable,
@@ -681,19 +674,24 @@ const proof = {
   packetAttribution,
   stdout: stdout.trim(),
   stderr: stderr.trim(),
+  proofExecutionError,
   tcpdumpStderr: tcpdumpError.trim(),
   tcpdumpSpawnError: tcpdumpSpawnError?.message ?? null,
-  pflogStderr: pflogError.trim(),
-  pflogSpawnError: pflogSpawnError?.message ?? null,
   smokeProof,
 };
 writeJson(networkProofPath, proof);
 
+if (proofExecutionError) {
+  throw new Error(`macOS network proof execution failed: ${proofExecutionError}. Proof written to ${networkProofPath}`);
+}
 if (managedPf && denyLayerProbe.blocked !== true) {
   throw new Error(`macOS deny-layer sentinel connected or did not prove blocked. Proof written to ${networkProofPath}`);
 }
-if (!packetAttribution.denyProbeCaptured) {
-  throw new Error(`macOS PFLOG did not capture the blocked sentinel with its process PID. Proof written to ${networkProofPath}`);
+if (!packetAttribution.denyProbeCounted) {
+  throw new Error(`macOS PF counters did not record the isolated-group sentinel. Proof written to ${networkProofPath}`);
+}
+if (managedPf && packetAttribution.applicationBaselinePacketCount !== 0) {
+  throw new Error(`macOS PF application counters did not reset to zero. Proof written to ${networkProofPath}`);
 }
 if (!packetAttribution.complete) {
   throw new Error(`macOS PKTAP process attribution was incomplete. Proof written to ${networkProofPath}`);
@@ -702,7 +700,9 @@ if (smokeExit.code !== 0) {
   throw new Error(`macOS packaged smoke failed under confirmed deny layer. Proof written to ${networkProofPath}`);
 }
 if (applicationPacketCount > 0) {
-  throw new Error(`macOS PFLOG or PKTAP observed Candor-attributed outbound packets. Proof written to ${networkProofPath}`);
+  throw new Error(
+    `macOS PF counters or PKTAP observed Candor-attributed outbound packets. Proof written to ${networkProofPath}`,
+  );
 }
 if (!smokeProof?.ok) {
   throw new Error(`macOS smoke proof missing or failed: ${smokeProofPath}`);
