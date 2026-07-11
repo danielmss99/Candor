@@ -3,7 +3,11 @@
   "private": true,
   "version": "2.0.0",
   "description": "Local-only desktop meeting recorder for Candor v3.",
-  "author": "Candor",
+  "author": {
+    "name": "Candor",
+    "email": "danielmss99@users.noreply.github.com"
+  },
+  "desktopName": "Candor",
   "license": "MIT",
   "main": "dist-v3/electron/main.js",
   "type": "module",

@@ -12,6 +12,7 @@ const macosNetworkProof = readFileSync(resolve(repoRoot, "scripts", "m0-network-
 const proofAudit = readFileSync(resolve(repoRoot, "scripts", "m0-proof-audit.mjs"), "utf8");
 const artifactManifest = readFileSync(resolve(repoRoot, "scripts", "m0-artifact-manifest.mjs"), "utf8");
 const coreBuildScript = readFileSync(resolve(repoRoot, "crates", "candor-core", "build.rs"), "utf8");
+const electronBuilder = readFileSync(resolve(repoRoot, "electron-builder.v3.yml"), "utf8");
 const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "utf8");
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
@@ -187,6 +188,10 @@ for (const [contents, pattern, label] of [
   [m4RealLocalInstruct, "--self-test", "M4 real local instruct quality self-test"],
   [m4RealLocalInstructDoc, "does not download either asset", "M4 real local instruct no-download documentation"],
   [packageJson, "\"v3:goal-audit\"", "goal audit npm script"],
+  [packageJson, "\"email\": \"danielmss99@users.noreply.github.com\"", "Linux package maintainer email"],
+  [packageJson, "\"desktopName\": \"Candor\"", "Linux desktop application identity"],
+  [electronBuilder, "category: Office", "Linux desktop category"],
+  [electronBuilder, "syncDesktopName: true", "Linux desktop name synchronization"],
   [packageJson, "\"v3:goal-audit:strict\"", "strict goal audit npm script"],
   [packageJson, "\"m4:local-instruct-preflight\"", "M4 local instruct preflight npm script"],
   [packageJson, "\"m4:local-instruct-preflight:strict\"", "strict M4 local instruct preflight npm script"],
