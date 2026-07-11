@@ -19,6 +19,8 @@ const screenshotPath = join(
   "proofs",
   `m3-product-surface${screenshotLabel ? `-${screenshotLabel}` : ""}-${process.platform}-${process.arch}.png`,
 );
+const minimumSmokeScreenshotWidth = 960;
+const minimumSmokeScreenshotHeight = 600;
 
 function defaultExecutableCandidates() {
   if (process.platform === "win32") {
@@ -341,8 +343,8 @@ function assertSmokePayload(payload) {
     payload.rendererScreenshot?.forcedWindowRepaint !== true ||
     payload.rendererScreenshot?.warmupCapture !== true ||
     payload.rendererScreenshot?.bytes < 10_000 ||
-    payload.rendererScreenshot?.width < 1000 ||
-    payload.rendererScreenshot?.height < 700
+    payload.rendererScreenshot?.width < minimumSmokeScreenshotWidth ||
+    payload.rendererScreenshot?.height < minimumSmokeScreenshotHeight
   ) {
     throw new Error("Packaged smoke did not capture a nontrivial renderer screenshot.");
   }
@@ -353,12 +355,14 @@ function assertSmokePayload(payload) {
   const requestedHeight = Number(payload.requestedViewport?.height ?? 0);
   const widthScale = Number(payload.rendererScreenshot?.width ?? 0) / requestedWidth;
   const heightScale = Number(payload.rendererScreenshot?.height ?? 0) / requestedHeight;
+  const minimumWidthScale = Math.min(0.9, minimumSmokeScreenshotWidth / requestedWidth);
+  const minimumHeightScale = Math.min(0.7, minimumSmokeScreenshotHeight / requestedHeight);
   if (
     requestedWidth < 960 ||
     requestedHeight < 700 ||
-    widthScale < 0.9 ||
+    widthScale < minimumWidthScale ||
     widthScale > 3 ||
-    heightScale < 0.7 ||
+    heightScale < minimumHeightScale ||
     heightScale > 3
   ) {
     throw new Error("Packaged smoke screenshot did not reflect the requested desktop viewport.");
@@ -373,8 +377,8 @@ function assertSmokePayload(payload) {
       screenshot?.forcedWindowRepaint !== true ||
       screenshot?.warmupCapture !== true ||
       screenshot?.bytes < 10_000 ||
-      screenshot?.width < 1000 ||
-      screenshot?.height < 700 ||
+      screenshot?.width < minimumSmokeScreenshotWidth ||
+      screenshot?.height < minimumSmokeScreenshotHeight ||
       screenshot?.bodyTextCharacters < 150
     ) {
       throw new Error(`Packaged renderer did not capture the ${view} first-run view.`);
@@ -391,8 +395,8 @@ function assertSmokePayload(payload) {
       screenshot?.forcedWindowRepaint !== true ||
       screenshot?.warmupCapture !== true ||
       screenshot?.bytes < 10_000 ||
-      screenshot?.width < 1000 ||
-      screenshot?.height < 700 ||
+      screenshot?.width < minimumSmokeScreenshotWidth ||
+      screenshot?.height < minimumSmokeScreenshotHeight ||
       screenshot?.navigation?.clicked !== true ||
       screenshot?.navigation?.currentView !== view ||
       screenshot?.navigation?.bodyTextCharacters < 150
@@ -795,7 +799,31 @@ if (!existsSync(screenshotPath)) {
 }
 
 const payload = JSON.parse(readFileSync(outputPath, "utf8"));
-assertSmokePayload(payload);
+try {
+  assertSmokePayload(payload);
+} catch (error) {
+  mkdirSync(dirname(proofOutputPath), { recursive: true });
+  writeFileSync(
+    proofOutputPath,
+    JSON.stringify(
+      {
+        ...payload,
+        ok: false,
+        proofKind: "m0-packaged-runtime-smoke",
+        verifiedBy: "scripts/m0-packaged-smoke.mjs",
+        verificationFailure: error instanceof Error ? error.message : String(error),
+        ci: ciProvenance(),
+        proofWrittenAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+  rmSync(outputPath, { force: true });
+  rmSync(smokeDataDir, { recursive: true, force: true });
+  throw error;
+}
 const rendererScreenshotVisualEvidence = pngVisualEvidence(screenshotPath);
 if (!rendererScreenshotVisualEvidence.nonBlank) {
   throw new Error(

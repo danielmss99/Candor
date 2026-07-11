@@ -131,8 +131,6 @@ function findSevenZip() {
       source: "CANDOR_7ZA_PATH",
     };
   }
-  const fromPath = commandOnPath(["7za", "7z", "7zz"]);
-  if (fromPath) return fromPath;
   const searchRoots = [
     process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, "electron-builder", "Cache") : null,
     join(repoRoot, "node_modules"),
@@ -146,6 +144,8 @@ function findSevenZip() {
       };
     }
   }
+  const fromPath = commandOnPath(["7za", "7z", "7zz"]);
+  if (fromPath) return fromPath;
   return null;
 }
 

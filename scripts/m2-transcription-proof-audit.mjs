@@ -40,12 +40,55 @@ function readJson(pathValue, label, failures) {
   }
 }
 
-function validateNoSensitivePaths(payload, label, failures) {
-  const serialized = JSON.stringify(payload);
-  requireField(!serialized.includes(repoRoot), `${label} must not contain repo root`, failures);
-  requireField(!/[A-Za-z]:\\/.test(serialized), `${label} must not contain Windows absolute paths`, failures);
-  requireField(!serialized.includes("\\\\?\\") && !serialized.includes("\\\\."), `${label} must not contain raw Windows device paths`, failures);
+function stringValues(value, values = []) {
+  if (typeof value === "string") {
+    values.push(value);
+    return values;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) stringValues(item, values);
+    return values;
+  }
+  if (value && typeof value === "object") {
+    for (const item of Object.values(value)) stringValues(item, values);
+  }
+  return values;
 }
+
+function validateNoSensitivePaths(payload, label, failures) {
+  const strings = stringValues(payload);
+  requireField(!strings.some((value) => value.includes(repoRoot)), `${label} must not contain repo root`, failures);
+  requireField(!strings.some((value) => /[A-Za-z]:\\/.test(value)), `${label} must not contain Windows absolute paths`, failures);
+  requireField(
+    !strings.some((value) => value.includes("\\\\?\\") || value.includes("\\\\.\\")),
+    `${label} must not contain raw Windows device paths`,
+    failures,
+  );
+}
+
+function runPathScannerSelfTest() {
+  const linkerLogFailures = [];
+  validateNoSensitivePaths(
+    { stderrTail: "duplicate symbol was found in:\nnext linker line" },
+    "linker log fixture",
+    linkerLogFailures,
+  );
+  if (linkerLogFailures.length > 0) {
+    throw new Error(`path scanner rejected a pathless multiline log: ${linkerLogFailures.join("; ")}`);
+  }
+
+  const windowsPathFailures = [];
+  validateNoSensitivePaths(
+    { modelPath: "C:\\Private\\whisper-model.bin" },
+    "Windows path fixture",
+    windowsPathFailures,
+  );
+  if (!windowsPathFailures.some((failure) => failure.includes("Windows absolute paths"))) {
+    throw new Error("path scanner accepted a Windows absolute path fixture");
+  }
+}
+
+runPathScannerSelfTest();
 
 function validateBoundaryProof(payload, failures) {
   requireField(payload?.ok === true, "boundary ok must be true", failures);

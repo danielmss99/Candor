@@ -16,6 +16,9 @@ const electronBuilder = readFileSync(resolve(repoRoot, "electron-builder.v3.yml"
 const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "utf8");
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
+const packagedSmoke = readFileSync(resolve(repoRoot, "scripts", "m0-packaged-smoke.mjs"), "utf8");
+const releaseArtifactSmoke = readFileSync(resolve(repoRoot, "scripts", "v3-release-artifact-smoke.mjs"), "utf8");
+const transcriptionProofAudit = readFileSync(resolve(repoRoot, "scripts", "m2-transcription-proof-audit.mjs"), "utf8");
 const goalAudit = readFileSync(resolve(repoRoot, "scripts", "v3-goal-audit.mjs"), "utf8");
 const goalAuditDoc = readFileSync(resolve(repoRoot, "docs", "proofs", "V3_GOAL_AUDIT.md"), "utf8");
 const m4LocalInstructFixture = readFileSync(resolve(repoRoot, "scripts", "m4-local-instruct-fixture-smoke.mjs"), "utf8");
@@ -162,6 +165,11 @@ for (const [contents, pattern, label] of [
   [releaseSigningProof, "macosSignatureEvidence", "release signing macOS signature evidence"],
   [releaseSigningProof, "macOS notarization/staple proof is missing or invalid", "release signing macOS staple failure"],
   [releaseSigningProof, "macOS DMG Gatekeeper assessment proof is missing or invalid", "release signing macOS Gatekeeper failure"],
+  [packagedSmoke, "minimumSmokeScreenshotWidth = 960", "packaged smoke desktop screenshot width floor"],
+  [packagedSmoke, "minimumSmokeScreenshotHeight = 600", "packaged smoke desktop screenshot height floor"],
+  [packagedSmoke, "verificationFailure", "packaged smoke failure receipt"],
+  [transcriptionProofAudit, "stringValues", "transcription proof raw string path scanner"],
+  [transcriptionProofAudit, "runPathScannerSelfTest", "transcription proof path scanner regression test"],
   [releaseReadinessAudit, "verified detached signatures for Linux AppImage", "release readiness Linux AppImage signature validator"],
   [releaseReadinessAudit, "verified detached signatures for Linux deb", "release readiness Linux deb signature validator"],
   [releaseReadinessAudit, "release signing proof must show a notarized or stapled macOS DMG", "release readiness macOS notarization validator"],
@@ -223,6 +231,12 @@ requireFileOrder(
   "$ruleEvidence = @($rulesCreated",
   "Remove-NetFirewallRule -Group $ruleGroup",
   "Windows firewall evidence capture before cleanup",
+);
+requireFileOrder(
+  releaseArtifactSmoke,
+  "const searchRoots = [",
+  'const fromPath = commandOnPath(["7za", "7z", "7zz"]);',
+  "electron-builder 7-Zip preference before system PATH",
 );
 
 for (const [pattern, label] of [

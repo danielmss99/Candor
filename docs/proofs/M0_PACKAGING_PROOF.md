@@ -49,7 +49,9 @@ that `Candor v3 M0.exe`, `resources/app.asar`, and
 `resources/bin/candor-core.exe` match the unpacked package by hash. On macOS
 and Linux, the same gate must prove the DMG, AppImage, or deb payload entries
 match the corresponding unpacked app payload hashes before M0 packaging can
-pass.
+pass. Windows inspection prefers electron-builder's managed 7-Zip binary over
+an arbitrary system `PATH` copy so NSIS extraction layout is reproducible on
+developer machines and hosted runners.
 
 `npm run m0:packaged-smoke` writes a machine-readable proof artifact to
 `release-v3/proofs/m0-packaged-runtime-smoke-<platform>-<arch>.json`.
@@ -76,7 +78,9 @@ product views at a stable desktop viewport and hashes them into the
 packaged-smoke proof. The smoke decoder checks PNG dimensions, sampled color
 diversity, luminance range, and non-white pixel ratio, so a blank white capture
 cannot satisfy the visual gate. Each final capture follows a forced window
-repaint and a discarded compositor warm-up frame.
+repaint and a discarded compositor warm-up frame. Hosted displays may clamp the
+requested 1440 by 900 window to their work area, but the captured content must
+still be at least 960 by 600 pixels and pass every DOM and pixel-content check.
 The renderer Vite build uses `base: "./"` so packaged `file://` loading resolves
 JavaScript and CSS beside `index.html` instead of requesting root-level asset
 paths.
@@ -138,9 +142,11 @@ outbound firewall rules for the packaged app and sidecar. Linux runs the
 packaged smoke inside an ephemeral network namespace. macOS uses a temporary
 managed PF anchor plus tcpdump capture. Linux and managed-PF macOS proofs must
 also record a blocked outbound deny-layer sentinel before the packaged smoke
-proof is accepted. The Linux job installs the native build and runtime packages
-needed for the Rust audio stack, SQLCipher key storage checks, Electron smoke,
-`xvfb-run`, and `unshare`.
+proof is accepted. The Linux namespace and macOS PF/tcpdump controls stay
+privileged, while the packaged app is explicitly dropped back to the invoking
+non-root desktop user. The Linux job installs the native build and runtime
+packages needed for the Rust audio stack, SQLCipher key storage checks,
+Electron smoke, `xvfb-run`, and `unshare`.
 
 The workflow's `m0-proof-audit` job downloads every matrix artifact and writes a
 combined `m0-combined-proof-audit-summary.json` so the full OS proof set can be
