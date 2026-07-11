@@ -126,6 +126,8 @@ for (const [contents, pattern, label] of [
   [linuxNetworkProof, "1.1.1.1:443", "Linux deny-layer sentinel target"],
   [linuxNetworkProof, "SUDO_USER", "Linux network proof invoking user discovery"],
   [linuxNetworkProof, "runuser", "Linux network proof privilege drop"],
+  [linuxNetworkProof, "GITHUB_RUN_ID", "Linux network proof CI provenance forwarding"],
+  [linuxNetworkProof, "CANDOR_M0_PACKAGED_SMOKE_PROOF", "Linux network proof smoke receipt binding"],
   [macosNetworkProof, "denyLayerProbe", "macOS deny-layer sentinel proof"],
   [macosNetworkProof, "SUDO_USER", "macOS network proof invoking user discovery"],
   [macosNetworkProof, 'spawn("sudo", [', "macOS network proof privilege drop"],

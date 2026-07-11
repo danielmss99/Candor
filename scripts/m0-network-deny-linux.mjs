@@ -44,6 +44,10 @@ function writeJson(path, value) {
   writeFileSync(path, JSON.stringify(value, null, 2), "utf8");
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+}
+
 function parseDenyProbeOutput(text) {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
@@ -156,7 +160,30 @@ const denyLayerProbe = {
 
 const command = [
   "ip link set lo up >/dev/null 2>&1 || true",
-  `runuser -u ${JSON.stringify(invokingUser)} -- xvfb-run -a node scripts/m0-packaged-smoke.mjs`,
+  [
+    "runuser",
+    "-u",
+    shellQuote(invokingUser),
+    "--",
+    "env",
+    ...Object.entries({
+      CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
+      GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+      GITHUB_WORKFLOW: process.env.GITHUB_WORKFLOW,
+      GITHUB_RUN_ID: process.env.GITHUB_RUN_ID,
+      GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT,
+      GITHUB_JOB: process.env.GITHUB_JOB,
+      GITHUB_SHA: process.env.GITHUB_SHA,
+      GITHUB_REF: process.env.GITHUB_REF,
+      RUNNER_OS: process.env.RUNNER_OS,
+    })
+      .filter(([, value]) => typeof value === "string" && value.length > 0)
+      .map(([name, value]) => `${name}=${shellQuote(value)}`),
+    "xvfb-run",
+    "-a",
+    shellQuote(process.execPath),
+    "scripts/m0-packaged-smoke.mjs",
+  ].join(" "),
 ].join("; ");
 
 const result = spawnSync("unshare", ["--net", "--fork", "--mount-proc", "bash", "-lc", command], {
