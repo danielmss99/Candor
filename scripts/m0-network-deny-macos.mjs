@@ -118,7 +118,7 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "tcpdump", "pfctl", "route", "node"];
+const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "route", "node"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
@@ -156,11 +156,17 @@ if (typeof process.getuid !== "function" || process.getuid() !== 0) {
 if (!externalDenyConfirmed && !managedPf) {
   throw new Error("Refusing to claim macOS network-deny proof without --managed-pf or --external-deny-confirmed.");
 }
-for (const command of ["bash", "tcpdump", "route", "node"]) {
+for (const command of ["bash", "sudo", "tcpdump", "route", "node"]) {
   if (!commandExists(command)) throw new Error(`Required command not found: ${command}`);
 }
 if (managedPf && !commandExists("pfctl")) {
   throw new Error("Required command not found: pfctl");
+}
+
+const invokingUser = process.env.SUDO_USER?.trim();
+const invokingUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+if (!invokingUser || invokingUser === "root" || !Number.isInteger(invokingUid) || invokingUid <= 0) {
+  throw new Error("macOS network-deny proof requires sudo from a non-root user so the app runs with desktop-user custody.");
 }
 
 const executable = resolveExecutable(explicitAppPath);
@@ -275,13 +281,31 @@ let stdout = "";
 let stderr = "";
 let smokeExit = { code: null, signal: null };
 try {
-  const smoke = spawn("node", ["scripts/m0-packaged-smoke.mjs"], {
+  const forwardedEnvironment = {
+    CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
+    GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
+    GITHUB_WORKFLOW: process.env.GITHUB_WORKFLOW,
+    GITHUB_RUN_ID: process.env.GITHUB_RUN_ID,
+    GITHUB_RUN_ATTEMPT: process.env.GITHUB_RUN_ATTEMPT,
+    GITHUB_JOB: process.env.GITHUB_JOB,
+    GITHUB_SHA: process.env.GITHUB_SHA,
+    GITHUB_REF: process.env.GITHUB_REF,
+    RUNNER_OS: process.env.RUNNER_OS,
+  };
+  const environmentArguments = Object.entries(forwardedEnvironment)
+    .filter(([, value]) => typeof value === "string" && value.length > 0)
+    .map(([name, value]) => `${name}=${value}`);
+  const smoke = spawn("sudo", [
+    "-u",
+    invokingUser,
+    "-H",
+    "env",
+    ...environmentArguments,
+    process.execPath,
+    "scripts/m0-packaged-smoke.mjs",
+  ], {
     cwd: repoRoot,
     stdio: ["ignore", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
-    },
   });
   smoke.stdout.on("data", (chunk) => {
     stdout += chunk.toString("utf8");
@@ -317,6 +341,8 @@ const proof = {
   denyMechanism: managedPf
     ? "managed-pf-anchor plus tcpdump capture"
     : "operator-confirmed external deny layer plus tcpdump capture",
+  applicationUidNonRoot: invokingUid > 0,
+  applicationRunsAsRoot: false,
   externalDenyConfirmed,
   managedPf: pfState,
   executable,

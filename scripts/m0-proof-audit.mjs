@@ -1219,15 +1219,33 @@ function runSelfTest() {
     ok: true,
     proofKind: "m0-network-deny-linux",
     denyMechanism: "unshare --net",
+    applicationUidNonRoot: true,
+    applicationRunsAsRoot: false,
     denyLayerProbe: minimalValidDenyLayerProbe(),
     smokeProof: validSmoke,
   });
   assertSelfTest(networkFailures.length === 0, "valid embedded smoke proof should pass network proof");
 
+  const rootApplicationFailures = validateNetworkProof("linux", {
+    ok: true,
+    proofKind: "m0-network-deny-linux",
+    denyMechanism: "unshare --net",
+    applicationUidNonRoot: false,
+    applicationRunsAsRoot: true,
+    denyLayerProbe: minimalValidDenyLayerProbe(),
+    smokeProof: validSmoke,
+  });
+  assertSelfTest(
+    rootApplicationFailures.some((failure) => failure.includes("packaged application must run as a non-root user")),
+    "Linux network proof must fail when the packaged application runs as root",
+  );
+
   const connectedDenyLayerFailures = validateNetworkProof("linux", {
     ok: true,
     proofKind: "m0-network-deny-linux",
     denyMechanism: "unshare --net",
+    applicationUidNonRoot: true,
+    applicationRunsAsRoot: false,
     denyLayerProbe: {
       ...minimalValidDenyLayerProbe(),
       blocked: false,
@@ -1403,6 +1421,8 @@ function runSelfTest() {
     ok: true,
     proofKind: "m0-network-deny-macos",
     denyMechanism: "managed-pf-anchor plus tcpdump capture",
+    applicationUidNonRoot: true,
+    applicationRunsAsRoot: false,
     packetCount: 0,
     denyLayerProbe: minimalValidDenyLayerProbe(),
     managedPf: {
@@ -1422,6 +1442,8 @@ function runSelfTest() {
     ok: true,
     proofKind: "m0-network-deny-macos",
     denyMechanism: "managed-pf-anchor plus tcpdump capture",
+    applicationUidNonRoot: true,
+    applicationRunsAsRoot: false,
     packetCount: 0,
     denyLayerProbe: minimalValidDenyLayerProbe(),
     managedPf: {
@@ -1446,6 +1468,8 @@ function runSelfTest() {
     ok: true,
     proofKind: "m0-network-deny-linux",
     denyMechanism: "unshare --net",
+    applicationUidNonRoot: true,
+    applicationRunsAsRoot: false,
     denyLayerProbe: minimalValidDenyLayerProbe(),
     smokeProof: staleNetworkPayload,
   });
@@ -1496,10 +1520,20 @@ function validateNetworkProof(osName, payload) {
 
   if (osName === "linux") {
     requireField(payload?.denyMechanism === "unshare --net", "denyMechanism must be unshare --net", failures);
+    requireField(
+      payload?.applicationUidNonRoot === true && payload?.applicationRunsAsRoot === false,
+      "packaged application must run as a non-root user inside the network namespace",
+      failures,
+    );
     validateDenyLayerProbe(payload, failures);
   }
 
   if (osName === "macos") {
+    requireField(
+      payload?.applicationUidNonRoot === true && payload?.applicationRunsAsRoot === false,
+      "packaged application must run as a non-root user while PF and tcpdump stay privileged",
+      failures,
+    );
     if (payload?.managedPf?.requested === true) {
       validateDenyLayerProbe(payload, failures);
       validateMacosManagedPf(payload, failures);

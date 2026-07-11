@@ -350,6 +350,14 @@ mod tests {
         )
     }
 
+    fn required_item_ids(predicate: impl Fn(&ConsentItem) -> bool) -> Vec<String> {
+        consent_items()
+            .iter()
+            .filter(|item| predicate(item))
+            .map(|item| item.id.to_string())
+            .collect()
+    }
+
     #[test]
     fn consent_status_and_acknowledge_are_pathless() {
         let store = temp_store();
@@ -411,10 +419,7 @@ mod tests {
 
         store
             .acknowledge(ConsentAcknowledgeParams {
-                items: vec![
-                    "localOnlyStorage".to_string(),
-                    "systemAudioRecording".to_string(),
-                ],
+                items: required_item_ids(|item| item.required_for_system_audio),
             })
             .expect("acknowledge system audio");
         store
@@ -437,7 +442,7 @@ mod tests {
 
         store
             .acknowledge(ConsentAcknowledgeParams {
-                items: vec!["systemAudioRecording".to_string()],
+                items: required_item_ids(|item| item.required_for_system_audio),
             })
             .expect("acknowledge system audio");
         store

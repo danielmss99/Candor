@@ -88,7 +88,7 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "unshare", "xvfb-run", "node", "ip"];
+const proofCommands = ["bash", "unshare", "runuser", "xvfb-run", "node", "ip"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
@@ -125,6 +125,12 @@ for (const command of proofCommands) {
   if (!commandExists(command)) throw new Error(`Required command not found: ${command}`);
 }
 
+const invokingUser = process.env.SUDO_USER?.trim();
+const invokingUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+if (!invokingUser || invokingUser === "root" || !Number.isInteger(invokingUid) || invokingUid <= 0) {
+  throw new Error("Linux network-deny proof requires sudo from a non-root user so Electron can retain its sandbox.");
+}
+
 const executable = resolveExecutable(explicitAppPath);
 const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-linux-${process.arch}.json`);
@@ -150,7 +156,7 @@ const denyLayerProbe = {
 
 const command = [
   "ip link set lo up >/dev/null 2>&1 || true",
-  "xvfb-run -a node scripts/m0-packaged-smoke.mjs",
+  `runuser -u ${JSON.stringify(invokingUser)} -- xvfb-run -a node scripts/m0-packaged-smoke.mjs`,
 ].join("; ");
 
 const result = spawnSync("unshare", ["--net", "--fork", "--mount-proc", "bash", "-lc", command], {
@@ -174,7 +180,9 @@ const proof = {
   executable,
   smokeProofPath,
   denyLayerProbe,
-  command: "unshare --net --fork --mount-proc bash -lc '<lo up>; xvfb-run -a node scripts/m0-packaged-smoke.mjs'",
+  command: "unshare --net --fork --mount-proc bash -lc '<lo up>; runuser <invoking-user> -- xvfb-run -a node scripts/m0-packaged-smoke.mjs'",
+  applicationUidNonRoot: invokingUid > 0,
+  applicationRunsAsRoot: false,
   stdout: result.stdout.trim(),
   stderr: result.stderr.trim(),
   smokeProof,

@@ -86,6 +86,13 @@ jobs:
       - name: Package M0 release artifacts
         run: npm run electron:v3:dist
 
+      - name: Configure Linux Chromium sandbox for runtime proof
+        if: runner.os == 'Linux'
+        run: |
+          sudo chown root:root release-v3/linux-unpacked/chrome-sandbox
+          sudo chmod 4755 release-v3/linux-unpacked/chrome-sandbox
+          test "$(stat -c '%u:%g:%a' release-v3/linux-unpacked/chrome-sandbox)" = "0:0:4755"
+
       - name: Prove packaged application icons
         run: npm run v3:icon-proof
 
