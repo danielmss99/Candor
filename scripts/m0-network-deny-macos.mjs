@@ -168,10 +168,12 @@ function runPacketParserSelfTest() {
     throw new Error("macOS PKTAP effective-process parser self-test failed");
   }
   const ruleStats = parsePfRuleStats(`
-block drop out quick proto tcp all user = 501 group = 62000
+@0 block drop out quick proto tcp all user = 501 group = 62000
   [ Evaluations: 42        Packets: 3         Bytes: 180         States: 0     ]
+@1 block drop out quick proto udp all user = 501 group = 62000
+  [ Evaluations: 21        Packets: 0         Bytes: 0           States: 0     ]
 `);
-  if (!ruleStats.parsed || ruleStats.ruleCount !== 1 || ruleStats.packets !== 3 || ruleStats.bytes !== 180) {
+  if (!ruleStats.parsed || ruleStats.ruleCount !== 2 || ruleStats.packets !== 3 || ruleStats.bytes !== 180) {
     throw new Error("macOS PF rule counter parser self-test failed");
   }
 }
@@ -345,7 +347,7 @@ function readManagedPfRuleStats() {
   if (!managedPf) return null;
   const result = runCommand("pfctl", ["-a", pfAnchor, "-v", "-v", "-s", "rules"]);
   const stats = parsePfRuleStats(result.stdout);
-  if (!stats.parsed || stats.ruleCount !== 1) {
+  if (!stats.parsed || stats.ruleCount !== 2) {
     throw new Error(`Unable to parse the managed PF rule counters: ${result.stdout.trim()}`);
   }
   return stats;
@@ -627,9 +629,12 @@ const packetAttribution = {
     processIdentityMismatches.length === 0 &&
     (!managedPf ||
       (pfState.sentinelRuleStats?.parsed === true &&
+        pfState.sentinelRuleStats.ruleCount === 2 &&
         pfState.applicationBaselineRuleStats?.parsed === true &&
+        pfState.applicationBaselineRuleStats.ruleCount === 2 &&
         pfState.applicationBaselineRuleStats.packets === 0 &&
-        pfState.applicationRuleStats?.parsed === true)),
+        pfState.applicationRuleStats?.parsed === true &&
+        pfState.applicationRuleStats.ruleCount === 2)),
   tcpdumpExitedBeforeCleanup,
 };
 

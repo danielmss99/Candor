@@ -229,18 +229,23 @@ function validateMacosManagedPf(payload, failures) {
     failures,
   );
   requireField(
-    managed?.sentinelRuleStats?.parsed === true && managed.sentinelRuleStats.packets > 0,
+    managed?.sentinelRuleStats?.parsed === true &&
+      managed.sentinelRuleStats.ruleCount === 2 &&
+      managed.sentinelRuleStats.packets > 0,
     "managed PF sentinel counters must record blocked packets",
     failures,
   );
   requireField(
     managed?.applicationBaselineRuleStats?.parsed === true &&
+      managed.applicationBaselineRuleStats.ruleCount === 2 &&
       managed.applicationBaselineRuleStats.packets === 0,
     "managed PF application counter baseline must be zero",
     failures,
   );
   requireField(
-    managed?.applicationRuleStats?.parsed === true && managed.applicationRuleStats.packets === 0,
+    managed?.applicationRuleStats?.parsed === true &&
+      managed.applicationRuleStats.ruleCount === 2 &&
+      managed.applicationRuleStats.packets === 0,
     "managed PF application counters must remain zero",
     failures,
   );
@@ -1499,9 +1504,9 @@ function runSelfTest() {
       rules: "block drop out quick proto { tcp udp } all user 501 group 62000",
       anchorLoaded: true,
       executionGid: 62000,
-      sentinelRuleStats: { parsed: true, ruleCount: 1, packets: 1, bytes: 64 },
-      applicationBaselineRuleStats: { parsed: true, ruleCount: 1, packets: 0, bytes: 0 },
-      applicationRuleStats: { parsed: true, ruleCount: 1, packets: 0, bytes: 0 },
+      sentinelRuleStats: { parsed: true, ruleCount: 2, packets: 1, bytes: 64 },
+      applicationBaselineRuleStats: { parsed: true, ruleCount: 2, packets: 0, bytes: 0 },
+      applicationRuleStats: { parsed: true, ruleCount: 2, packets: 0, bytes: 0 },
       countersReset: true,
       anchorFlushed: true,
       enableTokenReleased: true,
