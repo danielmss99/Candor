@@ -143,7 +143,8 @@ The GitHub Actions matrix now builds release-shaped artifacts and then runs real
 Windows, Linux, and macOS network-deny proofs by default. Windows uses temporary
 outbound firewall rules for the packaged app and sidecar. Linux runs the
 packaged smoke inside an ephemeral network namespace. macOS uses a temporary
-managed PF anchor, PFLOG blocked-attempt attribution, and PKTAP escape
+managed PF anchor, a disposable `pflog0` interface when the runner does not
+already provide one, PFLOG blocked-attempt attribution, and PKTAP escape
 attribution. Linux and managed-PF
 macOS proofs must also record a blocked outbound deny-layer sentinel before the
 packaged smoke proof is accepted. The Linux namespace and macOS PF/PFLOG/PKTAP

@@ -206,7 +206,7 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "node"];
+const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ifconfig", "ps", "node"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
@@ -225,7 +225,12 @@ if (validateOnly) {
         packagedExecutableAvailable: candidateAppPaths.some((candidate) => existsSync(candidate)),
         root,
         commands,
-        canRunManagedPfProof: process.platform === "darwin" && root && baseCommandsAvailable && commands.pfctl,
+        canRunManagedPfProof:
+          process.platform === "darwin" &&
+          root &&
+          baseCommandsAvailable &&
+          commands.pfctl &&
+          commands.ifconfig,
         canRunExternalDenyProof: process.platform === "darwin" && root && baseCommandsAvailable,
       },
       null,
@@ -250,6 +255,9 @@ for (const command of ["bash", "sudo", "tcpdump", "ps", "node"]) {
 if (managedPf && !commandExists("pfctl")) {
   throw new Error("Required command not found: pfctl");
 }
+if (managedPf && !commandExists("ifconfig")) {
+  throw new Error("Required command not found: ifconfig");
+}
 
 const invokingUser = process.env.SUDO_USER?.trim();
 const invokingUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
@@ -271,15 +279,43 @@ const pfState = {
   enabled: false,
   enableToken: null,
   anchorLoaded: false,
+  pflogInterface: managedPf ? "pflog0" : null,
+  pflogInterfaceInitiallyPresent: null,
+  pflogInterfaceCreated: false,
+  pflogInterfaceReady: false,
+  pflogInterfaceDestroyed: false,
   anchorFlushed: false,
   enableTokenReleased: false,
   cleanupError: null,
 };
 
+function interfaceExists(name) {
+  const result = spawnSync("ifconfig", [name], {
+    cwd: repoRoot,
+    encoding: "utf8",
+  });
+  return result.status === 0;
+}
+
+function ensureManagedPflogInterface() {
+  if (!managedPf) return;
+  pfState.pflogInterfaceInitiallyPresent = interfaceExists("pflog0");
+  if (!pfState.pflogInterfaceInitiallyPresent) {
+    runCommand("ifconfig", ["pflog0", "create"]);
+    pfState.pflogInterfaceCreated = true;
+  }
+  runCommand("ifconfig", ["pflog0", "up"]);
+  pfState.pflogInterfaceReady = interfaceExists("pflog0");
+  if (!pfState.pflogInterfaceReady) {
+    throw new Error("pflog0 was not available after setup");
+  }
+}
+
 function enableManagedPfDeny() {
   if (!managedPf) return;
 
   try {
+    ensureManagedPflogInterface();
     const enable = runCommand("pfctl", ["-E"]);
     pfState.enabled = true;
     const tokenMatch = `${enable.stdout}\n${enable.stderr}`.match(/Token\s*:\s*([^\s]+)/i);
@@ -320,6 +356,15 @@ function cleanupManagedPfDeny() {
       .join("; ");
   } else {
     pfState.enableTokenReleased = true;
+  }
+
+  if (pfState.pflogInterfaceCreated) {
+    try {
+      runCommand("ifconfig", ["pflog0", "destroy"]);
+      pfState.pflogInterfaceDestroyed = true;
+    } catch (error) {
+      pfState.cleanupError = [pfState.cleanupError, error.message].filter(Boolean).join("; ");
+    }
   }
 }
 
@@ -613,6 +658,8 @@ const proof = {
     applicationPacketCount === 0 &&
     (!managedPf ||
       (pfState.anchorLoaded &&
+        pfState.pflogInterfaceReady &&
+        (!pfState.pflogInterfaceCreated || pfState.pflogInterfaceDestroyed) &&
         pfState.anchorFlushed &&
         pfState.enableTokenReleased &&
         !pfState.cleanupError)),

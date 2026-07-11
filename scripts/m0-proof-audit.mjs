@@ -214,6 +214,17 @@ function validateMacosManagedPf(payload, failures) {
     failures,
   );
   requireField(managed?.anchorLoaded === true, "managed PF anchor must be loaded", failures);
+  requireField(
+    managed?.pflogInterface === "pflog0",
+    "managed PF proof must record the pflog0 interface",
+    failures,
+  );
+  requireField(managed?.pflogInterfaceReady === true, "pflog0 must be available during capture", failures);
+  requireField(
+    managed?.pflogInterfaceCreated !== true || managed?.pflogInterfaceDestroyed === true,
+    "a proof-created pflog0 interface must be destroyed",
+    failures,
+  );
   requireField(managed?.anchorFlushed === true, "managed PF anchor must be flushed", failures);
   requireField(managed?.enableTokenReleased === true, "managed PF enable token must be released", failures);
   requireField(!managed?.cleanupError, "managed PF cleanup must not report an error", failures);
@@ -1459,6 +1470,11 @@ function runSelfTest() {
       anchor: "com.apple/candor-v3-m0-network-deny-123",
       rules: "block drop out log (user) quick proto { tcp udp } all user 501",
       anchorLoaded: true,
+      pflogInterface: "pflog0",
+      pflogInterfaceInitiallyPresent: false,
+      pflogInterfaceCreated: true,
+      pflogInterfaceReady: true,
+      pflogInterfaceDestroyed: true,
       anchorFlushed: true,
       enableTokenReleased: true,
       cleanupError: null,
@@ -1477,6 +1493,16 @@ function runSelfTest() {
   assertSelfTest(
     staleManagedMacosFailures.some((failure) => failure.includes("managed PF anchor must be flushed")),
     "managed macOS network proof must fail without PF cleanup evidence",
+  );
+
+  const leakedPflogManagedMacosProof = cloneJson(validManagedMacosProof);
+  leakedPflogManagedMacosProof.managedPf.pflogInterfaceDestroyed = false;
+  const leakedPflogManagedMacosFailures = validateNetworkProof("macos", leakedPflogManagedMacosProof);
+  assertSelfTest(
+    leakedPflogManagedMacosFailures.some((failure) =>
+      failure.includes("proof-created pflog0 interface must be destroyed"),
+    ),
+    "managed macOS network proof must fail when its disposable pflog0 interface leaks",
   );
 
   const leakingManagedMacosProof = cloneJson(validManagedMacosProof);

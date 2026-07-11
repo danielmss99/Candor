@@ -61,8 +61,10 @@ background calls are disabled for M0.
   fresh network namespace and records `denyLayerProbe.blocked: true`.
 - macOS proof runner exists at `scripts/m0-network-deny-macos.mjs`. In managed
   mode it enables a per-run PF anchor under `com.apple/`, loads a temporary
-  user-scoped outbound TCP/UDP block rule with `log (user)`. A `pflog0`
-  capture records blocked socket UID/PID evidence, while a simultaneous
+  user-scoped outbound TCP/UDP block rule with `log (user)`. If `pflog0` is not
+  already present, the proof creates the interface for the run and destroys it
+  during cleanup. The `pflog0` capture records blocked socket UID/PID evidence,
+  while a simultaneous
   `pktap,all` capture records any packets that escape PF with process metadata.
   The proof gates only packets attributed to the Candor process tree, while
   retaining hosted-runner background packets as diagnostics. It writes
@@ -195,14 +197,17 @@ npm run m0:network-deny:macos -- --validate-only
 ```
 
 Validate-only output includes `validateOnlyIsNotNetworkProof: true`, command
-presence for `bash`, `tcpdump`, `pfctl`, `ps`, and `node`, plus separate
-`canRunManagedPfProof` and `canRunExternalDenyProof` booleans.
+presence for `bash`, `tcpdump`, `pfctl`, `ifconfig`, `ps`, and `node`, plus
+separate `canRunManagedPfProof` and `canRunExternalDenyProof` booleans.
 
 Managed-PF proof artifacts must include `denyLayerProbe.blocked: true`,
 `managedPf.anchorLoaded: true`, `managedPf.anchorFlushed: true`, and
-`managedPf.enableTokenReleased: true`. They must also show a captured sentinel,
-complete PFLOG and PKTAP process attribution, the observed Candor process tree,
-and zero blocked or escaped Candor-attributed outbound TCP/UDP packets.
+`managedPf.enableTokenReleased: true`, and `managedPf.pflogInterfaceReady: true`.
+When the proof created `pflog0`, it must also record
+`managedPf.pflogInterfaceDestroyed: true`. Artifacts must show a captured
+sentinel, complete PFLOG and PKTAP process attribution, the observed Candor
+process tree, and zero blocked or escaped Candor-attributed outbound TCP/UDP
+packets.
 External-deny fallback artifacts are accepted only with explicit
 `externalDenyConfirmed: true`, complete PKTAP
 attribution, and the same zero-Candor-packet result.

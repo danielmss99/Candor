@@ -144,6 +144,17 @@ for (const [contents, pattern, label] of [
   [macosNetworkProof, "parsePktapPacket", "macOS packet process attribution parser"],
   [macosNetworkProof, "parsePflogPacket", "macOS blocked-attempt process attribution parser"],
   [macosNetworkProof, '"pflog0"', "macOS PF blocked-attempt capture"],
+  [
+    macosNetworkProof,
+    'runCommand("ifconfig", ["pflog0", "create"])',
+    "macOS disposable PFLOG interface setup",
+  ],
+  [
+    macosNetworkProof,
+    'runCommand("ifconfig", ["pflog0", "destroy"])',
+    "macOS disposable PFLOG interface cleanup",
+  ],
+  [macosNetworkProof, "pflogInterfaceDestroyed", "macOS PFLOG interface cleanup evidence"],
   [macosNetworkProof, "log (user)", "macOS PF socket UID and PID logging"],
   [macosNetworkProof, "processTreeSnapshot", "macOS Candor process tree observer"],
   [macosNetworkProof, "denyProbeCaptured", "macOS blocked-sentinel capture gate"],
