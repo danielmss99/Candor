@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -92,7 +92,7 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "unshare", "runuser", "xvfb-run", "node", "ip"];
+const proofCommands = ["bash", "unshare", "runuser", "dbus-run-session", "xvfb-run", "node", "ip"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
@@ -141,6 +141,7 @@ const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-linux-${process
 const networkProofPath = join(proofDir, `m0-network-deny-linux-${timestamp}.json`);
 
 mkdirSync(proofDir, { recursive: true });
+rmSync(smokeProofPath, { force: true });
 
 const denyProbeResult = spawnSync(
   "unshare",
@@ -166,6 +167,10 @@ const command = [
     shellQuote(invokingUser),
     "--",
     "env",
+    "-u",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "-u",
+    "DBUS_SYSTEM_BUS_ADDRESS",
     ...Object.entries({
       CANDOR_M0_PACKAGED_SMOKE_PROOF: smokeProofPath,
       GITHUB_ACTIONS: process.env.GITHUB_ACTIONS,
@@ -179,6 +184,8 @@ const command = [
     })
       .filter(([, value]) => typeof value === "string" && value.length > 0)
       .map(([name, value]) => `${name}=${shellQuote(value)}`),
+    "dbus-run-session",
+    "--",
     "xvfb-run",
     "-a",
     shellQuote(process.execPath),
@@ -204,10 +211,14 @@ const proof = {
   proofKind: "m0-network-deny-linux",
   generatedAt: new Date().toISOString(),
   denyMechanism: "unshare --net",
+  sessionBus: {
+    mechanism: "dbus-run-session",
+    inheritedAddressesCleared: ["DBUS_SESSION_BUS_ADDRESS", "DBUS_SYSTEM_BUS_ADDRESS"],
+  },
   executable,
   smokeProofPath,
   denyLayerProbe,
-  command: "unshare --net --fork --mount-proc bash -lc '<lo up>; runuser <invoking-user> -- xvfb-run -a node scripts/m0-packaged-smoke.mjs'",
+  command: "unshare --net --fork --mount-proc bash -lc '<lo up>; runuser <invoking-user> -- env -u DBUS_SESSION_BUS_ADDRESS -u DBUS_SYSTEM_BUS_ADDRESS dbus-run-session -- xvfb-run -a node scripts/m0-packaged-smoke.mjs'",
   applicationUidNonRoot: invokingUid > 0,
   applicationRunsAsRoot: false,
   stdout: result.stdout.trim(),
