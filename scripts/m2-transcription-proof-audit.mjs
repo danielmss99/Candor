@@ -184,6 +184,7 @@ function validateDefaultRunLocalEvidence(payload, failures) {
 
 function validateRealLocalWhisper(payload, failures) {
   const branch = payload?.realLocalWhisper;
+  const semanticQuality = branch?.semanticQuality;
   requireField(branch?.requested === true, "realLocalWhisper.requested must be true", failures);
   requireField(branch?.attempted === true, "realLocalWhisper.attempted must be true", failures);
   requireField(branch?.ok === true, "realLocalWhisper.ok must be true", failures);
@@ -224,6 +225,42 @@ function validateRealLocalWhisper(payload, failures) {
   requireField(
     Number.isInteger(branch?.transcriptSegmentCount) && branch.transcriptSegmentCount > 0,
     "realLocalWhisper.transcriptSegmentCount must be positive",
+    failures,
+  );
+  requireField(
+    semanticQuality?.configured === true,
+    "realLocalWhisper.semanticQuality must be configured",
+    failures,
+  );
+  requireField(
+    Number.isInteger(semanticQuality?.expectedTokenCount) && semanticQuality.expectedTokenCount >= 2,
+    "realLocalWhisper.semanticQuality expectedTokenCount must be at least 2",
+    failures,
+  );
+  requireField(
+    Number.isInteger(semanticQuality?.matchedTokenCount) &&
+      Number.isInteger(semanticQuality?.minimumMatchedTokens) &&
+      semanticQuality.matchedTokenCount >= semanticQuality.minimumMatchedTokens,
+    "realLocalWhisper.semanticQuality matchedTokenCount must meet the minimum",
+    failures,
+  );
+  requireField(
+    typeof semanticQuality?.tokenCoverage === "number" &&
+      typeof semanticQuality?.minimumTokenCoverage === "number" &&
+      semanticQuality.tokenCoverage >= semanticQuality.minimumTokenCoverage &&
+      semanticQuality.minimumTokenCoverage >= 0.75,
+    "realLocalWhisper.semanticQuality token coverage must be at least 0.75",
+    failures,
+  );
+  requireField(
+    semanticQuality?.passed === true && branch?.expectedTextObserved === true,
+    "realLocalWhisper semantic expected-text check must pass",
+    failures,
+  );
+  requireField(
+    semanticQuality?.transcriptTextRecorded === false &&
+      semanticQuality?.expectedTextRecorded === false,
+    "realLocalWhisper semantic proof must not record transcript or expected text",
     failures,
   );
 }

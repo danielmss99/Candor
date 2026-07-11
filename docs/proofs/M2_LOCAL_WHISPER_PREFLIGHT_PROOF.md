@@ -69,13 +69,16 @@ then run:
 $env:CANDOR_M2_REAL_WHISPER_CONSENT="1"
 $env:CANDOR_M2_REAL_MODEL_PATH="C:\path\to\ggml-base.en.bin"
 $env:CANDOR_M2_REAL_AUDIO_WAV="C:\path\to\local-fixture.wav"
+$env:CANDOR_M2_REAL_EXPECT_TEXT="meaningful phrase spoken in the fixture"
 npm run m2:real-whisper-proof
 ```
 
 The command uses the core's streamed model import and hash verification path
 after explicit operator consent. It does not download models, accept raw model
 paths from the renderer, or mark the strict real gate as passing unless Whisper
-writes transcript segments.
+writes transcript segments and recognizes at least 75% of the unique tokens in
+the configured expected phrase. The proof stores only token counts and ratios,
+not transcript text or expected words.
 
 Record the top-level real Whisper proof state without reading local inputs or
 running inference:
@@ -116,3 +119,20 @@ channel-based speaker labels, and Whisper timestamp conversion. This proves the
 Rust local Whisper feature compiles here and its local audio prep contract is
 covered, but it does not prove a real model is installed or that a real meeting
 has been transcribed yet.
+
+## Windows Real-Inference Record
+
+The strict Windows x64 proof passed on 2026-07-11 with:
+
+- `whisper-rs` running the trusted `tiny.en` GGML model on CPU
+- model SHA-256
+  `921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`
+- a 3.429-second Windows SAPI speech fixture, never microphone or system audio
+- one persisted local transcript segment
+- 3 of 4 unique expected tokens recognized, meeting the 75% semantic threshold
+- no transcript text, expected words, raw paths, or key material in proof artifacts
+- a passing strict transcription audit
+
+This proves real local inference and bounded semantic recognition on Windows.
+The M2 release exit still separately requires the consented 30-minute capture,
+crash recovery, replay, and export scenario on Windows, macOS, and Linux.

@@ -59,6 +59,7 @@ const realAudioPath = argValue(
 const realModelId = argValue("--model-id", process.env.CANDOR_M2_REAL_MODEL_ID ?? "base.en");
 const realLanguage = argValue("--language", process.env.CANDOR_M2_REAL_LANGUAGE ?? "en");
 const realExpectedText = argValue("--expect-text", process.env.CANDOR_M2_REAL_EXPECT_TEXT ?? null);
+const minimumExpectedTextTokenCoverage = 0.75;
 
 if (!existsSync(corePath)) {
   throw new Error(`candor-core binary not found: ${corePath}`);
@@ -209,6 +210,48 @@ function parseWavPcm16(pathValue) {
   };
 }
 
+function normalizedWordTokens(value) {
+  return String(value ?? "")
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .match(/[\p{L}\p{N}]+/gu) ?? [];
+}
+
+function transcriptSegmentText(transcript) {
+  if (!Array.isArray(transcript?.segments)) return "";
+  return transcript.segments
+    .map((segment) => (typeof segment?.text === "string" ? segment.text : ""))
+    .join(" ");
+}
+
+function semanticExpectedTextEvidence(expectedText, transcript) {
+  const expectedTokens = [...new Set(normalizedWordTokens(expectedText))];
+  const actualTokens = new Set(normalizedWordTokens(transcriptSegmentText(transcript)));
+  const matchedTokenCount = expectedTokens.filter((token) => actualTokens.has(token)).length;
+  const expectedTokenCount = expectedTokens.length;
+  const minimumMatchedTokens = Math.min(
+    expectedTokenCount,
+    Math.max(2, Math.ceil(expectedTokenCount * minimumExpectedTextTokenCoverage)),
+  );
+  const tokenCoverage = expectedTokenCount > 0 ? matchedTokenCount / expectedTokenCount : 0;
+  return {
+    configured: true,
+    expectedTokenCount,
+    actualTokenCount: actualTokens.size,
+    matchedTokenCount,
+    minimumMatchedTokens,
+    tokenCoverage,
+    minimumTokenCoverage: minimumExpectedTextTokenCoverage,
+    passed:
+      expectedTokenCount >= 2 &&
+      matchedTokenCount >= minimumMatchedTokens &&
+      tokenCoverage >= minimumExpectedTextTokenCoverage,
+    transcriptTextRecorded: false,
+    expectedTextRecorded: false,
+  };
+}
+
 async function importVerifiedModel(modelPath, modelId) {
   const size = statSync(modelPath).size;
   const started = await call("models.importStart", {
@@ -324,6 +367,12 @@ const proofReceipt = {
       ? null
       : "set CANDOR_M2_REAL_LOCAL_WHISPER=1 or pass --real-local to attempt real local Whisper inference",
     modelId: realLocalRequested ? realModelId : null,
+    semanticQuality: {
+      configured: Boolean(realExpectedText),
+      passed: null,
+      transcriptTextRecorded: false,
+      expectedTextRecorded: false,
+    },
   },
   rawPathExposed: false,
   keyMaterialExposedToRenderer: false,
@@ -520,12 +569,14 @@ try {
     };
     proofReceipt.realLocalWhisper.writtenSegmentCount = localResult?.writtenSegmentCount ?? null;
     proofReceipt.realLocalWhisper.transcriptSegmentCount = localResult?.transcript?.segmentCount ?? null;
-    if (realExpectedText) {
-      const transcriptText = JSON.stringify(localResult?.transcript ?? {});
-      if (!transcriptText.toLowerCase().includes(realExpectedText.toLowerCase())) {
-        throw new Error("real local Whisper transcript did not include the expected text");
-      }
-      proofReceipt.realLocalWhisper.expectedTextObserved = true;
+    if (!realExpectedText) {
+      throw new Error("real local Whisper strict proof requires expected semantic text");
+    }
+    const semanticQuality = semanticExpectedTextEvidence(realExpectedText, localResult?.transcript);
+    proofReceipt.realLocalWhisper.semanticQuality = semanticQuality;
+    proofReceipt.realLocalWhisper.expectedTextObserved = semanticQuality.passed;
+    if (!semanticQuality.passed) {
+      throw new Error("real local Whisper transcript did not meet expected token coverage");
     }
   } else {
     const expectedCodes =
