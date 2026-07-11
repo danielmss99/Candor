@@ -1482,8 +1482,6 @@ function runSelfTest() {
     },
     interface: "pktap,all",
     captureConfiguration: {
-      bpfMaxBufferBytes: 524288,
-      requestedBufferKib: 512,
       snapshotLengthBytes: 256,
       processMetadataFilter:
         "dir=out and (proc = 'Candor v3 M0' or eproc = 'Candor v3 M0' or proc = 'candor-core')",
@@ -1707,12 +1705,8 @@ function validateNetworkProof(osName, payload) {
       failures,
     );
     requireField(
-      Number.isInteger(payload?.captureConfiguration?.bpfMaxBufferBytes) &&
-        payload.captureConfiguration.bpfMaxBufferBytes >= 1024 &&
-        payload.captureConfiguration.requestedBufferKib ===
-          Math.floor(payload.captureConfiguration.bpfMaxBufferBytes / 1024) &&
-        payload.captureConfiguration.snapshotLengthBytes === 256,
-      "PKTAP capture must use the maximum permitted BPF buffer and bounded snapshot length",
+      payload?.captureConfiguration?.snapshotLengthBytes === 256,
+      "PKTAP capture must use a bounded snapshot length",
       failures,
     );
     requireField(

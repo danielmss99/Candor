@@ -142,8 +142,6 @@ for (const [contents, pattern, label] of [
   [macosNetworkProof, 'const captureInterface = "pktap,all"', "macOS PKTAP all-interface capture"],
   [macosNetworkProof, '"NPD"', "macOS PKTAP process metadata"],
   [macosNetworkProof, "processMetadataFilter", "macOS outbound Candor metadata filter"],
-  [macosNetworkProof, '"net.bpf.maxbufsize"', "macOS maximum permitted BPF buffer discovery"],
-  [macosNetworkProof, "captureBufferKib", "macOS bounded BPF buffer request"],
   [macosNetworkProof, '"256"', "macOS bounded PKTAP snapshot length"],
   [macosNetworkProof, "parsePktapPacket", "macOS packet process attribution parser"],
   [macosNetworkProof, "parseTcpdumpCaptureStats", "macOS tcpdump capture statistics parser"],

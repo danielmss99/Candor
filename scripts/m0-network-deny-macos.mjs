@@ -246,13 +246,13 @@ const proofDir = argValue("--proof-dir", join(repoRoot, "release-v3", "proofs"))
 const explicitAppPath = process.argv.includes("--app-path")
   ? argValue("--app-path", "")
   : "";
-const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "sysctl", "node"];
+const proofCommands = ["bash", "sudo", "tcpdump", "pfctl", "ps", "node"];
 
 if (validateOnly) {
   const candidateAppPaths = explicitAppPath ? [explicitAppPath] : defaultExecutableCandidates();
   const commands = Object.fromEntries(proofCommands.map((command) => [command, commandExists(command)]));
   const root = typeof process.getuid === "function" ? process.getuid() === 0 : false;
-  const baseCommandsAvailable = ["bash", "tcpdump", "ps", "sysctl", "node"].every(
+  const baseCommandsAvailable = ["bash", "tcpdump", "ps", "node"].every(
     (command) => commands[command],
   );
   console.log(
@@ -290,7 +290,7 @@ if (typeof process.getuid !== "function" || process.getuid() !== 0) {
 if (!externalDenyConfirmed && !managedPf) {
   throw new Error("Refusing to claim macOS network-deny proof without --managed-pf or --external-deny-confirmed.");
 }
-for (const command of ["bash", "sudo", "tcpdump", "ps", "sysctl", "node"]) {
+for (const command of ["bash", "sudo", "tcpdump", "ps", "node"]) {
   if (!commandExists(command)) throw new Error(`Required command not found: ${command}`);
 }
 if (managedPf && !commandExists("pfctl")) {
@@ -369,14 +369,6 @@ const candorProcessNames = [
 const processMetadataFilter = `dir=out and (${candorProcessNames
   .flatMap((name) => [`proc = '${name}'`, `eproc = '${name}'`])
   .join(" or ")})`;
-const bpfMaxBufferBytes = Number.parseInt(
-  runCommand("sysctl", ["-n", "net.bpf.maxbufsize"]).stdout.trim(),
-  10,
-);
-if (!Number.isInteger(bpfMaxBufferBytes) || bpfMaxBufferBytes < 1024) {
-  throw new Error("macOS did not report a valid net.bpf.maxbufsize value");
-}
-const captureBufferKib = Math.floor(bpfMaxBufferBytes / 1024);
 const pfAnchor = `com.apple/candor-v3-m0-network-deny-${process.pid}`;
 const pfRules = `block drop out quick proto { tcp udp } all user ${invokingUid} group ${executionGid}\n`;
 const pfState = {
@@ -467,8 +459,6 @@ enableManagedPfDeny();
 const tcpdump = spawn("tcpdump", [
   "-n",
   "-l",
-  "-B",
-  String(captureBufferKib),
   "-s",
   "256",
   "-k",
@@ -736,8 +726,6 @@ const proof = {
   executable,
   interface: captureInterface,
   captureConfiguration: {
-    bpfMaxBufferBytes,
-    requestedBufferKib: captureBufferKib,
     snapshotLengthBytes: 256,
     processMetadataFilter,
   },

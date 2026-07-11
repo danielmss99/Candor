@@ -67,8 +67,8 @@ background calls are disabled for M0.
   zero blocked attempts after the counters were reset. A simultaneous
   `pktap,all` capture records any packets that escape PF with process metadata.
   Its metadata filter admits only Candor, helper, or core process identities;
-  the maximum kernel-permitted BPF buffer, a bounded snapshot length, and parsed
-  tcpdump counters make any kernel packet drop a hard failure. The proof also
+  a bounded snapshot length and parsed tcpdump counters make any kernel packet
+  drop a hard failure. The proof also
   verifies that the observed Candor process tree retains the isolated UID/GID.
   It writes
   `release-v3/proofs/m0-network-deny-macos-<timestamp>.json`, then flushes the
@@ -200,7 +200,7 @@ npm run m0:network-deny:macos -- --validate-only
 ```
 
 Validate-only output includes `validateOnlyIsNotNetworkProof: true`, command
-presence for `bash`, `tcpdump`, `pfctl`, `ps`, `sysctl`, and `node`, plus
+presence for `bash`, `tcpdump`, `pfctl`, `ps`, and `node`, plus
 separate `canRunManagedPfProof` and `canRunExternalDenyProof` booleans.
 
 Managed-PF proof artifacts must include `denyLayerProbe.blocked: true`,
