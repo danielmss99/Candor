@@ -144,6 +144,7 @@ for (const [contents, pattern, label] of [
   [macosNetworkProof, "parsePktapPacket", "macOS packet process attribution parser"],
   [macosNetworkProof, "parsePflogPacket", "macOS blocked-attempt process attribution parser"],
   [macosNetworkProof, '"pflog0"', "macOS PF blocked-attempt capture"],
+  [macosNetworkProof, '"-vv"', "macOS verbose PFLOG socket identity output"],
   [
     macosNetworkProof,
     'runCommand("ifconfig", ["pflog0", "create"])',

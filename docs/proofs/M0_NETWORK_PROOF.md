@@ -63,8 +63,8 @@ background calls are disabled for M0.
   mode it enables a per-run PF anchor under `com.apple/`, loads a temporary
   user-scoped outbound TCP/UDP block rule with `log (user)`. If `pflog0` is not
   already present, the proof creates the interface for the run and destroys it
-  during cleanup. The `pflog0` capture records blocked socket UID/PID evidence,
-  while a simultaneous
+  during cleanup. The verbose `pflog0` capture records blocked socket UID/PID
+  evidence, while a simultaneous
   `pktap,all` capture records any packets that escape PF with process metadata.
   The proof gates only packets attributed to the Candor process tree, while
   retaining hosted-runner background packets as diagnostics. It writes

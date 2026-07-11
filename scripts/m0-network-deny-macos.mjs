@@ -414,7 +414,7 @@ tcpdump.on("error", (error) => {
 });
 
 const pflogDump = managedPf
-  ? spawn("tcpdump", ["-n", "-l", "-e", "-ttt", "-i", "pflog0"], {
+  ? spawn("tcpdump", ["-n", "-l", "-e", "-vv", "-ttt", "-i", "pflog0"], {
       cwd: repoRoot,
       stdio: ["ignore", "pipe", "pipe"],
     })
