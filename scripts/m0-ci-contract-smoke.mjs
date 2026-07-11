@@ -4,13 +4,14 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const workflowPath = resolve(repoRoot, ".github", "workflows", "v3-m0.yml");
-const workflow = readFileSync(workflowPath, "utf8");
+const workflow = readFileSync(workflowPath, "utf8").replaceAll("\r\n", "\n");
 const windowsNetworkProof = readFileSync(resolve(repoRoot, "scripts", "m0-network-deny-windows.ps1"), "utf8");
 const windowsNetworkAdmin = readFileSync(resolve(repoRoot, "scripts", "m0-network-deny-windows-admin.ps1"), "utf8");
 const linuxNetworkProof = readFileSync(resolve(repoRoot, "scripts", "m0-network-deny-linux.mjs"), "utf8");
 const macosNetworkProof = readFileSync(resolve(repoRoot, "scripts", "m0-network-deny-macos.mjs"), "utf8");
 const proofAudit = readFileSync(resolve(repoRoot, "scripts", "m0-proof-audit.mjs"), "utf8");
 const artifactManifest = readFileSync(resolve(repoRoot, "scripts", "m0-artifact-manifest.mjs"), "utf8");
+const coreBuildScript = readFileSync(resolve(repoRoot, "crates", "candor-core", "build.rs"), "utf8");
 const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "utf8");
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
@@ -125,6 +126,9 @@ for (const [contents, pattern, label] of [
   [proofAudit, "release artifact must include", "combined proof audit release artifact validation"],
   [artifactManifest, "releaseArtifacts", "artifact manifest release artifact list"],
   [artifactManifest, "expectedReleaseArtifactKinds", "artifact manifest expected release artifact kinds"],
+  [artifactManifest, '"crates/candor-core/build.rs"', "artifact manifest core build script identity"],
+  [coreBuildScript, "cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift", "macOS system Swift runtime rpath"],
+  [coreBuildScript, 'args(["--find", "swiftc"])', "macOS Xcode Swift runtime discovery"],
   [v3Verify, "V3 source security proof", "v3 aggregate source security step"],
   [v3Verify, "v3:source-security-proof", "v3 aggregate source security command"],
   [v3Verify, "V3 updater policy proof", "v3 aggregate updater policy step"],

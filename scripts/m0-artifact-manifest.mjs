@@ -232,6 +232,7 @@ const sourceFiles = [
   "v3/renderer/public/candor-mark.png",
   "crates/candor-core/Cargo.toml",
   "crates/candor-core/Cargo.lock",
+  "crates/candor-core/build.rs",
   "crates/candor-core/src/capture_service.rs",
   "crates/candor-core/src/capture_service_macos.rs",
   "crates/candor-core/src/consent_store.rs",
