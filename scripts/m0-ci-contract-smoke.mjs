@@ -70,6 +70,10 @@ function requireOrder(before, after, label) {
 }
 
 const requiredPatterns = [
+  ["uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2", "immutable Node 24 checkout action"],
+  ["uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0", "immutable Node 24 setup action"],
+  ["uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable 2026-06-30", "immutable Rust toolchain action"],
+  ["toolchain: stable", "explicit stable Rust toolchain selection"],
   ["os: [windows-latest, macos-26, ubuntu-latest]", "three-OS matrix with pinned macOS SDK"],
   ["fail-fast: false", "non-short-circuiting matrix"],
   ["node-version: 22", "Electron-compatible Node.js version"],
@@ -104,9 +108,9 @@ const requiredPatterns = [
   ["npm run m0:artifact-manifest", "artifact manifest"],
   ["if: always()\n        run: npm run m0:proof-audit -- --write release-v3/proofs/m0-proof-audit-summary.json", "always-run per-OS proof summary"],
   ["npm run m0:proof-audit -- --write release-v3/proofs/m0-proof-audit-summary.json", "per-OS proof summary"],
-  ["if: always()\n        uses: actions/upload-artifact@v4", "always-run artifact upload"],
-  ["actions/upload-artifact@v4", "artifact upload"],
-  ["actions/download-artifact@v4", "artifact download"],
+  ["if: always()\n        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0", "always-run immutable artifact upload"],
+  ["actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0", "immutable Node 24 artifact upload"],
+  ["actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1", "immutable Node 24 artifact download with digest enforcement"],
   ["name: candor-v3-m0-proof-${{ matrix.os }}-${{ github.sha }}", "small per-OS proof receipt artifact"],
   ["name: candor-v3-m0-package-${{ matrix.os }}-${{ github.sha }}", "separate per-OS package artifact"],
   ["pattern: candor-v3-m0-proof-*", "proof-only combined artifact collection"],
@@ -117,6 +121,16 @@ const requiredPatterns = [
 
 for (const [pattern, label] of requiredPatterns) {
   requireIncludes(pattern, label);
+}
+
+for (const [pattern, label] of [
+  ["actions/checkout@v4", "Node 20 checkout action"],
+  ["actions/setup-node@v4", "Node 20 setup action"],
+  ["actions/upload-artifact@v4", "Node 20 artifact upload action"],
+  ["actions/download-artifact@v4", "Node 20 artifact download action"],
+  ["dtolnay/rust-toolchain@stable", "mutable Rust toolchain action ref"],
+]) {
+  requireNotIncludes(pattern, label);
 }
 
 for (const [contents, pattern, label] of [
