@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -85,8 +86,8 @@ function parseDenyProbeOutput(text) {
 
 function parsePktapPacket(line) {
   const metadata = line.match(/\((.*)\)\s+(?:IP|IP6)\b/)?.[1] ?? "";
-  const processMatch = metadata.match(/(?:^|,\s*)proc\s+([^,]+):(\d+)(?:,|$)/);
-  const effectiveProcessMatch = metadata.match(/(?:^|,\s*)eproc\s+([^,]+):(\d+)(?:,|$)/);
+  const processMatch = metadata.match(/(?:^|,\s*)proc\s+([^,]*?):(\d+)(?:,|$)/);
+  const effectiveProcessMatch = metadata.match(/(?:^|,\s*)eproc\s+([^,]*?):(\d+)(?:,|$)/);
   return {
     line,
     processName: processMatch?.[1]?.trim() ?? null,
@@ -206,6 +207,18 @@ function runPacketParserSelfTest() {
     captureStats.metadataFilterDropped !== 15
   ) {
     throw new Error("macOS PKTAP capture statistics parser self-test failed");
+  }
+  const kernelPacket = parsePktapPacket(
+    "00:00:00.000000 (proc :0, eproc :0, out) IP 10.0.0.1.1 > 1.1.1.1.443: Flags [R]",
+  );
+  if (
+    kernelPacket.pid !== 0 ||
+    kernelPacket.processName !== "" ||
+    kernelPacket.effectivePid !== 0 ||
+    kernelPacket.effectiveProcessName !== "" ||
+    kernelPacket.direction !== "out"
+  ) {
+    throw new Error("macOS PKTAP kernel-attribution parser self-test failed");
   }
 }
 
@@ -357,18 +370,8 @@ const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
 const smokeProofPath = join(proofDir, `m0-packaged-runtime-smoke-darwin-${process.arch}.json`);
 const networkProofPath = join(proofDir, `m0-network-deny-macos-${timestamp}.json`);
 const captureInterface = "pktap,all";
-const candorProcessNames = [
-  "Candor v3 M0",
-  "Candor v3 M0 Hel",
-  "Candor v3 M0 Helper",
-  "Candor v3 M0 Helper (Renderer)",
-  "Candor v3 M0 Helper (GPU)",
-  "Candor v3 M0 Helper (Plugin)",
-  "candor-core",
-];
-const processMetadataFilter = `dir=out and (${candorProcessNames
-  .flatMap((name) => [`proc = '${name}'`, `eproc = '${name}'`])
-  .join(" or ")})`;
+const captureMetadataFilter = "dir=out";
+const captureFilePath = join(tmpdir(), `candor-m0-pktap-${process.pid}-${Date.now()}.pcapng`);
 const pfAnchor = `com.apple/candor-v3-m0-network-deny-${process.pid}`;
 const pfRules = `block drop out quick proto { tcp udp } all user ${invokingUid} group ${executionGid}\n`;
 const pfState = {
@@ -458,40 +461,31 @@ enableManagedPfDeny();
 
 const tcpdump = spawn("tcpdump", [
   "-n",
-  "-l",
+  "-U",
+  "-P",
   "-s",
   "256",
-  "-k",
-  "NPD",
   "-i",
   captureInterface,
   "-Q",
-  processMetadataFilter,
+  captureMetadataFilter,
+  "-w",
+  captureFilePath,
   "tcp or udp",
 ], {
   cwd: repoRoot,
-  stdio: ["ignore", "pipe", "pipe"],
+  stdio: ["ignore", "ignore", "pipe"],
 });
 const packets = [];
-const maxCapturedPackets = 5000;
+const maxCapturedPackets = 50000;
 let packetOverflowCount = 0;
-let packetBuffer = "";
 let tcpdumpError = "";
 let tcpdumpSpawnError = null;
 let tcpdumpExitedBeforeCleanup = false;
-tcpdump.stdout.on("data", (chunk) => {
-  packetBuffer += chunk.toString("utf8");
-  let newlineIndex = packetBuffer.indexOf("\n");
-  while (newlineIndex >= 0) {
-    const line = packetBuffer.slice(0, newlineIndex).trim();
-    packetBuffer = packetBuffer.slice(newlineIndex + 1);
-    if (line) {
-      if (packets.length < maxCapturedPackets) packets.push(line);
-      else packetOverflowCount += 1;
-    }
-    newlineIndex = packetBuffer.indexOf("\n");
-  }
-});
+let captureParseExitCode = null;
+let captureParseError = null;
+let captureParseStderr = "";
+let captureFileRemoved = false;
 tcpdump.stderr.on("data", (chunk) => {
   tcpdumpError += chunk.toString("utf8");
 });
@@ -603,12 +597,38 @@ try {
     if (!tcpdumpExitedBeforeCleanup) tcpdump.kill("SIGINT");
     await waitForExit(tcpdump).catch(() => null);
   }
-  const trailingPacket = packetBuffer.trim();
-  if (trailingPacket) {
-    if (packets.length < maxCapturedPackets) packets.push(trailingPacket);
-    else packetOverflowCount += 1;
-  }
   cleanupManagedPfDeny();
+  if (existsSync(captureFilePath)) {
+    try {
+      const parseResult = spawnSync(
+        "tcpdump",
+        ["-n", "-k", "NPD", "-r", captureFilePath, "tcp or udp"],
+        {
+          cwd: repoRoot,
+          encoding: "utf8",
+          maxBuffer: 64 * 1024 * 1024,
+        },
+      );
+      captureParseExitCode = parseResult.status;
+      captureParseError = parseResult.error?.message ?? null;
+      captureParseStderr = parseResult.stderr ?? "";
+      for (const line of (parseResult.stdout ?? "").split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (packets.length < maxCapturedPackets) packets.push(trimmed);
+        else packetOverflowCount += 1;
+      }
+    } finally {
+      try {
+        unlinkSync(captureFilePath);
+        captureFileRemoved = true;
+      } catch (error) {
+        captureParseError = [captureParseError, error.message].filter(Boolean).join("; ");
+      }
+    }
+  } else {
+    captureParseError = "PKTAP capture file was not created";
+  }
 }
 
 const smokeProof = existsSync(smokeProofPath)
@@ -625,15 +645,23 @@ const escapedApplicationPackets = parsedPackets.filter(
     isCandorProcessName(packet.processName) ||
     isCandorProcessName(packet.effectiveProcessName),
 );
-const packetsWithoutProcessMetadata = parsedPackets.filter(
+const kernelAttributedPackets = parsedPackets.filter(
   (packet) =>
-    packet.direction !== "out" ||
-    ((!Number.isInteger(packet.pid) ||
-      typeof packet.processName !== "string" ||
-      packet.processName.length === 0) &&
-      (!Number.isInteger(packet.effectivePid) ||
-        typeof packet.effectiveProcessName !== "string" ||
-        packet.effectiveProcessName.length === 0)),
+    (packet.pid === 0 && packet.processName === "") ||
+    (packet.effectivePid === 0 && packet.effectiveProcessName === ""),
+);
+const packetsWithoutProcessMetadata = parsedPackets.filter(
+  (packet) => {
+    const primaryAttributed =
+      Number.isInteger(packet.pid) &&
+      typeof packet.processName === "string" &&
+      (packet.processName.length > 0 || packet.pid === 0);
+    const effectiveAttributed =
+      Number.isInteger(packet.effectivePid) &&
+      typeof packet.effectiveProcessName === "string" &&
+      (packet.effectiveProcessName.length > 0 || packet.effectivePid === 0);
+    return packet.direction !== "out" || (!primaryAttributed && !effectiveAttributed);
+  },
 );
 const processIdentityMismatches = observedProcessList.filter(
   (process) => process.uid !== invokingUid || process.gid !== executionGid,
@@ -643,8 +671,14 @@ const applicationBlockedPacketCount = managedPf ? (pfState.applicationRuleStats?
 const applicationPacketCount = escapedApplicationPackets.length + applicationBlockedPacketCount;
 const packetAttribution = {
   captureInterface,
-  processMetadataFilter,
+  captureMetadataFilter,
   captureStats,
+  captureParse: {
+    exitCode: captureParseExitCode,
+    error: captureParseError,
+    stderr: captureParseStderr.trim(),
+    rawCaptureRemoved: captureFileRemoved,
+  },
   metadataSource: "macOS PKTAP process name, PID, and direction",
   blockedMetadataSource: managedPf
     ? "PF per-rule packet counters scoped to an isolated execution GID"
@@ -662,6 +696,8 @@ const packetAttribution = {
   hostBackgroundPacketSamples: parsedPackets
     .filter((packet) => !escapedApplicationPackets.includes(packet))
     .slice(0, 25),
+  kernelAttributedPacketCount: kernelAttributedPackets.length,
+  kernelAttributedPacketSamples: kernelAttributedPackets.slice(0, 25),
   packetsWithoutProcessMetadata: packetsWithoutProcessMetadata.slice(0, 25),
   observedProcesses: observedProcessList,
   processIdentityMismatches: processIdentityMismatches.slice(0, 25),
@@ -673,6 +709,9 @@ const packetAttribution = {
   complete:
     !tcpdumpSpawnError &&
     !tcpdumpExitedBeforeCleanup &&
+    captureParseExitCode === 0 &&
+    !captureParseError &&
+    captureFileRemoved &&
     captureStats.parsed &&
     captureStats.kernelDropped === 0 &&
     captureStats.captured === parsedPackets.length &&
@@ -726,8 +765,10 @@ const proof = {
   executable,
   interface: captureInterface,
   captureConfiguration: {
+    mode: "temporary-pcapng-file",
     snapshotLengthBytes: 256,
-    processMetadataFilter,
+    metadataFilter: captureMetadataFilter,
+    rawCaptureRemoved: captureFileRemoved,
   },
   smokeProofPath,
   denyLayerProbe,

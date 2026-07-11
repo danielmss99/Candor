@@ -66,11 +66,12 @@ background calls are disabled for M0.
   GID. PF per-rule counters prove the sentinel was blocked and that the app made
   zero blocked attempts after the counters were reset. A simultaneous
   `pktap,all` capture records any packets that escape PF with process metadata.
-  Its metadata filter admits only Candor, helper, or core process identities;
-  a bounded snapshot length and parsed tcpdump counters make any kernel packet
-  drop a hard failure. The proof also
-  verifies that the observed Candor process tree retains the isolated UID/GID.
-  It writes
+  It writes outbound packets to a bounded temporary pcapng file rather than
+  formatting them live, parses process metadata after the packaged app exits,
+  and deletes the raw host trace before publishing proof artifacts. Parsed
+  tcpdump counters make any kernel packet drop a hard failure. PID `0` packets
+  are retained as explicit kernel attribution. The proof also verifies that the
+  observed Candor process tree retains the isolated UID/GID. It writes
   `release-v3/proofs/m0-network-deny-macos-<timestamp>.json`, then flushes the
   anchor and releases the PF enable token in `finally`. Managed-PF mode also
   runs a small outbound TCP sentinel, records `denyLayerProbe.blocked: true`,
@@ -207,9 +208,10 @@ Managed-PF proof artifacts must include `denyLayerProbe.blocked: true`,
 `managedPf.anchorLoaded: true`, `managedPf.anchorFlushed: true`, and
 `managedPf.enableTokenReleased: true`. They must also show non-zero sentinel
 rule counters, a zero application counter baseline, zero final application rule
-counters, complete PKTAP process attribution, an identity-consistent Candor
-process tree, parsed capture statistics with zero kernel drops, and zero blocked
-or escaped Candor-attributed outbound TCP/UDP packets.
+counters, complete PKTAP process or kernel attribution, an identity-consistent
+Candor process tree, parsed capture statistics with zero kernel drops, confirmed
+raw-trace deletion, and zero blocked or escaped Candor-attributed outbound
+TCP/UDP packets.
 External-deny fallback artifacts are accepted only with explicit
 `externalDenyConfirmed: true`, complete PKTAP
 attribution, and the same zero-Candor-packet result.

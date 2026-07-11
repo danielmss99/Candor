@@ -1482,22 +1482,28 @@ function runSelfTest() {
     },
     interface: "pktap,all",
     captureConfiguration: {
+      mode: "temporary-pcapng-file",
       snapshotLengthBytes: 256,
-      processMetadataFilter:
-        "dir=out and (proc = 'Candor v3 M0' or eproc = 'Candor v3 M0' or proc = 'candor-core')",
+      metadataFilter: "dir=out",
+      rawCaptureRemoved: true,
     },
     packetCount: 0,
     denyLayerProbe: { ...minimalValidDenyLayerProbe(), pid: 1234, uid: 501, gid: 62000 },
     packetAttribution: {
       captureInterface: "pktap,all",
-      processMetadataFilter:
-        "dir=out and (proc = 'Candor v3 M0' or eproc = 'Candor v3 M0' or proc = 'candor-core')",
+      captureMetadataFilter: "dir=out",
       captureStats: {
         parsed: true,
         captured: 0,
         receivedByFilter: 12,
         kernelDropped: 0,
         metadataFilterDropped: 12,
+      },
+      captureParse: {
+        exitCode: 0,
+        error: null,
+        stderr: "reading from file fixture.pcapng",
+        rawCaptureRemoved: true,
       },
       blockedMetadataSource: "PF per-rule packet counters scoped to an isolated execution GID",
       complete: true,
@@ -1512,6 +1518,9 @@ function runSelfTest() {
       observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor v3 M0" }],
       processIdentityMismatches: [],
       observedPacketCount: 0,
+      packetsWithoutProcessMetadata: [],
+      kernelAttributedPacketCount: 0,
+      kernelAttributedPacketSamples: [],
     },
     managedPf: {
       requested: true,
@@ -1601,6 +1610,24 @@ function runSelfTest() {
       failure.includes("PKTAP capture statistics must be complete with zero kernel drops"),
     ),
     "managed macOS network proof must fail when the kernel drops PKTAP evidence",
+  );
+
+  const retainedCaptureManagedMacosProof = cloneJson(validManagedMacosProof);
+  retainedCaptureManagedMacosProof.packetAttribution.complete = false;
+  retainedCaptureManagedMacosProof.captureConfiguration.rawCaptureRemoved = false;
+  retainedCaptureManagedMacosProof.packetAttribution.captureParse.rawCaptureRemoved = false;
+  const retainedCaptureManagedMacosFailures = validateNetworkProof(
+    "macos",
+    retainedCaptureManagedMacosProof,
+  );
+  assertSelfTest(
+    retainedCaptureManagedMacosFailures.some((failure) =>
+      failure.includes("removed temporary pcapng file"),
+    ) &&
+      retainedCaptureManagedMacosFailures.some((failure) =>
+        failure.includes("removed before proof publication"),
+      ),
+    "managed macOS network proof must fail when the raw PKTAP trace remains on disk",
   );
 
   const truncatedManagedMacosProof = cloneJson(validManagedMacosProof);
@@ -1705,18 +1732,24 @@ function validateNetworkProof(osName, payload) {
       failures,
     );
     requireField(
-      payload?.captureConfiguration?.snapshotLengthBytes === 256,
-      "PKTAP capture must use a bounded snapshot length",
+      payload?.captureConfiguration?.mode === "temporary-pcapng-file" &&
+        payload.captureConfiguration.snapshotLengthBytes === 256 &&
+        payload.captureConfiguration.metadataFilter === "dir=out" &&
+        payload.captureConfiguration.rawCaptureRemoved === true,
+      "PKTAP capture must use a removed temporary pcapng file with bounded snapshots",
       failures,
     );
     requireField(
-      typeof attribution?.processMetadataFilter === "string" &&
-        attribution.processMetadataFilter.includes("dir=out") &&
-        attribution.processMetadataFilter.includes("Candor v3 M0") &&
-        attribution.processMetadataFilter.includes("candor-core") &&
-        attribution.processMetadataFilter ===
-          payload?.captureConfiguration?.processMetadataFilter,
-      "PKTAP capture must be filtered to outbound Candor process identities",
+      attribution?.captureMetadataFilter === "dir=out" &&
+        attribution.captureMetadataFilter === payload?.captureConfiguration?.metadataFilter,
+      "PKTAP capture must be restricted to outbound packet metadata",
+      failures,
+    );
+    requireField(
+      attribution?.captureParse?.exitCode === 0 &&
+        !attribution.captureParse.error &&
+        attribution.captureParse.rawCaptureRemoved === true,
+      "PKTAP pcapng must parse successfully and be removed before proof publication",
       failures,
     );
     requireField(
@@ -1724,6 +1757,12 @@ function validateNetworkProof(osName, payload) {
         attribution.captureStats.kernelDropped === 0 &&
         attribution.captureStats.captured === attribution?.observedPacketCount,
       "PKTAP capture statistics must be complete with zero kernel drops",
+      failures,
+    );
+    requireField(
+      Array.isArray(attribution?.packetsWithoutProcessMetadata) &&
+        attribution.packetsWithoutProcessMetadata.length === 0,
+      "PKTAP packets must have process or explicit kernel attribution",
       failures,
     );
     if (payload?.managedPf?.requested === true) {

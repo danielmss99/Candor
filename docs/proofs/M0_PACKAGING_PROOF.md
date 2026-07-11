@@ -144,8 +144,8 @@ Windows, Linux, and macOS network-deny proofs by default. Windows uses temporary
 outbound firewall rules for the packaged app and sidecar. Linux runs the
 packaged smoke inside an ephemeral network namespace. macOS uses a temporary
 managed PF anchor scoped to an isolated execution GID, per-rule blocked-attempt
-counters, and process-filtered PKTAP escape attribution with an explicit
-zero-kernel-drop gate. Linux and managed-PF
+counters, and temporary-pcapng PKTAP escape attribution with explicit
+zero-kernel-drop and raw-trace-deletion gates. Linux and managed-PF
 macOS proofs must also record a blocked outbound deny-layer sentinel before the
 packaged smoke proof is accepted. The Linux namespace and macOS PF/PKTAP
 controls stay privileged, while the packaged app is explicitly dropped back to
