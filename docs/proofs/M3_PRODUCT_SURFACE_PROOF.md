@@ -30,25 +30,32 @@ codified locally instead of claiming a formal Figma component library existed.
 
 ```powershell
 npm run m3:verify
-node scripts/m0-packaged-smoke.mjs "C:\Claude_Config\candor\release-v3-design-vetted-final15\win-unpacked\Candor v3 M0.exe"
+$env:CANDOR_M0_SCREENSHOT_LABEL='gui-review'; npm run m0:packaged-smoke
+$env:CANDOR_M0_SCREENSHOT_LABEL='gui-review-compact'; $env:CANDOR_M0_SMOKE_WIDTH='1080'; $env:CANDOR_M0_SMOKE_HEIGHT='720'; npm run m0:packaged-smoke
 ```
 
 ## Implemented Surface
 
-- Desktop shell with session tabs, a maximum of six open meetings, grouped left
-  navigation, local-only status, and a reusable record action whose neutral idle
-  state is visually distinct from its filled active-recording state
+- Desktop shell with a maximum of three visible meeting tabs, an overflow menu,
+  Current meeting, Meetings, Exports, and Settings navigation, local-only status,
+  and a reusable record action whose neutral idle state is visually distinct from
+  its filled active-recording state
 - Live workspace with transcript and manual notes visible together
 - Compact audio evidence timeline, timestamp markers, playback controls, and
   timestamp-linked `Mark moment`
 - Separate manual notes and quiet AI suggestions views, with model-quality
   controls kept out of the writing view on compact desktop windows
+- Transcript, Notes, and AI segmented panes at compact desktop widths, without
+  horizontal workspace scrolling
 - Home, library, meeting summary, Review Mode, local export, Settings, and
   custody proof views
 - First-run activation and setup screens that support a local trial without a
   persistent account
 - Core-backed notes, retention, consent, model, capture, privacy, and scheduler
   facts
+- Per-meeting, core-backed privacy receipts with encrypted chunk, channel,
+  transcript, model integrity, export, retention, and network capability facts
+- Progressive settings with Local AI and diagnostics behind Advanced disclosure
 - Quality/Fast local AI control with an explicit heuristic fallback when no
   verified local instruct model is installed
 - Structured report preview with native editable Word, searchable PDF, and
@@ -65,12 +72,16 @@ node scripts/m0-packaged-smoke.mjs "C:\Claude_Config\candor\release-v3-design-ve
 `scripts/m3-product-surface-smoke.mjs` verifies:
 
 - all seven Figma-derived product views exist in the renderer
+- feature-owned renderer modules, typed protocol client, capture and local-job
+  state hooks, stale-response coordination, and paged library reads are present
 - transcript, notes, session tabs, record action, evidence timeline, and marked
   moments are present and accessible by labeled controls
 - `recording.notes.save` and `recording.notes.read` persist notes through the
   Rust core without raw path exposure
 - notes are searchable and included before the transcript in Markdown export
 - retention remains manual-delete-only
+- privacy capability and per-meeting receipt RPCs are pathless and report zero
+  external calls in the smoke fixture
 - local AI asset import is pathless at the renderer boundary
 - local document saving is pathless at the renderer boundary; Electron main
   owns the save dialog and returns only a basename plus verification facts
@@ -79,7 +90,7 @@ node scripts/m0-packaged-smoke.mjs "C:\Claude_Config\candor\release-v3-design-ve
 - the verified palette matches `token.json`
 - violet text and link tokens maintain at least 4.5:1 contrast on canvas,
   surface, and raised-surface backgrounds
-- responsive desktop rules exist for 1280px and 1080px widths
+- responsive desktop rules exist for 1280px, 1180px, and 1080px widths
 - compact Review Mode removes its inherited minimum width and keeps navigation,
   editing, and report preview columns inside the 1080px desktop viewport
 - verified custody text cannot use scrambling or interval-driven fake glyphs
@@ -92,16 +103,16 @@ node scripts/m0-packaged-smoke.mjs "C:\Claude_Config\candor\release-v3-design-ve
 
 The packaged smoke captures and pixel-checks these 1440 by 900 Windows views:
 
-- `m3-product-surface-reference-win32-x64-activation.png`
-- `m3-product-surface-reference-win32-x64-onboarding.png`
-- `m3-product-surface-reference-win32-x64.png` for Live Meeting
-- `m3-product-surface-reference-win32-x64-home.png`
-- `m3-product-surface-reference-win32-x64-library.png`
-- `m3-product-surface-reference-win32-x64-detail.png`
-- `m3-product-surface-reference-win32-x64-review.png`
-- `m3-product-surface-reference-win32-x64-export.png`
-- `m3-product-surface-reference-win32-x64-settings.png`
-- `m3-product-surface-reference-win32-x64-proof.png`
+- `m3-product-surface-gui-review-win32-x64-activation.png`
+- `m3-product-surface-gui-review-win32-x64-onboarding.png`
+- `m3-product-surface-gui-review-win32-x64.png` for Live Meeting
+- `m3-product-surface-gui-review-win32-x64-home.png`
+- `m3-product-surface-gui-review-win32-x64-library.png`
+- `m3-product-surface-gui-review-win32-x64-detail.png`
+- `m3-product-surface-gui-review-win32-x64-review.png`
+- `m3-product-surface-gui-review-win32-x64-export.png`
+- `m3-product-surface-gui-review-win32-x64-settings.png`
+- `m3-product-surface-gui-review-win32-x64-proof.png`
 
 The capture path forces a full window repaint and discards a compositor warm-up
 frame before hashing each PNG. This prevents stale software-compositor tiles
@@ -111,18 +122,20 @@ shell rendering.
 
 The same packaged smoke can set `CANDOR_M0_SMOKE_WIDTH` and
 `CANDOR_M0_SMOKE_HEIGHT`. A second run at 1080 by 720 verifies the desktop
-layout below the 1280px breakpoint and writes screenshots with a `compact`
-label. The compact Home, Live Meeting, Review Mode, Export, and Settings
-captures were manually inspected after the automated pixel checks. The record
-actions remain stable, the manual notes editor keeps usable writing space,
-Review Mode keeps all three columns and its `Edit` action visible, and
-notifications do not cover controls or report content.
+layout below the compact breakpoint and writes screenshots with a
+`gui-review-compact` label. The compact Home, Live Meeting, Review Mode, Export,
+Settings, and privacy captures were manually inspected after the automated pixel
+checks. The record actions remain stable, the meeting workspace exposes one
+readable selected pane, Review Mode keeps its columns and `Edit` action visible,
+and notifications do not cover controls or report content. Strict response
+validation also caught and fixed a quote-only citation compatibility defect during
+this visual pass.
 
 Machine-readable evidence is stored at:
 
 ```text
-release-v3/proofs/m0-packaged-runtime-smoke-win32-x64.json
-release-v3/proofs/m0-packaged-runtime-smoke-compact-win32-x64.json
+release-v3/proofs/m0-packaged-runtime-smoke-gui-review-win32-x64.json
+release-v3/proofs/m0-packaged-runtime-smoke-gui-review-compact-win32-x64.json
 release-v3/proofs/v3-local-verification-win32-x64.json
 release-v3/proofs/v3-release-artifact-smoke-win32-x64.json
 ```

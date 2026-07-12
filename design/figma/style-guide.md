@@ -35,11 +35,12 @@ is the production token source until the Figma file gains a formal library.
 - Top session rail: 58px tall.
 - Expanded navigation: 240px wide.
 - Main content padding: 28px at the reference viewport, 18px on compact desktop.
-- Show at most six open meeting tabs, then use local library navigation.
-- At 1180px and below, the sidebar becomes compact and the live workspace uses a
-  narrower notes column.
-- At 960px and below, the app remains a desktop layout and uses horizontal content
-  scrolling where a three-pane workflow cannot remain readable.
+- Show at most three open meeting tabs, then place additional local meetings in
+  the overflow menu.
+- At 1180px and below, the live workspace becomes a Transcript, Notes, and AI
+  segmented view. It does not require horizontal content scrolling.
+- At 960px, the app remains a desktop layout with stable controls and one readable
+  meeting pane at a time.
 
 ## Color
 
@@ -93,12 +94,15 @@ omitted when it competes with the label or is not backed by a working command.
 ### Session Tabs
 
 Tabs preserve local meeting context and expose a close control. They are compact,
-single-line, and limited to six visible sessions. Tabs never imply cloud sync.
+single-line, and limited to three visible sessions. Additional sessions remain
+available from an overflow menu. Tabs never imply cloud sync.
 
 ### Sidebar
 
-Navigation is grouped by workflow: Workspace, Meetings, and Local controls. The
-Figma `Shared` destination is intentionally replaced by local exports because
+The default navigation contains Current meeting, Meetings, Exports, and Settings.
+Review, report detail, privacy diagnostics, model integrity, and import tools open
+inside their workflow or under Advanced settings instead of competing in the
+primary sidebar. The Figma `Shared` destination is intentionally omitted because
 Candor has no cloud sharing surface.
 
 ### Live Workspace
@@ -107,7 +111,22 @@ The waveform is a 92px confidence strip. The content below is a transcript and
 notes split, with a persistent 52px transport. User notes use a real editable
 textarea. AI suggestions and their model-quality control remain in a separate
 panel state so the manual notes editor keeps its writing space on compact desktop
-windows.
+windows. Compact desktop uses a Transcript, Notes, and AI segmented control.
+
+### Privacy Receipt
+
+Each meeting exposes a pathless privacy receipt backed by Rust-core facts. It
+shows encrypted chunk state, capture channels, transcript count, processing and
+export history, model integrity fingerprints when available, retention policy,
+and the capability-based network policy. Friendly facts are visible first;
+technical evidence uses disclosure controls.
+
+### Settings
+
+General, Recording, Export, and License are the default sections. Local AI and
+Privacy and diagnostics are hidden behind an explicit Advanced control. Technical
+terms such as runner, GGUF, SHA-256, scheduler, and vault are supporting details,
+not primary navigation labels.
 
 ### Notifications
 
@@ -145,6 +164,13 @@ data, and rejected review items are omitted from the generated document.
 - Figma meeting intelligence -> `.meeting-intelligence`
 - Figma review navigation -> `.review-navigation`
 - Figma document page -> `.document-preview`
+- Meeting custody evidence -> `.privacy-receipt`
+- Compact meeting navigation -> `.compact-pane-switcher`
 
 The implementation uses React, TypeScript, and plain CSS already present in the
 Electron v3 renderer. Tailwind and remote Figma assets are not introduced.
+
+Feature ownership is split under `v3/renderer/src/features` for capture, local AI,
+onboarding, home, library, live meeting, detail, review, export, privacy, and
+settings. `CandorApp.tsx` coordinates these domains through the typed core client,
+feature hooks, and explicit state machines.

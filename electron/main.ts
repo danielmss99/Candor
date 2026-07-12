@@ -18,6 +18,7 @@ type JsonValue =
 
 interface CoreResponse {
   id: number;
+  protocolVersion: string;
   ok: boolean;
   result?: JsonValue;
   error?: {
@@ -51,6 +52,7 @@ interface CoreSupervisorState {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDev = !app.isPackaged;
+const expectedCoreProtocolVersion = "m0-jsonrpc-stdio-1";
 const rendererDevUrl = process.env.CANDOR_V3_RENDERER_URL ?? "http://127.0.0.1:5173";
 const smokeOutputPath = process.env.CANDOR_M0_SMOKE_OUT ?? "";
 const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
@@ -68,6 +70,7 @@ const rendererCoreMethods = new Set([
   "vault.openLocal",
   "vault.status",
   "privacy.auditSnapshot",
+  "privacy.capabilities",
   "updates.status",
   "import.v2.status",
   "consent.status",
@@ -92,10 +95,11 @@ const rendererCoreMethods = new Set([
   "transcription.status",
   "transcription.runLocal",
   "recording.durable.status",
-  "recording.durable.list",
+  "recording.durable.listPage",
   "recording.durable.read",
   "recording.durable.replayManifest",
-  "recording.durable.transcript",
+  "recording.durable.transcriptPage",
+  "recording.privacyReceipt",
   "recording.durable.readAudioChunk",
   "recording.durable.search",
   "recording.notes.read",
@@ -245,6 +249,10 @@ function startCore(): void {
     if (!entry) return;
     clearTimeout(entry.timeout);
     pending.delete(response.id);
+    if (response.protocolVersion !== expectedCoreProtocolVersion || typeof response.ok !== "boolean") {
+      entry.reject(new Error("candor-core returned an invalid versioned response envelope"));
+      return;
+    }
     entry.resolve(response);
   });
 
@@ -853,12 +861,22 @@ async function captureSettledSmokePage(
   await delay(240);
   windowRef.webContents.invalidate();
   await delay(80);
-  await windowRef.webContents.capturePage();
+  const firstImage = await windowRef.webContents.capturePage();
   windowRef.webContents.invalidate();
   await delay(60);
-  const image = await windowRef.webContents.capturePage();
-  const png = image.toPNG();
-  const size = image.getSize();
+  const secondImage = await windowRef.webContents.capturePage();
+  windowRef.webContents.invalidate();
+  await delay(100);
+  const thirdImage = await windowRef.webContents.capturePage();
+  const captures = [firstImage, secondImage, thirdImage].map((image) => ({
+    image,
+    png: image.toPNG(),
+  }));
+  const selectedCapture = captures.reduce((best, candidate) =>
+    candidate.png.length > best.png.length ? candidate : best,
+  );
+  const png = selectedCapture.png;
+  const size = selectedCapture.image.getSize();
   const state = (await windowRef.webContents.executeJavaScript(
     `({
       currentView: document.querySelector('[data-view]')?.getAttribute('data-view') ?? null,
@@ -875,6 +893,7 @@ async function captureSettledSmokePage(
     captured: true,
     forcedWindowRepaint: true,
     warmupCapture: true,
+    captureCandidates: captures.map((candidate) => candidate.png.length),
     bytes: png.length,
     width: size.width,
     height: size.height,
@@ -903,13 +922,59 @@ async function captureSmokeView(
   const navigation = (await windowRef.webContents.executeJavaScript(
     `
       (async () => {
-        const button = Array.from(document.querySelectorAll('.desktop-nav button'))
-          .find((node) => node.textContent?.trim() === ${JSON.stringify(navLabel)});
-        if (!(button instanceof HTMLButtonElement) || button.disabled) {
-          return { clicked: false, reason: 'navigation-unavailable' };
+        const settle = () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const clickExact = async (selector, label) => {
+          const button = Array.from(document.querySelectorAll(selector))
+            .find((node) => node.textContent?.trim() === label);
+          if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
+          button.click();
+          await settle();
+          return true;
+        };
+        let clicked = false;
+        const targetView = ${JSON.stringify(view)};
+        if (targetView === 'home') {
+          const wordmark = document.querySelector('.wordmark');
+          if (wordmark instanceof HTMLButtonElement && !wordmark.disabled) {
+            wordmark.click();
+            await settle();
+            clicked = true;
+          }
+        } else if (targetView === 'library') {
+          clicked = await clickExact('.desktop-nav button', 'Meetings');
+        } else if (targetView === 'detail') {
+          if (document.querySelector('[data-view]')?.getAttribute('data-view') !== 'library') {
+            await clickExact('.desktop-nav button', 'Meetings');
+          }
+          const row = document.querySelector('.library-row');
+          if (row instanceof HTMLButtonElement && !row.disabled) {
+            row.click();
+            await settle();
+            clicked = true;
+          }
+        } else if (targetView === 'review') {
+          clicked = await clickExact('button', 'Review report');
+          if (!clicked) clicked = await clickExact('button', 'Review meeting');
+        } else if (targetView === 'export') {
+          clicked = await clickExact('.desktop-nav button', 'Exports');
+        } else if (targetView === 'settings') {
+          clicked = await clickExact('.desktop-nav button', 'Settings');
+        } else if (targetView === 'proof') {
+          await clickExact('.desktop-nav button', 'Settings');
+          const advanced = document.querySelector('.advanced-settings-toggle');
+          if (advanced instanceof HTMLButtonElement && advanced.getAttribute('aria-expanded') !== 'true') {
+            advanced.click();
+            await settle();
+          }
+          await clickExact('.settings-layout nav button', 'Privacy and diagnostics');
+          clicked = await clickExact('button', 'Open full diagnostics');
         }
-        button.click();
-        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        if (!clicked) return { clicked: false, reason: 'workflow-navigation-unavailable' };
+        for (let index = 0; index < 80; index += 1) {
+          const current = document.querySelector('[data-view]')?.getAttribute('data-view');
+          if (current === targetView) break;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
         if (${JSON.stringify(view)} === 'detail') {
           const generate = Array.from(document.querySelectorAll('button'))
             .find((node) => node.textContent?.trim() === 'Generate local recap');
@@ -922,7 +987,7 @@ async function captureSmokeView(
           }
         }
         return {
-          clicked: true,
+          clicked,
           currentView: document.querySelector('[data-view]')?.getAttribute('data-view') ?? null,
           bodyTextCharacters: document.body?.innerText?.length ?? 0,
           exportFormats: Array.from(document.querySelectorAll('.format-options button')).map((button) => ({
@@ -1153,7 +1218,7 @@ async function runM0Smoke(): Promise<void> {
     }
     await clickSmokeButton(windowRef, "Open App");
     await waitForRendererView(windowRef, "home");
-    await clickSmokeButton(windowRef, "Live meeting");
+    await clickSmokeButton(windowRef, "Current meeting");
     await waitForRendererView(windowRef, "meeting");
     const smokeLicense = await getLicenseService().status();
     const licenseFixture: JsonValue = {
@@ -1272,13 +1337,13 @@ async function runM0Smoke(): Promise<void> {
     if (smokeScreenshotPath) {
       rendererScreenshot = await captureSettledSmokePage(windowRef, smokeScreenshotPath);
       const views: Array<[string, string]> = [
-        ["home", "Home"],
-        ["library", "Recording library"],
-        ["detail", "Meeting summary"],
-        ["review", "Review mode"],
-        ["export", "Local export"],
+        ["home", "Candor wordmark"],
+        ["library", "Meetings"],
+        ["detail", "Open meeting"],
+        ["review", "Review report"],
+        ["export", "Exports"],
         ["settings", "Settings"],
-        ["proof", "Custody proof"],
+        ["proof", "Privacy and diagnostics"],
       ];
       for (const [view, navLabel] of views) {
         rendererViewScreenshots.push(await captureSmokeView(windowRef, view, navLabel));

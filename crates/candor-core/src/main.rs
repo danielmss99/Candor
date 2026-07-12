@@ -36,9 +36,10 @@ use model_manager::{
     ModelImportStartParams, ModelManager, ModelManagerError, ModelProofParams,
 };
 use recording_store::{
-    AudioChunkParams, ExportRecordingParams, RecordingIdParams, RecordingStore,
-    RecordingStoreError, SaveNotesParams, SearchRecordingsParams, StartRecordingParams,
-    WriteAudioChunkParams, WriteChunkParams, WriteTranscriptSegmentParams,
+    AudioChunkParams, ExportRecordingParams, RecordingIdParams, RecordingPageParams,
+    RecordingStore, RecordingStoreError, SaveNotesParams, SearchRecordingsParams,
+    StartRecordingParams, TranscriptPageParams, WriteAudioChunkParams, WriteChunkParams,
+    WriteTranscriptSegmentParams,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -66,6 +67,7 @@ struct RpcRequest {
 #[serde(rename_all = "camelCase")]
 struct RpcResponse {
     id: Value,
+    protocol_version: &'static str,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
@@ -208,9 +210,56 @@ fn now_ms() -> u128 {
         .unwrap_or_default()
 }
 
+fn network_capability_matrix() -> Value {
+    json!({
+        "policy": "disabled-by-default",
+        "externalCallsAttempted": 0,
+        "capabilities": [
+            {
+                "id": "recording",
+                "label": "Recording",
+                "mode": "denied",
+                "trigger": "never",
+                "owner": "candor-core"
+            },
+            {
+                "id": "transcription",
+                "label": "Transcription",
+                "mode": "denied",
+                "trigger": "never",
+                "owner": "candor-core"
+            },
+            {
+                "id": "local-ai",
+                "label": "Local AI",
+                "mode": "denied",
+                "trigger": "never",
+                "owner": "candor-core"
+            },
+            {
+                "id": "license",
+                "label": "License activation",
+                "mode": "local-only",
+                "trigger": "explicit-user-action",
+                "owner": "electron-main"
+            },
+            {
+                "id": "updates",
+                "label": "Update check",
+                "mode": "disabled",
+                "trigger": "explicit-user-action-not-implemented",
+                "owner": "electron-main"
+            }
+        ],
+        "rawPathExposed": false,
+        "keyMaterialExposedToRenderer": false
+    })
+}
+
 fn make_error(id: Value, code: &'static str, message: impl Into<String>) -> RpcResponse {
     RpcResponse {
         id,
+        protocol_version: PROTOCOL_VERSION,
         ok: false,
         result: None,
         error: Some(RpcError {
@@ -301,6 +350,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "vault.proofOsKeyStorage",
                 "vault.proofPassphraseFallback",
                 "privacy.auditSnapshot",
+                "privacy.capabilities",
                 "updates.status",
                 "import.v2.status",
                 "import.v2.fromFolder",
@@ -348,9 +398,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "recording.durable.finish",
                 "recording.durable.recover",
                 "recording.durable.list",
+                "recording.durable.listPage",
                 "recording.durable.read",
                 "recording.durable.replayManifest",
                 "recording.durable.transcript",
+                "recording.durable.transcriptPage",
+                "recording.privacyReceipt",
                 "recording.durable.readAudioChunk",
                 "recording.durable.search",
                 "recording.notes.read",
@@ -444,6 +497,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             "cloudAi": "disabled",
             "recordedAt": now_ms()
         }),
+        "privacy.capabilities" => network_capability_matrix(),
         "updates.status" => state.update_policy.status(),
         "import.v2.status" => state.v2_importer.status(),
         "import.v2.fromFolder" => {
@@ -663,54 +717,100 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state.local_instruct_model.recap(
+            let recording_id = params.recording_id.clone();
+            let value = match state.local_instruct_model.recap(
                 &state.recording_store,
                 &mut state.model_scheduler,
                 params,
             ) {
                 Ok(value) => value,
                 Err(error) => return make_local_instruct_error(id, error),
+            };
+            let status = state.local_instruct_model.status(&state.model_scheduler);
+            if let Err(error) = state.recording_store.record_processing_fact(
+                &recording_id,
+                "local-ai-recap",
+                "llama-cpp-local",
+                Some("managed-local-instruct"),
+                status.get("modelSha256").and_then(Value::as_str),
+            ) {
+                return make_recording_error(id, error);
             }
+            value
         }
         "ai.askInstruct" => {
             let params = match decode_params::<LocalInstructAskParams>(id.clone(), req.params) {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state.local_instruct_model.ask(
+            let recording_id = params.recording_id.clone();
+            let value = match state.local_instruct_model.ask(
                 &state.recording_store,
                 &mut state.model_scheduler,
                 params,
             ) {
                 Ok(value) => value,
                 Err(error) => return make_local_instruct_error(id, error),
+            };
+            let status = state.local_instruct_model.status(&state.model_scheduler);
+            if let Err(error) = state.recording_store.record_processing_fact(
+                &recording_id,
+                "local-ai-ask",
+                "llama-cpp-local",
+                Some("managed-local-instruct"),
+                status.get("modelSha256").and_then(Value::as_str),
+            ) {
+                return make_recording_error(id, error);
             }
+            value
         }
         "ai.askHeuristic" => {
             let params = match decode_params::<LocalAskParams>(id.clone(), req.params) {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state
+            let recording_id = params.recording_id.clone();
+            let value = match state
                 .local_ai_service
                 .ask_heuristic(&state.recording_store, params)
             {
                 Ok(value) => value,
                 Err(error) => return make_local_ai_error(id, error),
+            };
+            if let Err(error) = state.recording_store.record_processing_fact(
+                &recording_id,
+                "local-ai-ask",
+                "heuristic-local",
+                None,
+                None,
+            ) {
+                return make_recording_error(id, error);
             }
+            value
         }
         "ai.recapHeuristic" => {
             let params = match decode_params::<LocalRecapParams>(id.clone(), req.params) {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state
+            let recording_id = params.recording_id.clone();
+            let value = match state
                 .local_ai_service
                 .recap_heuristic(&state.recording_store, params)
             {
                 Ok(value) => value,
                 Err(error) => return make_local_ai_error(id, error),
+            };
+            if let Err(error) = state.recording_store.record_processing_fact(
+                &recording_id,
+                "local-ai-recap",
+                "heuristic-local",
+                None,
+                None,
+            ) {
+                return make_recording_error(id, error);
             }
+            value
         }
         "ai.schedulerStatus" => state.model_scheduler.status(),
         "ai.proofHeuristicAsk" => {
@@ -749,14 +849,33 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state.transcription_service.run_local(
+            let recording_id = params.recording_id.clone();
+            let value = match state.transcription_service.run_local(
                 &state.recording_store,
                 &mut state.model_scheduler,
                 params,
             ) {
                 Ok(value) => value,
                 Err(error) => return make_transcription_error(id, error),
+            };
+            let model = value.get("model").and_then(Value::as_object);
+            if let Err(error) = state.recording_store.record_processing_fact(
+                &recording_id,
+                "transcription",
+                value
+                    .get("engine")
+                    .and_then(Value::as_str)
+                    .unwrap_or("whisper-rs"),
+                model
+                    .and_then(|value| value.get("modelId"))
+                    .and_then(Value::as_str),
+                model
+                    .and_then(|value| value.get("sha256"))
+                    .and_then(Value::as_str),
+            ) {
+                return make_recording_error(id, error);
             }
+            value
         }
         "transcription.proofSynthetic" => {
             let params = match decode_params::<TranscriptionProofParams>(id.clone(), req.params) {
@@ -839,6 +958,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             Ok(value) => value,
             Err(error) => return make_recording_error(id, error),
         },
+        "recording.durable.listPage" => {
+            let params = match decode_params::<RecordingPageParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.list_page(params) {
+                Ok(value) => value,
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
         "recording.durable.read" => {
             let params = match decode_params::<RecordingIdParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -866,6 +995,29 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             };
             match state.recording_store.transcript(params) {
                 Ok(value) => value,
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "recording.durable.transcriptPage" => {
+            let params = match decode_params::<TranscriptPageParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.transcript_page(params) {
+                Ok(value) => value,
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "recording.privacyReceipt" => {
+            let params = match decode_params::<RecordingIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.privacy_receipt(params) {
+                Ok(mut value) => {
+                    value["network"] = network_capability_matrix();
+                    value
+                }
                 Err(error) => return make_recording_error(id, error),
             }
         }
@@ -922,6 +1074,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
         "core.shutdown" => {
             let response = RpcResponse {
                 id,
+                protocol_version: PROTOCOL_VERSION,
                 ok: true,
                 result: Some(json!({ "shutdown": true })),
                 error: None,
@@ -940,6 +1093,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
 
     RpcResponse {
         id,
+        protocol_version: PROTOCOL_VERSION,
         ok: true,
         result: Some(result),
         error: None,
@@ -1127,6 +1281,16 @@ mod tests {
         assert_eq!(result["vaultState"], "m1-sqlcipher-feature-disabled");
         #[cfg(feature = "sqlcipher-vault")]
         assert_eq!(result["vaultState"], "m1-sqlcipher-feature-enabled");
+    }
+
+    #[test]
+    fn every_rpc_response_carries_the_protocol_version() {
+        let mut state = core_state();
+        let success = handle_request(request("core.status"), &mut state);
+        let denied = handle_request(request("not.allowed"), &mut state);
+
+        assert_eq!(success.protocol_version, PROTOCOL_VERSION);
+        assert_eq!(denied.protocol_version, PROTOCOL_VERSION);
     }
 
     #[test]

@@ -27,10 +27,17 @@ unexpected values, attempt unknown methods, or try to navigate/network out.
 - The renderer may call typed consent controls: `consent.status` and
   `consent.acknowledge`.
 - The renderer may call pathless local library and playback methods:
-  `recording.durable.list`, `recording.durable.read`,
-  `recording.durable.replayManifest`, `recording.durable.transcript`,
-  `recording.durable.readAudioChunk`, `recording.durable.search`, and
-  `export.create`.
+  `recording.durable.listPage`, `recording.durable.read`,
+  `recording.durable.replayManifest`, `recording.durable.transcriptPage`,
+  `recording.privacyReceipt`, `recording.durable.readAudioChunk`,
+  `recording.durable.search`, and `export.create`. Page limits are bounded by
+  the core. The privacy receipt exposes facts but no raw paths or key material.
+- The renderer may call `privacy.capabilities` to obtain the core-owned network
+  capability matrix. It cannot change policy or add a network endpoint.
+- Every core response includes the `m0-jsonrpc-stdio-1` protocol version.
+  Electron main rejects an invalid envelope. The typed renderer client verifies
+  the handshake once, assigns a request identity, and rejects malformed response
+  fields instead of silently coercing them into reassuring defaults.
 - The renderer may call `exportSaveLocal` with a recording id, one of the three
   report formats, bounded structured report data, and bounded document options.
   Electron main owns the native save dialog and is the only layer that receives

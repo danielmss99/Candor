@@ -28,6 +28,8 @@ const RECORDING_CHUNK_KEY_LABEL: &[u8] = b"recording-chunk-v1";
 const MAX_DURABLE_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_NOTES_MARKDOWN_BYTES: usize = 512 * 1024;
 const MAX_DOCUMENT_EXPORT_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_PAGE_LIMIT: u64 = 50;
+const MAX_PAGE_LIMIT: u64 = 500;
 static NEXT_RECORDING_ID_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -117,6 +119,25 @@ pub struct RecordingIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecordingPageParams {
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default = "default_page_limit")]
+    pub limit: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranscriptPageParams {
+    pub recording_id: String,
+    #[serde(default)]
+    pub offset: u64,
+    #[serde(default = "default_page_limit")]
+    pub limit: u64,
+}
+
+#[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveNotesParams {
     pub recording_id: String,
@@ -201,6 +222,20 @@ struct RecordingManifest {
     created_at_ms: u128,
     updated_at_ms: u128,
     chunks: Vec<DurableChunk>,
+    #[serde(default)]
+    privacy_events: Vec<PrivacyEvent>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct PrivacyEvent {
+    event_type: String,
+    engine: Option<String>,
+    model_id: Option<String>,
+    sha256: Option<String>,
+    format: Option<String>,
+    bytes: Option<u64>,
+    created_at_ms: u128,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -303,13 +338,14 @@ impl RecordingStore {
 
         let now = now_ms();
         let manifest = RecordingManifest {
-            schema_version: 1,
+            schema_version: 2,
             recording_id: recording_id.clone(),
             label: params.label,
             state: RecordingState::Recording,
             created_at_ms: now,
             updated_at_ms: now,
             chunks: Vec::new(),
+            privacy_events: Vec::new(),
         };
         write_manifest(&dir, &manifest)?;
 
@@ -679,6 +715,34 @@ impl RecordingStore {
         }))
     }
 
+    pub fn list_page(&self, params: RecordingPageParams) -> Result<Value, RecordingStoreError> {
+        let (offset, limit) = page_bounds(params.offset, params.limit)?;
+        let mut recordings = self.all_recording_summaries()?;
+        recordings.sort_by_key(|value| {
+            std::cmp::Reverse(
+                value
+                    .get("updatedAtMs")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            )
+        });
+        let total_count = recordings.len();
+        let page = recordings
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "rootKind": self.root_kind,
+            "rawPathExposed": false,
+            "offset": offset,
+            "limit": limit,
+            "totalCount": total_count,
+            "hasMore": offset.saturating_add(page.len()) < total_count,
+            "recordings": page
+        }))
+    }
+
     pub fn read(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
         validate_id(&params.recording_id)?;
         let dir = self.recording_dir(&params.recording_id)?;
@@ -743,6 +807,158 @@ impl RecordingStore {
             "segmentCount": segments.len(),
             "durationMs": duration_ms,
             "segments": segments
+        }))
+    }
+
+    pub fn transcript_page(
+        &self,
+        params: TranscriptPageParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let (offset, limit) = page_bounds(params.offset, params.limit)?;
+        let dir = self.recording_dir(&params.recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        let segments = self.transcript_segments(&manifest, &dir)?;
+        let duration_ms = segments
+            .iter()
+            .filter_map(|segment| segment.get("endMs").and_then(Value::as_u64))
+            .max()
+            .unwrap_or_default();
+        let total_count = segments.len();
+        let page = segments
+            .into_iter()
+            .skip(offset)
+            .take(limit)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "rootKind": self.root_kind,
+            "rawPathExposed": false,
+            "recordingId": manifest.recording_id.as_str(),
+            "label": manifest.label.as_deref(),
+            "state": recording_state_label(&manifest.state),
+            "offset": offset,
+            "limit": limit,
+            "segmentCount": total_count,
+            "hasMore": offset.saturating_add(page.len()) < total_count,
+            "durationMs": duration_ms,
+            "segments": page
+        }))
+    }
+
+    pub fn record_processing_fact(
+        &self,
+        recording_id: &str,
+        event_type: &str,
+        engine: &str,
+        model_id: Option<&str>,
+        sha256: Option<&str>,
+    ) -> Result<(), RecordingStoreError> {
+        if !matches!(
+            event_type,
+            "transcription" | "local-ai-recap" | "local-ai-ask"
+        ) {
+            return Err(RecordingStoreError::new(
+                "PRIVACY_EVENT_TYPE_INVALID",
+                "processing privacy event type was not allowed",
+            ));
+        }
+        if let Some(hash) = sha256 {
+            if !is_sha256_hex(hash) {
+                return Err(RecordingStoreError::new(
+                    "PRIVACY_EVENT_HASH_INVALID",
+                    "processing privacy event hash was invalid",
+                ));
+            }
+        }
+        self.append_privacy_event(
+            recording_id,
+            PrivacyEvent {
+                event_type: event_type.to_string(),
+                engine: Some(engine.to_string()),
+                model_id: model_id.map(str::to_string),
+                sha256: sha256.map(|value| value.to_ascii_lowercase()),
+                format: None,
+                bytes: None,
+                created_at_ms: now_ms(),
+            },
+        )
+    }
+
+    pub fn privacy_receipt(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let dir = self.recording_dir(&params.recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        let audio_chunks = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
+            .collect::<Vec<_>>();
+        let transcript_segment_count = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == DurableChunkKind::TranscriptSegment)
+            .count();
+        let notes_saved = manifest
+            .chunks
+            .iter()
+            .any(|chunk| chunk.kind == DurableChunkKind::NotesMarkdown);
+        let mut channels = Vec::<String>::new();
+        for chunk in &audio_chunks {
+            if !channels.contains(&chunk.channel) {
+                channels.push(chunk.channel.clone());
+            }
+        }
+        let encrypted_audio_chunks = audio_chunks.iter().filter(|chunk| chunk.encrypted).count();
+        let processing = manifest
+            .privacy_events
+            .iter()
+            .filter(|event| event.event_type != "export")
+            .cloned()
+            .collect::<Vec<_>>();
+        let exports = manifest
+            .privacy_events
+            .iter()
+            .filter(|event| event.event_type == "export")
+            .cloned()
+            .collect::<Vec<_>>();
+
+        Ok(json!({
+            "proofKind": "meeting-privacy-receipt",
+            "receiptVersion": 1,
+            "generatedAtMs": now_ms(),
+            "recording": {
+                "recordingId": manifest.recording_id,
+                "label": manifest.label,
+                "state": recording_state_label(&manifest.state),
+                "createdAtMs": manifest.created_at_ms,
+                "updatedAtMs": manifest.updated_at_ms,
+                "deletionStatus": "present"
+            },
+            "capture": {
+                "channels": channels,
+                "audioChunkCount": audio_chunks.len(),
+                "channelAttribution": true
+            },
+            "storage": {
+                "rootKind": self.root_kind,
+                "encryptedAudioChunkCount": encrypted_audio_chunks,
+                "allAudioEncrypted": !audio_chunks.is_empty() && encrypted_audio_chunks == audio_chunks.len(),
+                "cipher": audio_chunks.iter().find_map(|chunk| chunk.cipher.as_deref()),
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            },
+            "content": {
+                "transcriptSegmentCount": transcript_segment_count,
+                "notesSavedLocally": notes_saved
+            },
+            "processing": processing,
+            "exports": exports,
+            "retention": {
+                "policy": "manual-delete-only",
+                "automaticDeletion": false
+            },
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
         }))
     }
 
@@ -913,8 +1129,9 @@ impl RecordingStore {
         params: ExportRecordingParams,
     ) -> Result<Value, RecordingStoreError> {
         validate_id(&params.recording_id)?;
+        let recording_id = params.recording_id.clone();
         let format = params.format.clone();
-        match format.as_str() {
+        let result = match format.as_str() {
             "markdown" if params.report.is_some() => self.export_report_markdown(params),
             "markdown" => self.export_markdown(params),
             "docx" => self.export_docx(params),
@@ -924,7 +1141,21 @@ impl RecordingStore {
                 "EXPORT_FORMAT_UNSUPPORTED",
                 "supported local export formats are markdown, docx, pdf, and wav",
             )),
-        }
+        }?;
+        let bytes = result.get("bytes").and_then(Value::as_u64);
+        self.append_privacy_event(
+            &recording_id,
+            PrivacyEvent {
+                event_type: "export".to_string(),
+                engine: Some("candor-core".to_string()),
+                model_id: None,
+                sha256: None,
+                format: Some(format),
+                bytes,
+                created_at_ms: now_ms(),
+            },
+        )?;
+        Ok(result)
     }
 
     pub fn export_markdown(
@@ -1387,13 +1618,14 @@ impl RecordingStore {
     ) -> Result<RecordingManifest, RecordingStoreError> {
         let now = now_ms();
         Ok(RecordingManifest {
-            schema_version: 1,
+            schema_version: 2,
             recording_id: recording_id.to_string(),
             label: None,
             state: RecordingState::NeedsRecovery,
             created_at_ms: now,
             updated_at_ms: now,
             chunks: self.scan_chunks(recording_id, dir)?,
+            privacy_events: Vec::new(),
         })
     }
 
@@ -1485,6 +1717,20 @@ impl RecordingStore {
                 .map(|(manifest, _dir)| recording_summary(&manifest, self.root_kind))
                 .collect()
         })
+    }
+
+    fn append_privacy_event(
+        &self,
+        recording_id: &str,
+        event: PrivacyEvent,
+    ) -> Result<(), RecordingStoreError> {
+        validate_id(recording_id)?;
+        let dir = self.recording_dir(recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        manifest.schema_version = manifest.schema_version.max(2);
+        manifest.privacy_events.push(event);
+        manifest.updated_at_ms = now_ms();
+        write_manifest(&dir, &manifest)
     }
 
     fn read_manifest_chunks(
@@ -1754,6 +2000,26 @@ fn default_chunk_kind() -> DurableChunkKind {
 
 fn default_export_format() -> String {
     "markdown".to_string()
+}
+
+fn default_page_limit() -> u64 {
+    DEFAULT_PAGE_LIMIT
+}
+
+fn page_bounds(offset: u64, limit: u64) -> Result<(usize, usize), RecordingStoreError> {
+    if limit == 0 || limit > MAX_PAGE_LIMIT {
+        return Err(RecordingStoreError::new(
+            "RECORDING_PAGE_LIMIT_INVALID",
+            format!("page limit must be between 1 and {MAX_PAGE_LIMIT}"),
+        ));
+    }
+    let offset = usize::try_from(offset).map_err(|_| {
+        RecordingStoreError::new("RECORDING_PAGE_OFFSET_INVALID", "page offset was too large")
+    })?;
+    let limit = usize::try_from(limit).map_err(|_| {
+        RecordingStoreError::new("RECORDING_PAGE_LIMIT_INVALID", "page limit was too large")
+    })?;
+    Ok((offset, limit))
 }
 
 fn export_render_error(message: String) -> RecordingStoreError {
@@ -2028,19 +2294,46 @@ fn decode_audio_base64(value: &str) -> Result<Vec<u8>, RecordingStoreError> {
 }
 
 fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
-    let path = dir.join(MANIFEST_FILE);
-    let bytes = fs::read(&path).map_err(io_error("RECORDING_MANIFEST_READ_FAILED"))?;
-    serde_json::from_slice(&bytes).map_err(|err| {
+    let candidates = [
+        dir.join(MANIFEST_FILE),
+        dir.join("manifest.json.bak"),
+        dir.join("manifest.json.tmp"),
+    ];
+    let mut last_error = None;
+    for path in candidates {
+        if !path.exists() {
+            continue;
+        }
+        match fs::read(&path) {
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(manifest) => return Ok(manifest),
+                Err(err) => {
+                    last_error = Some(RecordingStoreError::new(
+                        "RECORDING_MANIFEST_PARSE_FAILED",
+                        format!("failed to parse recording manifest: {err}"),
+                    ));
+                }
+            },
+            Err(err) => {
+                last_error = Some(RecordingStoreError::new(
+                    "RECORDING_MANIFEST_READ_FAILED",
+                    err.to_string(),
+                ));
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
         RecordingStoreError::new(
-            "RECORDING_MANIFEST_PARSE_FAILED",
-            format!("failed to parse recording manifest: {err}"),
+            "RECORDING_MANIFEST_READ_FAILED",
+            "recording manifest and recovery copies are missing",
         )
-    })
+    }))
 }
 
 fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), RecordingStoreError> {
     fs::create_dir_all(dir).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
     let tmp_path = dir.join("manifest.json.tmp");
+    let backup_path = dir.join("manifest.json.bak");
     let manifest_path = dir.join(MANIFEST_FILE);
     let bytes = serde_json::to_vec_pretty(manifest).map_err(|err| {
         RecordingStoreError::new(
@@ -2056,10 +2349,26 @@ fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), Record
         file.sync_all()
             .map_err(io_error("RECORDING_MANIFEST_FLUSH_FAILED"))?;
     }
-    if manifest_path.exists() {
-        fs::remove_file(&manifest_path).map_err(io_error("RECORDING_MANIFEST_REPLACE_FAILED"))?;
+    if backup_path.exists() {
+        fs::remove_file(&backup_path).map_err(io_error("RECORDING_MANIFEST_REPLACE_FAILED"))?;
     }
-    fs::rename(&tmp_path, &manifest_path).map_err(io_error("RECORDING_MANIFEST_REPLACE_FAILED"))?;
+    let had_manifest = manifest_path.exists();
+    if had_manifest {
+        fs::rename(&manifest_path, &backup_path)
+            .map_err(io_error("RECORDING_MANIFEST_REPLACE_FAILED"))?;
+    }
+    if let Err(err) = fs::rename(&tmp_path, &manifest_path) {
+        if had_manifest && backup_path.exists() {
+            let _ = fs::rename(&backup_path, &manifest_path);
+        }
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_REPLACE_FAILED",
+            err.to_string(),
+        ));
+    }
+    if backup_path.exists() {
+        let _ = fs::remove_file(&backup_path);
+    }
     Ok(())
 }
 
@@ -2178,6 +2487,10 @@ fn validate_id(value: &str) -> Result<(), RecordingStoreError> {
             "recording id must be ASCII alphanumeric, dash, or underscore",
         ))
     }
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn validate_channel(value: &str) -> Result<(), RecordingStoreError> {
@@ -2756,5 +3069,282 @@ mod tests {
         assert_eq!(&bytes[0..4], b"RIFF");
         assert_eq!(&bytes[8..12], b"WAVE");
         assert_eq!(bytes.len(), 44 + audio_bytes.len());
+    }
+
+    #[test]
+    fn paged_library_and_transcript_reads_are_bounded() {
+        let store = temp_store();
+        for label in ["First", "Second", "Third"] {
+            store
+                .start(StartRecordingParams {
+                    label: Some(label.to_string()),
+                })
+                .expect("start paged recording");
+        }
+        let first_page = store
+            .list_page(RecordingPageParams {
+                offset: 0,
+                limit: 2,
+            })
+            .expect("first library page");
+        assert_eq!(first_page["totalCount"], 3);
+        assert_eq!(
+            first_page["recordings"]
+                .as_array()
+                .expect("recordings")
+                .len(),
+            2
+        );
+        assert_eq!(first_page["hasMore"], true);
+
+        let recording_id = first_page["recordings"][0]["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        for index in 0..3_u64 {
+            store
+                .write_transcript_segment(WriteTranscriptSegmentParams {
+                    recording_id: recording_id.clone(),
+                    channel: "mic".to_string(),
+                    speaker: Some("Me".to_string()),
+                    text: format!("Segment {index}"),
+                    start_ms: index * 1_000,
+                    duration_ms: Some(500),
+                    end_ms: None,
+                    confidence: Some(0.9),
+                })
+                .expect("write transcript segment");
+        }
+        let transcript_page = store
+            .transcript_page(TranscriptPageParams {
+                recording_id,
+                offset: 1,
+                limit: 1,
+            })
+            .expect("transcript page");
+        assert_eq!(transcript_page["segmentCount"], 3);
+        assert_eq!(transcript_page["segments"][0]["text"], "Segment 1");
+        assert_eq!(transcript_page["hasMore"], true);
+    }
+
+    #[test]
+    fn meeting_privacy_receipt_is_core_backed_and_pathless() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Receipt Test".to_string()),
+            })
+            .expect("start receipt recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_audio_chunk(WriteAudioChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_base64: BASE64_STANDARD.encode(vec![0_u8; 9_600]),
+                sample_rate_hz: 48_000,
+                channel_count: 1,
+                bits_per_sample: 16,
+                start_ms: Some(0),
+            })
+            .expect("write receipt audio");
+        store
+            .write_transcript_segment(WriteTranscriptSegmentParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                speaker: Some("Me".to_string()),
+                text: "Receipt transcript".to_string(),
+                start_ms: 0,
+                duration_ms: Some(500),
+                end_ms: None,
+                confidence: Some(0.9),
+            })
+            .expect("write receipt transcript");
+        store
+            .save_notes(SaveNotesParams {
+                recording_id: recording_id.clone(),
+                markdown: "Receipt notes".to_string(),
+            })
+            .expect("save receipt notes");
+        store
+            .record_processing_fact(
+                &recording_id,
+                "transcription",
+                "whisper-rs",
+                Some("tiny.en"),
+                Some("a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002"),
+            )
+            .expect("record transcription fact");
+        store
+            .record_processing_fact(
+                &recording_id,
+                "local-ai-recap",
+                "heuristic-local",
+                None,
+                None,
+            )
+            .expect("record recap fact");
+        store
+            .export_create(ExportRecordingParams {
+                recording_id: recording_id.clone(),
+                format: "markdown".to_string(),
+                channel: None,
+                report: None,
+                options: ExportDocumentOptions::default(),
+            })
+            .expect("record receipt export");
+
+        let receipt = store
+            .privacy_receipt(RecordingIdParams { recording_id })
+            .expect("privacy receipt");
+        assert_eq!(receipt["proofKind"], "meeting-privacy-receipt");
+        assert_eq!(receipt["capture"]["channels"][0], "mic");
+        assert_eq!(receipt["content"]["transcriptSegmentCount"], 1);
+        assert_eq!(receipt["content"]["notesSavedLocally"], true);
+        assert_eq!(
+            receipt["processing"].as_array().expect("processing").len(),
+            2
+        );
+        assert_eq!(receipt["exports"].as_array().expect("exports").len(), 1);
+        assert_eq!(receipt["rawPathExposed"], false);
+        assert_eq!(receipt["keyMaterialExposedToRenderer"], false);
+    }
+
+    #[test]
+    fn v1_manifest_privacy_migration_is_backward_compatible() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Legacy".to_string()),
+            })
+            .expect("start legacy recording");
+        let recording_id = recording_id(&started);
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("legacy recording dir");
+        let mut manifest: Value = serde_json::from_slice(
+            &fs::read(dir.join(MANIFEST_FILE)).expect("read legacy manifest"),
+        )
+        .expect("parse legacy manifest");
+        manifest["schemaVersion"] = json!(1);
+        manifest
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("privacyEvents");
+        fs::write(
+            dir.join(MANIFEST_FILE),
+            serde_json::to_vec_pretty(&manifest).expect("serialize legacy manifest"),
+        )
+        .expect("write legacy manifest");
+
+        let receipt = store
+            .privacy_receipt(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read v1 privacy receipt");
+        assert_eq!(
+            receipt["processing"].as_array().expect("processing").len(),
+            0
+        );
+        store
+            .record_processing_fact(&recording_id, "local-ai-ask", "heuristic-local", None, None)
+            .expect("upgrade privacy event");
+        let upgraded: Value = serde_json::from_slice(
+            &fs::read(dir.join(MANIFEST_FILE)).expect("read upgraded manifest"),
+        )
+        .expect("parse upgraded manifest");
+        assert_eq!(upgraded["schemaVersion"], 2);
+        assert_eq!(
+            upgraded["privacyEvents"]
+                .as_array()
+                .expect("privacy events")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn interrupted_manifest_swap_recovers_the_last_flushed_manifest() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Recover swap".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        let backup_path = dir.join("manifest.json.bak");
+        let tmp_path = dir.join("manifest.json.tmp");
+
+        fs::rename(&manifest_path, &backup_path).expect("simulate interrupted backup swap");
+        fs::write(&tmp_path, b"partial manifest").expect("write partial temp manifest");
+
+        let recovered = read_manifest(&dir).expect("recover backup manifest");
+        assert_eq!(recovered.recording_id, recording_id);
+        assert_eq!(recovered.label.as_deref(), Some("Recover swap"));
+    }
+
+    #[test]
+    fn corrupt_primary_manifest_rolls_back_to_valid_backup() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Rollback manifest".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        fs::copy(&manifest_path, dir.join("manifest.json.bak")).expect("copy manifest backup");
+        fs::write(&manifest_path, b"corrupt primary").expect("corrupt primary manifest");
+
+        let recovered = read_manifest(&dir).expect("fall back to backup manifest");
+        assert_eq!(recovered.recording_id, recording_id);
+        assert_eq!(recovered.label.as_deref(), Some("Rollback manifest"));
+    }
+
+    #[test]
+    fn audio_storage_failure_does_not_commit_a_manifest_chunk() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Storage pressure".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        fs::create_dir(dir.join("chunk-000000.raw")).expect("block plaintext chunk path");
+        fs::create_dir(dir.join("chunk-000000.cchunk")).expect("block encrypted chunk path");
+
+        let error = store
+            .write_audio_chunk(WriteAudioChunkParams {
+                recording_id,
+                channel: "mic".to_string(),
+                data_base64: BASE64_STANDARD.encode(vec![0_u8; 9_600]),
+                sample_rate_hz: 48_000,
+                channel_count: 1,
+                bits_per_sample: 16,
+                start_ms: Some(0),
+            })
+            .expect_err("chunk creation should fail");
+        assert_eq!(error.code, "RECORDING_CHUNK_CREATE_FAILED");
+        let manifest = read_manifest(&dir).expect("read unchanged manifest");
+        assert!(manifest.chunks.is_empty());
+    }
+
+    #[test]
+    fn storage_creation_failure_is_explicit_and_leaves_no_manifest() {
+        let root = env::temp_dir().join(format!(
+            "candor-core-storage-failure-{}",
+            new_recording_id()
+        ));
+        fs::write(&root, b"not a directory").expect("create blocking file");
+        let store = RecordingStore::with_root(root.clone());
+        let error = store
+            .start(StartRecordingParams { label: None })
+            .expect_err("storage creation should fail");
+        assert_eq!(error.code, "RECORDING_STORE_CREATE_FAILED");
+        assert!(!root.join(RECORDINGS_DIR).join(MANIFEST_FILE).exists());
+        fs::remove_file(root).expect("remove blocking file");
     }
 }

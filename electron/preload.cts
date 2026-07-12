@@ -16,6 +16,7 @@ const allowedMethods = new Set([
   "vault.openLocal",
   "vault.status",
   "privacy.auditSnapshot",
+  "privacy.capabilities",
   "updates.status",
   "import.v2.status",
   "consent.status",
@@ -39,10 +40,11 @@ const allowedMethods = new Set([
   "ai.schedulerStatus",
   "transcription.status",
   "transcription.runLocal",
-  "recording.durable.list",
+  "recording.durable.listPage",
   "recording.durable.read",
   "recording.durable.replayManifest",
-  "recording.durable.transcript",
+  "recording.durable.transcriptPage",
+  "recording.privacyReceipt",
   "recording.durable.readAudioChunk",
   "recording.durable.search",
   "recording.notes.read",
@@ -67,6 +69,7 @@ contextBridge.exposeInMainWorld("candor", {
     vaultOpenLocal: () => callCore("vault.openLocal"),
     vaultStatus: () => callCore("vault.status"),
     privacyAuditSnapshot: () => callCore("privacy.auditSnapshot"),
+    privacyCapabilities: () => callCore("privacy.capabilities"),
     updateStatus: () => callCore("updates.status"),
     v2ImportStatus: () => callCore("import.v2.status"),
     v2ImportFromFolder: () =>
@@ -124,13 +127,16 @@ contextBridge.exposeInMainWorld("candor", {
       language?: string;
       initialPrompt?: string;
     }) => callCore("transcription.runLocal", params),
-    recordingDurableList: () => callCore("recording.durable.list"),
+    recordingDurableListPage: (offset = 0, limit = 50) =>
+      callCore("recording.durable.listPage", { offset, limit }),
     recordingDurableRead: (recordingId: string) =>
       callCore("recording.durable.read", { recordingId }),
     recordingDurableReplayManifest: (recordingId: string) =>
       callCore("recording.durable.replayManifest", { recordingId }),
-    recordingDurableTranscript: (recordingId: string) =>
-      callCore("recording.durable.transcript", { recordingId }),
+    recordingDurableTranscriptPage: (recordingId: string, offset = 0, limit = 200) =>
+      callCore("recording.durable.transcriptPage", { recordingId, offset, limit }),
+    recordingPrivacyReceipt: (recordingId: string) =>
+      callCore("recording.privacyReceipt", { recordingId }),
     recordingDurableReadAudioChunk: (recordingId: string, index: number) =>
       callCore("recording.durable.readAudioChunk", { recordingId, index }),
     recordingDurableSearch: (query: string) =>

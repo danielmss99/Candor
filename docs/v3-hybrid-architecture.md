@@ -26,6 +26,33 @@ while preserving the Rust core design.
 Transport is newline-delimited JSON over stdin/stdout. M0 intentionally avoids
 localhost TCP to prevent open ports, firewall prompts, and other-process access.
 
+Every core response carries the `m0-jsonrpc-stdio-1` protocol version. Electron
+main rejects an invalid response envelope, and the renderer validates the initial
+handshake before accepting core data. Shared parsers reject malformed types
+visibly. Recording and transcript reads are paged, stale meeting requests are
+ignored, and duplicate writes are excluded by operation scope.
+
+## Capability-Based Network Policy
+
+The Rust core reports a capability matrix rather than a blanket marketing claim:
+
+- recording: denied;
+- transcription: denied;
+- local AI: denied;
+- local licensing: local only unless the user explicitly invokes a future portal;
+- updates: disabled until a separately reviewed manual checker exists.
+
+Every meeting can produce a pathless privacy receipt with capture channels,
+encrypted chunk state, transcript and note facts, model identifiers and hashes,
+local processing history, export history, retention policy, and network facts.
+
+## Renderer Structure
+
+The root coordinates feature-owned views and hooks. UI lives under
+`v3/renderer/src/features`; protocol access and response schemas live under
+`v3/renderer/src/core`; explicit capture and local-job machines plus stale request
+coordination live under `v3/renderer/src/state`.
+
 ## Milestone Shape
 
 - M0: Electron risk spike and proof artifacts.

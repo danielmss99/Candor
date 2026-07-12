@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -34,8 +35,17 @@ const apiTypesSource = readFileSync(
   path.join(repoRoot, "v3", "renderer", "src", "candor-api.d.ts"),
   "utf8",
 );
-const rendererSource = ["main.tsx", "CandorApp.tsx"]
-  .map((file) => readFileSync(path.join(repoRoot, "v3", "renderer", "src", file), "utf8"))
+function rendererSourcePaths(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return rendererSourcePaths(target);
+    if (!entry.isFile() || !/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) return [];
+    return [target];
+  });
+}
+
+const rendererSource = rendererSourcePaths(path.join(repoRoot, "v3", "renderer", "src"))
+  .map((file) => readFileSync(file, "utf8"))
   .join("\n");
 const failures = [];
 const observations = [];

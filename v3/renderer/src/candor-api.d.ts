@@ -15,6 +15,7 @@ interface CandorApi {
     vaultOpenLocal(): Promise<JsonValue>;
     vaultStatus(): Promise<JsonValue>;
     privacyAuditSnapshot(): Promise<JsonValue>;
+    privacyCapabilities(): Promise<JsonValue>;
     updateStatus(): Promise<JsonValue>;
     v2ImportStatus(): Promise<JsonValue>;
     v2ImportFromFolder(): Promise<JsonValue>;
@@ -56,10 +57,11 @@ interface CandorApi {
       language?: string;
       initialPrompt?: string;
     }): Promise<JsonValue>;
-    recordingDurableList(): Promise<JsonValue>;
+    recordingDurableListPage(offset?: number, limit?: number): Promise<JsonValue>;
     recordingDurableRead(recordingId: string): Promise<JsonValue>;
     recordingDurableReplayManifest(recordingId: string): Promise<JsonValue>;
-    recordingDurableTranscript(recordingId: string): Promise<JsonValue>;
+    recordingDurableTranscriptPage(recordingId: string, offset?: number, limit?: number): Promise<JsonValue>;
+    recordingPrivacyReceipt(recordingId: string): Promise<JsonValue>;
     recordingDurableReadAudioChunk(recordingId: string, index: number): Promise<JsonValue>;
     recordingDurableSearch(query: string): Promise<JsonValue>;
     recordingNotesRead(recordingId: string): Promise<JsonValue>;

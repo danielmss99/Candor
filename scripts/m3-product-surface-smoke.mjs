@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,12 +17,16 @@ if (!existsSync(corePath)) {
   throw new Error(`candor-core debug binary not found: ${corePath}`);
 }
 
-const rendererPaths = [
-  path.join(repoRoot, "v3", "renderer", "src", "main.tsx"),
-  path.join(repoRoot, "v3", "renderer", "src", "CandorApp.tsx"),
-  path.join(repoRoot, "v3", "renderer", "src", "meeting-motion.tsx"),
-  path.join(repoRoot, "v3", "renderer", "src", "components", "RecordAction.tsx"),
-];
+function rendererSourcePaths(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return rendererSourcePaths(target);
+    if (!entry.isFile() || !/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) return [];
+    return [target];
+  });
+}
+
+const rendererPaths = rendererSourcePaths(path.join(repoRoot, "v3", "renderer", "src"));
 const preloadPath = path.join(repoRoot, "electron", "preload.cts");
 const mainPath = path.join(repoRoot, "electron", "main.ts");
 const licenseServicePath = path.join(repoRoot, "electron", "license-service.ts");
@@ -100,6 +104,12 @@ requireSource(rendererSource, 'data-view="onboarding"', "M3 renderer");
 requireSource(rendererSource, "session-tabs", "M3 renderer");
 requireSource(rendererSource, "sidebar-record-action", "M3 renderer");
 requireSource(rendererSource, "function RecordAction", "M3 renderer");
+requireSource(rendererSource, "CandorClient", "M3 renderer");
+requireSource(rendererSource, "useCaptureSession", "M3 renderer");
+requireSource(rendererSource, "useLocalJob", "M3 renderer");
+requireSource(rendererSource, "compact-pane-switcher", "M3 renderer");
+requireSource(rendererSource, "privacy-receipt", "M3 renderer");
+requireSource(rendererSource, "Privacy and diagnostics", "M3 renderer");
 requireSource(rendererSource, 'data-state={active ? "recording" : "idle"}', "M3 renderer");
 requireSource(rendererSource, "Stop recording and save local audio", "M3 renderer");
 requireSource(rendererSource, "Dismiss notification", "M3 renderer");
@@ -120,6 +130,10 @@ requireSource(rendererSource, "Mark moment", "M3 renderer");
 requireSource(rendererSource, 'className="verification-text"', "M3 renderer");
 requireSource(preloadSource, "recording.notes.read", "M3 preload");
 requireSource(preloadSource, "recording.notes.save", "M3 preload");
+requireSource(preloadSource, "recording.durable.listPage", "M3 preload");
+requireSource(preloadSource, "recording.durable.transcriptPage", "M3 preload");
+requireSource(preloadSource, "recording.privacyReceipt", "M3 preload");
+requireSource(preloadSource, "privacy.capabilities", "M3 preload");
 requireSource(preloadSource, "retention.status", "M3 preload");
 requireSource(preloadSource, "candor-license:status", "M3 preload");
 requireSource(preloadSource, "candor-license:activate", "M3 preload");
@@ -146,6 +160,7 @@ requireSource(licenseServiceSource, "persistentAccountRequired: false", "M3 lice
 requireSource(licenseServiceSource, "CANDOR_ENABLE_MOCK_LICENSE", "M3 license service");
 requireSource(styleSource, "@media (max-width: 1280px)", "M3 styles");
 requireSource(styleSource, "@media (max-width: 1080px)", "M3 styles");
+requireSource(styleSource, "@media (max-width: 1180px)", "M3 styles");
 requireSource(
   styleSource,
   /@media \(max-width: 1080px\)[\s\S]*?\.review-mode\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?grid-template-columns:\s*140px minmax\(300px, 1fr\) minmax\(230px, 250px\);/,
@@ -185,6 +200,12 @@ rejectSource(rendererSource, /\bsessionStorage\b/, "M3 renderer");
 rejectSource(rendererSource, /figma\.com\/api\/mcp\/asset/, "M3 renderer");
 rejectSource(rendererSource, /VERIFY_GLYPHS|verificationFrame|window\.setInterval/, "M3 renderer");
 rejectSource(rendererSource, /Local (?:Word|PDF) renderer pending|<small>Pending<\/small>/, "M3 renderer");
+rejectSource(rendererSource, /recordingDurableList\(/, "M3 renderer paged library");
+rejectSource(rendererSource, /recordingDurableTranscript\(/, "M3 renderer paged transcript");
+const fullRefreshCalls = rendererSource.match(/\brefresh\(\)/g) ?? [];
+if (fullRefreshCalls.length !== 1) {
+  throw new Error(`M3 renderer must reserve full refresh for startup; found ${fullRefreshCalls.length} calls`);
+}
 rejectSource(styleSource, /figma\.com\/api\/mcp\/asset/, "M3 styles");
 rejectSource(styleSource, /:has\(\.message-stack:not\(:empty\)\)/, "M3 styles");
 
@@ -271,7 +292,7 @@ function visit(value, label) {
 try {
   const capabilities = await call("core.capabilities");
   const allowed = capabilities?.allowedMethods ?? [];
-  for (const method of ["recording.notes.read", "recording.notes.save", "retention.status"]) {
+  for (const method of ["recording.notes.read", "recording.notes.save", "retention.status", "recording.durable.listPage", "recording.durable.transcriptPage", "recording.privacyReceipt", "privacy.capabilities"]) {
     if (!allowed.includes(method)) throw new Error(`core capabilities omitted ${method}`);
   }
 
@@ -332,10 +353,22 @@ try {
     throw new Error("markdown export did not include notes before transcript");
   }
 
-  const list = await call("recording.durable.list");
+  const list = await call("recording.durable.listPage", { offset: 0, limit: 50 });
   assertCustody(list, "recording list");
   if (list?.recordings?.[0]?.notesChunkCount !== 1 || !(list?.recordings?.[0]?.notesBytes > 0)) {
     throw new Error("recording library did not expose pathless notes summary facts");
+  }
+
+  const privacyCapabilities = await call("privacy.capabilities");
+  assertCustody(privacyCapabilities, "network capability matrix");
+  if (privacyCapabilities?.externalCallsAttempted !== 0) {
+    throw new Error("network capability matrix reported external calls");
+  }
+
+  const receipt = await call("recording.privacyReceipt", { recordingId });
+  assertCustody(receipt, "meeting privacy receipt");
+  if (receipt?.proofKind !== "meeting-privacy-receipt" || receipt?.content?.notesSavedLocally !== true) {
+    throw new Error("meeting privacy receipt did not report core-backed local facts");
   }
 
   await call("core.shutdown");
