@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Candor selected app icon</title>
+  <desc id="desc">The selected Candor Keep Tab mark in the Soft Signal palette.</desc>
+  <rect width="512" height="512" rx="104" fill="#161616"/>
+  <path d="M366 150A158 158 0 1 0 366 362" fill="none" stroke="#FFF9EE" stroke-width="76" stroke-linecap="round"/>
+  <path d="M368 210H414V270L391 294L368 270Z" fill="#FF6B5E"/>
+</svg>

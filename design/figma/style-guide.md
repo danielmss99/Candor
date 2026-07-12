@@ -2,9 +2,12 @@
 
 ## Source Of Truth
 
-This guide translates the verified `Candor UX Design v1` Figma file into the
-Electron v3 production surface. The inspected file contains seven 1440 by 900
-desktop frames:
+`design/brand/CANDOR_PROJECT_BRAND_HANDOFF.md` and `Candor GUI Color System
+Handoff v2` are the production identity and color sources of truth. They
+supersede every earlier exploratory mark and GUI color value. The selected
+identity is **Keep Tab / Soft Signal**. This guide combines those approved
+foundations with the verified `Candor UX Design v1` layouts for the Electron v3
+production surface. The Figma file contains seven 1440 by 900 desktop frames:
 
 1. Dashboard
 2. Live Meeting
@@ -15,8 +18,14 @@ desktop frames:
 7. Review Mode
 
 The Figma file currently has no variables, local styles, components, or component
-sets. `token.json` therefore records the repeated values found in the screens and
-is the production token source until the Figma file gains a formal library.
+sets. `token.json` records the approved primitive, semantic, and component roles,
+while `v3/renderer/src/tokens.css` is their runtime representation. Raw color
+values are not permitted in production component CSS.
+
+The canonical mark is `assets/icons/candor-app-icon-master.svg`. Every packaged
+desktop icon and the in-app mark is generated from its open cream C and pointed
+coral Keep Tab geometry. The legacy purple recording-ring mark is not an
+approved production asset.
 
 ## Product Principles
 
@@ -44,19 +53,24 @@ is the production token source until the Figma file gains a formal library.
 
 ## Color
 
-- Canvas: `#0e1014`
-- Main surface: `#13161b`
-- Raised control: `#181c22`
-- Muted surface: `#1f232a`
-- Divider: `#2e333d`
-- Primary text: `#edf0f5`
-- Muted text: `#99a3b2`
-- Violet selection: `#7357f2` on `#2e2457`
-- Violet text and links: `#8d79ff`, which preserves at least 4.5:1 contrast on
-  the dark production surfaces
-- Recording: `#f04f61` on `#5c171f`
-- Verified/local: `#4dd19c`
-- Attention: `#f2bd4d`
+- App canvas: `#F4F0E8`
+- Transcript, notes, settings, and dialog surfaces: `#FFFCF6`
+- Secondary groupings and quiet controls: `#ECE7DE`
+- Navigation and window chrome: `#161616`
+- Primary and secondary text: `#1B1A18` and `#67625B`
+- Dark-surface text: `#FFF9EE` and `#BDB7AE`
+- Candor Coral brand action: `#FF6B5E`, with `#F55E52` hover and `#E95247` pressed
+- Active recording only: `#C93434`
+- Saved, exported, and locally verified: `#287A55`
+- Permission and attention states: `#A46612`
+- Links, neutral information, and keyboard focus: `#356A8A`
+- Errors and destructive states: `#B93636`
+- Default, subtle, and strong borders: `#D8D1C7`, `#E7E1D8`, and `#BDB5AA`
+
+The shell has four visible levels: dark navigation, warm app canvas, cream work
+surface, and warm-gray secondary grouping. Candor Coral frames the work and is
+reserved for the single highest-priority branded action in a typical view.
+Recording never uses the coral accent.
 
 Color never communicates status alone. Every status also includes readable text.
 
@@ -84,12 +98,11 @@ Color never communicates status alone. Every status also includes readable text.
 ### Record Action
 
 The action uses a 24px ring and 10px center dot, a clear `Start recording` label,
-and a short capture-mode line. Its idle state uses a raised neutral surface with a
-red symbol and edge accent. A filled red surface is reserved for an active
-recording, where the center changes to a stop square. This keeps the primary
-action visible without making an idle recorder look destructive or already live.
-The control must remain stable at every desktop breakpoint. The shortcut hint is
-omitted when it competes with the label or is not backed by a working command.
+and a short capture-mode line. Its idle state uses a neutral work surface with a
+semantic recording-red symbol and restrained edge. A filled `#C93434` surface is
+reserved for active recording, where the center changes to a stop square. The
+Keep Tab brand mark is never used as a recording or notification indicator. The
+control remains stable at every desktop breakpoint.
 
 ### Session Tabs
 
@@ -131,9 +144,11 @@ not primary navigation labels.
 ### Notifications
 
 Status and error messages appear as dismissible overlays below the session rail.
-They never change page geometry or take height away from the live transcript,
-notes editor, review surface, or export preview. Informational messages dismiss
-automatically after five seconds; errors remain until the user acknowledges them.
+Success uses green plus direct local-save or export language; warnings use amber
+plus a required action; errors use red plus a recovery action. They never change
+page geometry or take height away from the live transcript, notes editor, review
+surface, or export preview. Informational messages dismiss automatically after
+five seconds; errors remain until the user acknowledges them.
 
 ### Review And Export
 
@@ -148,7 +163,10 @@ data, and rejected review items are omitted from the generated document.
 - All controls use native buttons, inputs, checkboxes, textareas, or disclosure
   elements.
 - Every icon-only control has an accessible name and tooltip.
-- Focus uses a 2px violet outline with offset.
+- Focus uses a 2px blue `#356A8A` outline with offset.
+- Disabled controls remain legible through explicit disabled background, border,
+  and text tokens instead of opacity alone.
+- Every color-coded state includes text, an icon, a shape, or stable placement.
 - Status messages use polite live regions; blocking errors use alert semantics.
 - Selected tabs and segmented controls expose `aria-selected` or `aria-pressed`.
 - Keyboard navigation follows DOM order and never depends on pointer hover.
@@ -169,6 +187,10 @@ data, and rejected review items are omitted from the generated document.
 
 The implementation uses React, TypeScript, and plain CSS already present in the
 Electron v3 renderer. Tailwind and remote Figma assets are not introduced.
+
+The token architecture is primitive to semantic to component. `tokens.css` is
+loaded before `styles.css`; components consume role variables and contain no raw
+hex, RGB, or HSL color values.
 
 Feature ownership is split under `v3/renderer/src/features` for capture, local AI,
 onboarding, home, library, live meeting, detail, review, export, privacy, and

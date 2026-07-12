@@ -59,6 +59,13 @@ const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
 const isSmokeMode = smokeOutputPath.length > 0;
 const smokeWindowWidth = Math.max(960, Number.parseInt(process.env.CANDOR_M0_SMOKE_WIDTH ?? "1440", 10) || 1440);
 const smokeWindowHeight = Math.max(700, Number.parseInt(process.env.CANDOR_M0_SMOKE_HEIGHT ?? "900", 10) || 900);
+const requestedSmokeScaleFactor = Number.parseFloat(process.env.CANDOR_M0_SMOKE_SCALE_FACTOR ?? "1");
+const smokeScaleFactor = Number.isFinite(requestedSmokeScaleFactor)
+  ? Math.min(2, Math.max(1, requestedSmokeScaleFactor))
+  : 1;
+if (isSmokeMode && smokeScaleFactor !== 1) {
+  app.commandLine.appendSwitch("force-device-scale-factor", smokeScaleFactor.toString());
+}
 if (isSmokeMode && process.env.CANDOR_V3_DATA_DIR) {
   app.setPath("userData", path.join(process.env.CANDOR_V3_DATA_DIR, "electron-smoke"));
 }
@@ -1360,6 +1367,7 @@ async function runM0Smoke(): Promise<void> {
       requestedViewport: {
         width: smokeWindowWidth,
         height: smokeWindowHeight,
+        scaleFactor: smokeScaleFactor,
       },
       appIsPackaged: app.isPackaged,
       corePath: corePath(),

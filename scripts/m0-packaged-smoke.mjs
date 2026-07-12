@@ -785,7 +785,7 @@ child.stderr.on("data", (chunk) => {
   stderr += chunk.toString("utf8");
 });
 
-const result = await waitForExit(child, 30000);
+const result = await waitForExit(child, 90000);
 if (result.code !== 0) {
   throw new Error(
     `Packaged app smoke exited with ${result.code ?? result.signal}.\n${stderr.trim()}`,

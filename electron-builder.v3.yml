@@ -17,11 +17,11 @@ asar: true
 npmRebuild: false
 publish: null
 win:
-  icon: build/icon.ico
+  icon: assets/platform/candor.ico
   target:
     - nsis
 mac:
-  icon: build/icon.icns
+  icon: assets/platform/candor.icns
   target:
     - dmg
   hardenedRuntime: true

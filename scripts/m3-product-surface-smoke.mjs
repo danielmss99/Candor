@@ -31,15 +31,23 @@ const preloadPath = path.join(repoRoot, "electron", "preload.cts");
 const mainPath = path.join(repoRoot, "electron", "main.ts");
 const licenseServicePath = path.join(repoRoot, "electron", "license-service.ts");
 const stylePath = path.join(repoRoot, "v3", "renderer", "src", "styles.css");
+const tokenCssPath = path.join(repoRoot, "v3", "renderer", "src", "tokens.css");
 const styleGuidePath = path.join(repoRoot, "design", "figma", "style-guide.md");
 const tokenPath = path.join(repoRoot, "design", "figma", "token.json");
+const brandHandoffPath = path.join(repoRoot, "design", "brand", "CANDOR_PROJECT_BRAND_HANDOFF.md");
+const brandMasterPath = path.join(repoRoot, "assets", "icons", "candor-app-icon-master.svg");
+const iconGeneratorPath = path.join(repoRoot, "scripts", "generate-v3-icons.mjs");
 const rendererSource = rendererPaths.map((file) => readFileSync(file, "utf8")).join("\n");
 const preloadSource = readFileSync(preloadPath, "utf8");
 const mainSource = readFileSync(mainPath, "utf8");
 const licenseServiceSource = readFileSync(licenseServicePath, "utf8");
 const styleSource = readFileSync(stylePath, "utf8");
+const tokenCssSource = readFileSync(tokenCssPath, "utf8");
 const styleGuideSource = readFileSync(styleGuidePath, "utf8");
 const designTokens = JSON.parse(readFileSync(tokenPath, "utf8"));
+const brandHandoffSource = readFileSync(brandHandoffPath, "utf8");
+const brandMasterSource = readFileSync(brandMasterPath, "utf8");
+const iconGeneratorSource = readFileSync(iconGeneratorPath, "utf8");
 
 function requireSource(source, pattern, label) {
   if (pattern instanceof RegExp) {
@@ -128,6 +136,7 @@ requireSource(rendererSource, "EvidenceTimeline", "M3 renderer");
 requireSource(rendererSource, 'aria-label="Audio evidence timeline"', "M3 renderer");
 requireSource(rendererSource, "Mark moment", "M3 renderer");
 requireSource(rendererSource, 'className="verification-text"', "M3 renderer");
+requireSource(rendererSource, 'import "./tokens.css"', "M3 renderer token entrypoint");
 requireSource(preloadSource, "recording.notes.read", "M3 preload");
 requireSource(preloadSource, "recording.notes.save", "M3 preload");
 requireSource(preloadSource, "recording.durable.listPage", "M3 preload");
@@ -168,9 +177,12 @@ requireSource(
 );
 requireSource(styleSource, ".activation-shell", "M3 styles");
 requireSource(styleSource, ".onboarding-progress", "M3 styles");
-requireSource(styleSource, "--canvas: #0e1014", "M3 styles");
-requireSource(styleSource, "--accent: #7357f2", "M3 styles");
-requireSource(styleSource, "--accent-text: #8d79ff", "M3 styles");
+requireSource(tokenCssSource, "--bg-app: var(--color-warm-app)", "M3 tokens");
+requireSource(tokenCssSource, "--bg-dark: var(--color-ink-dark)", "M3 tokens");
+requireSource(tokenCssSource, "--accent-primary: var(--color-coral-500)", "M3 tokens");
+requireSource(tokenCssSource, "--recording: var(--color-recording-600)", "M3 tokens");
+requireSource(tokenCssSource, "--focus-ring: var(--color-info-600)", "M3 tokens");
+requireSource(tokenCssSource, "--success: var(--color-success-600)", "M3 tokens");
 requireSource(styleSource, ".live-meeting-view", "M3 styles");
 requireSource(styleSource, ".export-preview-heading", "M3 styles");
 requireSource(styleSource, ".evidence-marker.decision", "M3 styles");
@@ -180,19 +192,48 @@ requireSource(styleSource, ".suggestion-pane", "M3 styles");
 requireSource(styleSource, ".app-message > button", "M3 styles");
 requireSource(styleGuideSource, "Candor Desktop Style Guide", "M3 Figma style guide");
 requireSource(styleGuideSource, "No account, public sharing", "M3 Figma style guide");
-if (designTokens?.source?.fileKey !== "wUT5Ai8170LZAmUqMfo2CI") {
-  throw new Error("M3 design tokens do not identify the verified Candor Figma source");
+requireSource(styleGuideSource, "Keep Tab / Soft Signal", "M3 Figma style guide brand identity");
+requireSource(brandHandoffSource, "Keep Tab / Soft Signal", "M3 brand handoff");
+requireSource(brandHandoffSource, "Candor Coral is not the recording", "M3 brand handoff");
+requireSource(brandMasterSource, 'fill="#161616"', "M3 brand master Warm Black");
+requireSource(brandMasterSource, 'stroke="#FFF9EE"', "M3 brand master Document Cream");
+requireSource(brandMasterSource, 'd="M368 210H414V270L391 294L368 270Z"', "M3 pointed Keep Tab");
+requireSource(brandMasterSource, 'fill="#FF6B5E"', "M3 brand master Candor Coral");
+requireSource(iconGeneratorSource, 'assets/platform/candor.ico', "M3 Windows brand asset generation");
+requireSource(iconGeneratorSource, 'assets/platform/candor.icns', "M3 macOS brand asset generation");
+requireSource(iconGeneratorSource, 'v3/renderer/public/candor-mark.png', "M3 in-app brand asset generation");
+if (
+  designTokens?.source?.file !== "Candor GUI Color System Handoff v2" ||
+  designTokens?.source?.supportingFigmaFileKey !== "wUT5Ai8170LZAmUqMfo2CI"
+) {
+  throw new Error("M3 design tokens do not identify the approved color handoff and supporting Figma source");
 }
-if (designTokens?.color?.canvas?.$value !== "#0e1014" || designTokens?.color?.accent?.$value !== "#7357f2") {
-  throw new Error("M3 design tokens do not match the verified Figma palette");
+const approvedPalette = designTokens?.color?.primitive;
+if (
+  approvedPalette?.warm?.app?.$value !== "#F4F0E8" ||
+  approvedPalette?.warm?.surface?.$value !== "#FFFCF6" ||
+  approvedPalette?.ink?.dark?.$value !== "#161616" ||
+  approvedPalette?.coral?.primary?.$value !== "#FF6B5E" ||
+  approvedPalette?.state?.recording?.$value !== "#C93434" ||
+  approvedPalette?.state?.info?.$value !== "#356A8A"
+) {
+  throw new Error("M3 design tokens do not match the approved v2 color handoff");
 }
-for (const backgroundToken of ["canvas", "surface", "surfaceRaised"]) {
-  const ratio = contrastRatio(
-    designTokens.color.accentText.$value,
-    designTokens.color[backgroundToken].$value,
-  );
+const contrastPairs = [
+  ["primary text on app", approvedPalette.ink.primary.$value, approvedPalette.warm.app.$value],
+  ["primary text on surface", approvedPalette.ink.primary.$value, approvedPalette.warm.surface.$value],
+  ["secondary text on surface", approvedPalette.ink.secondary.$value, approvedPalette.warm.surface.$value],
+  ["dark navigation text", approvedPalette.ink.onDark.$value, approvedPalette.ink.dark.$value],
+  ["dark navigation muted text", approvedPalette.ink.onDarkMuted.$value, approvedPalette.ink.dark.$value],
+  ["primary button text", approvedPalette.ink.primary.$value, approvedPalette.coral.primary.$value],
+  ["informational link", approvedPalette.state.info.$value, approvedPalette.warm.surface.$value],
+  ["success status", approvedPalette.state.success.$value, approvedPalette.warm.surface.$value],
+  ["recording status", approvedPalette.state.recording.$value, approvedPalette.warm.surface.$value],
+];
+for (const [label, foreground, background] of contrastPairs) {
+  const ratio = contrastRatio(foreground, background);
   if (ratio < 4.5) {
-    throw new Error(`M3 accent text contrast failed on ${backgroundToken}: ${ratio.toFixed(2)}:1`);
+    throw new Error(`M3 color contrast failed for ${label}: ${ratio.toFixed(2)}:1`);
   }
 }
 rejectSource(rendererSource, /\blocalStorage\b/, "M3 renderer");
@@ -208,6 +249,10 @@ if (fullRefreshCalls.length !== 1) {
 }
 rejectSource(styleSource, /figma\.com\/api\/mcp\/asset/, "M3 styles");
 rejectSource(styleSource, /:has\(\.message-stack:not\(:empty\)\)/, "M3 styles");
+rejectSource(styleSource, /#[0-9a-f]{3,8}\b|rgba?\(|hsla?\(/i, "M3 component CSS raw colors");
+rejectSource(styleSource, /(?:linear|radial)-gradient\(/i, "M3 component CSS gradients");
+rejectSource(brandMasterSource, /(?:linear|radial)Gradient|\bfilter=|<filter|<image/i, "M3 brand master effects");
+rejectSource(iconGeneratorSource, /\b(?:56, 91, 231|116, 73, 211|255, 76, 91)\b/, "M3 exploratory icon palette");
 
 const dataDir = mkdtempSync(path.join(tmpdir(), "candor-v3-m3-surface-"));
 const child = spawn(corePath, [], {
