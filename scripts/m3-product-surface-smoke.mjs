@@ -26,9 +26,17 @@ function rendererSourcePaths(directory) {
   });
 }
 
+function electronSourcePaths(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return electronSourcePaths(target);
+    if (!entry.isFile() || !/\.(?:ts|cts)$/.test(entry.name) || /\.test\.ts$/.test(entry.name)) return [];
+    return [target];
+  });
+}
+
 const rendererPaths = rendererSourcePaths(path.join(repoRoot, "v3", "renderer", "src"));
 const preloadPath = path.join(repoRoot, "electron", "preload.cts");
-const mainPath = path.join(repoRoot, "electron", "main.ts");
 const licenseServicePath = path.join(repoRoot, "electron", "license-service.ts");
 const stylePath = path.join(repoRoot, "v3", "renderer", "src", "styles.css");
 const tokenCssPath = path.join(repoRoot, "v3", "renderer", "src", "tokens.css");
@@ -39,7 +47,10 @@ const brandMasterPath = path.join(repoRoot, "assets", "icons", "candor-app-icon-
 const iconGeneratorPath = path.join(repoRoot, "scripts", "generate-v3-icons.mjs");
 const rendererSource = rendererPaths.map((file) => readFileSync(file, "utf8")).join("\n");
 const preloadSource = readFileSync(preloadPath, "utf8");
-const mainSource = readFileSync(mainPath, "utf8");
+const mainSource = electronSourcePaths(path.join(repoRoot, "electron"))
+  .filter((file) => !file.endsWith("preload.cts"))
+  .map((file) => readFileSync(file, "utf8"))
+  .join("\n");
 const licenseServiceSource = readFileSync(licenseServicePath, "utf8");
 const styleSource = readFileSync(stylePath, "utf8");
 const tokenCssSource = readFileSync(tokenCssPath, "utf8");
@@ -137,13 +148,13 @@ requireSource(rendererSource, 'aria-label="Audio evidence timeline"', "M3 render
 requireSource(rendererSource, "Mark moment", "M3 renderer");
 requireSource(rendererSource, 'className="verification-text"', "M3 renderer");
 requireSource(rendererSource, 'import "./tokens.css"', "M3 renderer token entrypoint");
-requireSource(preloadSource, "recording.notes.read", "M3 preload");
-requireSource(preloadSource, "recording.notes.save", "M3 preload");
-requireSource(preloadSource, "recording.durable.listPage", "M3 preload");
-requireSource(preloadSource, "recording.durable.transcriptPage", "M3 preload");
-requireSource(preloadSource, "recording.privacyReceipt", "M3 preload");
-requireSource(preloadSource, "privacy.capabilities", "M3 preload");
-requireSource(preloadSource, "retention.status", "M3 preload");
+requireSource(preloadSource, "candor-core:recording-notes-read", "M3 preload");
+requireSource(preloadSource, "candor-core:recording-notes-save", "M3 preload");
+requireSource(preloadSource, "candor-core:recording-durable-list-page", "M3 preload");
+requireSource(preloadSource, "candor-core:recording-durable-transcript-page", "M3 preload");
+requireSource(preloadSource, "candor-core:recording-privacy-receipt", "M3 preload");
+requireSource(preloadSource, "candor-core:privacy-capabilities", "M3 preload");
+requireSource(preloadSource, "candor-core:retention-status", "M3 preload");
 requireSource(preloadSource, "candor-license:status", "M3 preload");
 requireSource(preloadSource, "candor-license:activate", "M3 preload");
 requireSource(preloadSource, "candor-license:startTrial", "M3 preload");
