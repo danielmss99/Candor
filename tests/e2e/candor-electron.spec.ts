@@ -25,6 +25,7 @@ function violationSummary(violations: Array<{ id: string; impact?: string | null
 }
 
 async function expectNoAxeViolations(page: Page): Promise<void> {
+  // Electron exposes one sandboxed document and no iframes, so legacy injection avoids a second unsupported browser target.
   const results = await new AxeBuilder({ page })
     .setLegacyMode()
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
@@ -94,6 +95,17 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
     expect(popupResult).toBe(true);
     expect(session.app.windows()).toHaveLength(1);
 
+    const sessionRequestBlocked = await session.app.evaluate(async ({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      try {
+        await window.webContents.session.fetch("https://example.invalid");
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    expect(sessionRequestBlocked).toBe(true);
+
     await expectNoAxeViolations(session.page);
     await session.page.getByRole("button", { name: "Open local workspace" }).click();
     await expect(session.page.locator('[data-view="home"]')).toBeVisible();
@@ -101,8 +113,26 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
     const focused = await session.page.evaluate(() => document.activeElement !== document.body);
     expect(focused).toBe(true);
 
+    const navigationObserverArmed = await session.app.evaluate(({ BrowserWindow }) => {
+      const webContents = BrowserWindow.getAllWindows()[0]?.webContents;
+      if (!webContents) return false;
+      Reflect.set(globalThis, "__candorE2ENavigation", null);
+      webContents.once("will-navigate", (event, url) => {
+        setImmediate(() => {
+          Reflect.set(globalThis, "__candorE2ENavigation", {
+            defaultPrevented: event.defaultPrevented,
+            url,
+          });
+        });
+      });
+      return true;
+    });
+    expect(navigationObserverArmed).toBe(true);
     await session.page.evaluate(() => window.location.assign("https://example.com"));
-    await session.page.waitForTimeout(250);
+    await expect.poll(() => session.app.evaluate(() => Reflect.get(globalThis, "__candorE2ENavigation"))).toEqual({
+      defaultPrevented: true,
+      url: "https://example.com/",
+    });
     expect(session.page.url()).toBe(initialUrl);
   } finally {
     await session.close();

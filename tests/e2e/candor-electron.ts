@@ -45,7 +45,6 @@ function launchEnvironment(dataDir: string, scaleFactor: number): Record<string,
     CANDOR_E2E: "1",
     CANDOR_E2E_SCALE_FACTOR: String(scaleFactor),
     CANDOR_V3_DATA_DIR: dataDir,
-    CANDOR_NETWORK_POLICY: "disabled-by-default",
   };
 }
 

@@ -65,7 +65,6 @@ function defaultSpawnCore(executable: string): ChildProcessWithoutNullStreams {
     env: {
       ...process.env,
       CANDOR_CORE_TRANSPORT: "stdio-json-lines",
-      CANDOR_NETWORK_POLICY: "disabled-by-default",
     },
   });
 }

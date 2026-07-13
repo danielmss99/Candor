@@ -3,6 +3,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, readdirSync, ren
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { isReleaseArtifactName, isUnsafeReleaseArtifactName } from "./release-artifacts.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(__filename), "..");
@@ -19,11 +20,6 @@ const proofPath = path.join(
   `v3-release-checksums-${process.platform}-${process.arch}.json`,
 );
 const verifyOnly = process.argv.includes("--verify");
-
-function releaseArtifact(name) {
-  if (/^SHA256SUMS(?:\.|$)/i.test(name) || /^builder-/i.test(name)) return false;
-  return /(?:\.exe|\.dmg|\.AppImage|\.deb|\.rpm|\.blockmap|\.sig|^latest[^/]*\.ya?ml)$/i.test(name);
-}
 
 function sha256(filePath) {
   return new Promise((resolve, reject) => {
@@ -71,16 +67,28 @@ function bindArtifactManifest(artifacts, gitHead) {
 
   const releaseArtifacts = Array.isArray(manifest?.releaseArtifacts) ? manifest.releaseArtifacts : [];
   if (!releaseArtifacts.length) throw new Error("M0 artifact manifest has no release packages");
+  if (releaseArtifacts.length !== artifacts.length) {
+    throw new Error("release package set does not match M0 artifact provenance");
+  }
 
   const matchedArtifactNames = [];
+  const seenNames = new Set();
   for (const entry of releaseArtifacts) {
     const name = typeof entry?.path === "string" ? path.basename(entry.path) : "";
     const artifact = artifacts.find((candidate) => candidate.name === name);
     if (!name || entry?.exists !== true || !artifact || artifact.sha256 !== entry?.sha256) {
       throw new Error(`release checksum does not match M0 artifact provenance for ${name || "unknown package"}`);
     }
+    if (seenNames.has(name)) throw new Error(`M0 artifact provenance contains a duplicate package: ${name}`);
+    seenNames.add(name);
     matchedArtifactNames.push(name);
   }
+  for (const artifact of artifacts) {
+    if (!seenNames.has(artifact.name)) {
+      throw new Error(`release package is absent from M0 artifact provenance: ${artifact.name}`);
+    }
+  }
+  matchedArtifactNames.sort((left, right) => left.localeCompare(right));
 
   return {
     proofKind: manifest.proofKind,
@@ -95,14 +103,15 @@ if (!existsSync(releaseRoot)) {
   throw new Error("release-v3 does not exist; build release artifacts before generating checksums");
 }
 
-const names = readdirSync(releaseRoot, { withFileTypes: true })
-  .filter((entry) => entry.isFile() && releaseArtifact(entry.name))
+const releaseEntries = readdirSync(releaseRoot, { withFileTypes: true });
+if (releaseEntries.some((entry) => entry.isFile() && isUnsafeReleaseArtifactName(entry.name))) {
+  throw new Error("release package names cannot contain path separators or line breaks");
+}
+const names = releaseEntries
+  .filter((entry) => entry.isFile() && isReleaseArtifactName(entry.name))
   .map((entry) => entry.name)
   .sort((left, right) => left.localeCompare(right));
 if (!names.length) throw new Error("no release packages were found for checksum generation");
-if (names.some((name) => /[\r\n]/.test(name))) {
-  throw new Error("release package names cannot contain line breaks");
-}
 
 const artifacts = [];
 for (const name of names) {

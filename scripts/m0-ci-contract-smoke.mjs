@@ -17,6 +17,8 @@ const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "ut
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
 const releaseChecksums = readFileSync(resolve(repoRoot, "scripts", "v3-release-checksums.mjs"), "utf8");
+const releaseArtifacts = readFileSync(resolve(repoRoot, "scripts", "release-artifacts.mjs"), "utf8");
+const releaseChecksumValidation = readFileSync(resolve(repoRoot, "scripts", "release-checksum-validation.mjs"), "utf8");
 const packagedSmoke = readFileSync(resolve(repoRoot, "scripts", "m0-packaged-smoke.mjs"), "utf8");
 const releaseArtifactSmoke = readFileSync(resolve(repoRoot, "scripts", "v3-release-artifact-smoke.mjs"), "utf8");
 const transcriptionProofAudit = readFileSync(resolve(repoRoot, "scripts", "m2-transcription-proof-audit.mjs"), "utf8");
@@ -280,6 +282,10 @@ for (const [contents, pattern, label] of [
   [releaseChecksums, "rawPathExposed: false", "release checksum path redaction evidence"],
   [releaseChecksums, "tracked source tree must be clean", "release checksum clean-source enforcement"],
   [releaseChecksums, "bindArtifactManifest", "release checksum artifact-manifest binding"],
+  [releaseArtifacts, "release-blockmap", "release artifact blockmap classification"],
+  [releaseArtifacts, "update-metadata", "release artifact update metadata classification"],
+  [releaseChecksumValidation, "total artifact count does not match manifest artifact count", "release checksum two-way count validation"],
+  [releaseChecksumValidation, "package names must be unique", "release checksum duplicate-name rejection"],
   [goalAudit, "proofKind: \"v3-goal-audit\"", "goal audit proof kind"],
   [goalAudit, "coordination.subagent_alignment", "goal audit subagent alignment requirement"],
   [goalAudit, "missionComplete", "goal audit mission completion field"],
