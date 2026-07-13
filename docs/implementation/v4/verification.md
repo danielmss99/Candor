@@ -265,6 +265,125 @@ Date: 2026-07-12
 
 `electron/main.ts` is now 126 lines, below the V4 target of 250 lines.
 
+## Phase 3a: Exact Renderer Core Channels
+
+Date: 2026-07-13
+
+- Replaced the generic `candor-core:call` IPC route with 43 fixed product
+  channels. The preload still exposes named product functions, never a generic
+  channel or Rust method selector.
+- Main owns the immutable channel-to-method and timeout table. A parity test
+  reads the preload source and fails if its fixed channel set differs from main.
+- Updated modular source and product proofs so extracted runtime files remain
+  substantively audited.
+
+| Check | Result |
+|---|---|
+| `npm test` | passed; fixed-channel parity included |
+| Electron and source-security audits | passed; generic core channel is banned and mutation-tested |
+| local instruct fixture | passed against the named AI channels |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed |
+
+Commit: `ee2afc6`
+
+## Phase 3b: Renderer Input Validation
+
+Date: 2026-07-13
+
+- Added method-specific runtime validation before any renderer payload reaches
+  the Rust process. Validators reject unknown fields, unsafe recording/model
+  identifiers, oversized notes/questions/JSON, unsupported export formats,
+  invalid consent identifiers, and out-of-range pages, chunks, and token counts.
+- A coverage fixture provides one valid payload for every renderer core
+  operation, so adding a channel without an input contract fails tests.
+- The packaged proof caught a real 200-row transcript request against the new
+  100-row contract. Renderer and preload pagination were corrected to the
+  specified limit before the package was accepted.
+
+| Check | Result |
+|---|---|
+| `npm test` | passed; 15 files and 57 tests at validator closure |
+| `npm run electron:v3:typecheck-renderer` | passed |
+| Electron and source-security audits | passed; 95 checks and 6 mutation tests |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed after transcript page correction |
+
+Commit: `36fb977`
+
+## Phase 3c: Enforced Rust Envelope
+
+Date: 2026-07-13
+
+- Electron sends UUIDv4 `id`/`requestId`, protocol version, method, parameters,
+  and an ISO UTC timestamp. Rust validates complete versioned metadata, exact ID
+  equality, UUID shape, timestamp shape, and protocol compatibility.
+- Rust rejects replayed IDs with a bounded 1,024-entry recent-ID registry and
+  echoes `requestId` on versioned responses. Electron requires matching `id` and
+  `requestId`, a valid protocol version, and structured errors with retryability.
+- The handshake now validates core version, schema version, capabilities, build
+  target, and enabled features.
+- Replaced `BufRead::lines()` with a bounded frame reader that never allocates
+  beyond the 4,000,000-byte request boundary and drains an oversized frame before
+  reading the next request.
+- Direct proof scripts retain a legacy envelope compatibility path temporarily.
+  The production Electron path always uses the enforced versioned envelope.
+- Added `vitest.config.ts` so compiled tests under `dist-v3` cannot be rediscovered
+  as stale duplicate tests.
+
+| Check | Result |
+|---|---|
+| Rust tests | passed; 66 tests including handshake, duplicate ID, partial metadata, protocol mismatch, and bounded-reader recovery |
+| `npm test` | passed; 15 files and 58 tests |
+| `npm run core:v3:release` | passed; SQLCipher and local Whisper release sidecar staged |
+| `npm run m0:packaged-smoke` | passed against the rebuilt release sidecar |
+| `npm run v3:verify` | passed; full M0-M5 staged chain |
+
+Commits: `a92456b`, `c615fcf`, and `6039f02`
+
+The first two full-verifier attempts exposed proof scripts that still read only
+`electron/main.ts` or expected Rust method names in preload source. The updater
+and M3 product proofs now inspect the full modular Electron runtime and fixed
+preload channels. Both targeted proofs and the complete staged verifier pass.
+
+## Claude Process And Protocol Gate
+
+Date: 2026-07-13
+
+- Request: `docs/implementation/v4/claude-phase2-protocol-review-request.md`
+- Review: `docs/implementation/v4/claude-phase2-protocol-review.md`
+- Verdict: **Go with required fixes**.
+
+| Finding | Disposition |
+|---|---|
+| H1 stale `captureActive` after process exit | Accepted. Exit now clears process-local capture state. Tests cover crash-after-active-capture and timeout-during-active-capture separately. |
+| H2 raw Rust error messages crossed renderer IPC | Accepted. Main emits only bounded `CANDOR_CORE_ERROR:<CODE>` values. Renderer parsing preserves the code, and packaged smoke proves invalid input cannot echo its path-shaped value. |
+| M1 notes counted characters but not UTF-8 bytes | Accepted. Notes have both a 2,000,000-character and 3,900,000-byte limit with multibyte coverage. |
+| M2 PID reached renderer status | Accepted as defense in depth. Main retains PID for internal sidecar proof, while renderer core and supervisor views omit process identifiers. |
+| M3 active-capture timeout lacked a test | Accepted. The test proves the process remains alive and capture state remains active when another request times out. |
+| M4 permission source checks proved presence only | Accepted. Permission denial functions are directly tested, exact false behavior is audited, and a mutation to `callback(true)` fails the source proof. |
+| L1 restart count changed before synchronous spawn | Accepted. Restart count changes only after a child object is created; synchronous failure returns a pathless `CORE_UNAVAILABLE` state. |
+| L2 ping allowed arbitrary JSON | Accepted. Renderer ping is now parameterless. |
+| L3 renderer supervisor returned protocol fault text | Accepted with M2. Renderer receives `hadError`, not fault text. |
+
+The review found the temporary legacy direct-proof envelope safe because it runs
+in separately spawned proof processes and cannot be mistaken for an Electron
+response. That compatibility path remains tracked for later removal.
+
+| Check after fixes | Result |
+|---|---|
+| `npm test` | passed; 16 files and 65 tests |
+| Electron main build and renderer typecheck | passed |
+| Electron/source-security/proof-audit self-tests | passed; 103 checks and 7 mutations |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed; structured invalid-input error and renderer PID omission proven |
+
+Commit: `214b4be`
+
+Claude re-reviewed only that fix commit in
+`docs/implementation/v4/claude-phase2-protocol-fix-review.md` and returned
+**Go**. It confirmed H1 and H2 are structurally closed, found no new Critical or
+High defects, and approved renderer decomposition. The remaining low-risk audit
+backlog item is a second mutation case for the permission-check return path; the
+behavior already has a direct unit test and an exact source check.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
