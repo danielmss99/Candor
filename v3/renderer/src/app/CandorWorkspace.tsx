@@ -14,7 +14,7 @@ import { MeetingDetailView } from "../features/detail/MeetingDetailView";
 import { ReviewView } from "../features/review/ReviewView";
 import { SettingsView } from "../features/settings/SettingsView";
 import { useCaptureSession } from "../features/capture/useCaptureSession";
-import { useLocalJob } from "../features/ai/useLocalJob";
+import { useOperationRunner } from "../features/jobs/useOperationRunner";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
   StartupLoading,
@@ -56,14 +56,11 @@ import {
   type OnboardingStep,
   type RecapItem,
 } from "../core/contracts";
-import type { JobKind } from "../state/operation-machines";
-import { ExclusiveActionRegistry } from "../state/request-coordinator";
 
 export function CandorWorkspace() {
   const api = window.candor?.core;
   const licenseApi = window.candor?.license;
   const client = useMemo(() => (api ? new CandorClient(api) : null), [api]);
-  const exclusiveActions = useRef(new ExclusiveActionRegistry());
   const startupLoaded = useRef(false);
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>("activate");
@@ -99,28 +96,6 @@ export function CandorWorkspace() {
   const [instructSetupOpen, setInstructSetupOpen] = useState(false);
   const [markdownExport, setMarkdownExport] = useState("");
   const [audioUrl, setAudioUrl] = useState("");
-  const [busy, setBusy] = useState("");
-  const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
-  const handleLicenseLoadError = useCallback((message: string) => setError(message), []);
-  const license = useLicenseState(licenseApi, handleLicenseLoadError);
-  const {
-    status: licenseStatus,
-    portalInfo: licensePortalInfo,
-    loaded: licenseLoaded,
-    licenseKey,
-    licenseEmail,
-    licenseKeyTouched,
-    promptDismissed: licensePromptDismissed,
-    active: licenseActive,
-    state: licenseState,
-    setLicenseKey,
-    setLicenseEmail,
-    setLicenseKeyTouched,
-    setPromptDismissed: setLicensePromptDismissed,
-    refresh: refreshLicense,
-  } = license;
-
   const resetMeetingAi = useCallback(() => {
     setRecap(null);
     setAskAnswer(null);
@@ -199,9 +174,38 @@ export function CandorWorkspace() {
   const activeCapture = asBool(captureStatus.active);
   const activeRecordingId = asString(asObject(captureStatus.activeSession).recordingId);
   const captureSession = useCaptureSession(activeCapture, activeRecordingId);
-  const localJob = useLocalJob();
+  const operations = useOperationRunner(captureSession.failed);
+  const {
+    busy,
+    notice,
+    error,
+    jobMachine,
+    job: localJob,
+    acquire: acquireOperation,
+    run,
+    setBusy,
+    setNotice,
+    setError,
+  } = operations;
+  const handleLicenseLoadError = useCallback((message: string) => setError(message), [setError]);
+  const license = useLicenseState(licenseApi, handleLicenseLoadError);
+  const {
+    status: licenseStatus,
+    portalInfo: licensePortalInfo,
+    loaded: licenseLoaded,
+    licenseKey,
+    licenseEmail,
+    licenseKeyTouched,
+    promptDismissed: licensePromptDismissed,
+    active: licenseActive,
+    state: licenseState,
+    setLicenseKey,
+    setLicenseEmail,
+    setLicenseKeyTouched,
+    setPromptDismissed: setLicensePromptDismissed,
+    refresh: refreshLicense,
+  } = license;
   const captureMachine = captureSession.state;
-  const jobMachine = localJob.state;
   const instructReady = asBool(instructStatus.ready);
   const instructAssetsReady = asBool(instructAssetsStatus.ready);
   const instructRunnerAsset = asObject(instructAssetsStatus.runner);
@@ -212,35 +216,6 @@ export function CandorWorkspace() {
   const selectedTitle = selectedRecording?.label || recordingTitle || "Untitled local meeting";
   const combinedCaptureAvailable = asBool(asObject(asObject(captureStatus.sources).system).simultaneousMicAndSystem);
   const licenseKeyInvalid = licenseKeyTouched && !licenseKey.trim();
-
-  const run = useCallback(async (
-    label: string,
-    task: () => Promise<void>,
-    exclusiveScope = label,
-    jobKind?: JobKind,
-  ) => {
-    const release = exclusiveActions.current.acquire(exclusiveScope);
-    if (!release) {
-      setNotice(`${label} is already in progress`);
-      return;
-    }
-    const requestId = jobKind ? localJob.begin(jobKind) : 0;
-    setBusy(label);
-    setError("");
-    setNotice("");
-    try {
-      await task();
-      if (jobKind) localJob.complete(requestId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setError(message);
-      if (exclusiveScope === "capture") captureSession.failed(message);
-      if (jobKind) localJob.fail(requestId, message);
-    } finally {
-      setBusy("");
-      release();
-    }
-  }, [captureSession, localJob]);
 
   const refresh = useCallback(async () => {
     if (!api || !client) {
@@ -299,12 +274,6 @@ export function CandorWorkspace() {
   useEffect(() => {
     setReviewSummaryDraft(recap?.summary ?? "");
   }, [recap]);
-
-  useEffect(() => {
-    if (!notice) return;
-    const timeout = window.setTimeout(() => setNotice(""), 5000);
-    return () => window.clearTimeout(timeout);
-  }, [notice]);
 
   useEffect(() => {
     return () => {
@@ -430,7 +399,7 @@ export function CandorWorkspace() {
       setInstructAssetError("Enter exactly 64 hexadecimal characters.");
       return;
     }
-    const release = exclusiveActions.current.acquire("local-model");
+    const release = acquireOperation("local-model");
     if (!release) {
       setNotice("A local model import is already in progress");
       return;
