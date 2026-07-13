@@ -5,6 +5,7 @@ import {
   CORE_PROTOCOL_VERSION,
   createCoreRequest,
   parseCoreHandshake,
+  parseCoreEventLine,
   parseCoreResponseLine,
   privateCoreMethods,
   rendererCoreMethods,
@@ -70,6 +71,25 @@ describe("core protocol", () => {
       capabilities: [],
       build: { target: "windows-x64", features: [] },
     })).toThrow("incompatible handshake");
+  });
+
+  it("validates unsolicited job events without treating them as responses", () => {
+    expect(parseCoreEventLine(JSON.stringify({
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      event: "jobs.changed",
+      payload: {
+        jobId: "a".repeat(32),
+        type: "export",
+        state: "running",
+        terminal: false,
+        rawPathExposed: false,
+      },
+    }))).toMatchObject({ event: "jobs.changed", payload: { state: "running" } });
+    expect(() => parseCoreEventLine(JSON.stringify({
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      event: "jobs.changed",
+      payload: { jobId: "not-safe" },
+    }))).toThrow("invalid job event payload");
   });
 
   it("keeps the preload on the exact named core channel allowlist", () => {

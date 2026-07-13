@@ -80,6 +80,18 @@ const rendererConfigs: readonly OperationConfig[] = [
 
 const privateConfigs: readonly OperationConfig[] = [
   { method: "core.shutdown", timeoutMs: 2_000, result: { shutdown: "boolean" } },
+  { method: "jobs.list", result: { jobs: "array", jobCount: "integer", rawPathExposed: "boolean" } },
+  { method: "jobs.get", result: { jobId: "string", type: "string", state: "string", createdAt: "string", updatedAt: "string", terminal: "boolean", rawPathExposed: "boolean" } },
+  { method: "jobs.cancel", result: { jobId: "string", state: "string", cancelRequested: "boolean", terminal: "boolean", rawPathExposed: "boolean" } },
+  { method: "jobs.acknowledge", result: { jobId: "string", acknowledged: "boolean", rawPathExposed: "boolean" } },
+  { method: "transcription.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "ai.ask.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "ai.recap.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "export.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "import.v2.startFromFolder", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "models.verify.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "models.importFinish.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
+  { method: "ai.instructAssetsImport.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
   { method: "models.importStart", timeoutMs: 15_000, mode: "job", result: { importId: "string", modelId: "string", chunkBytesMax: "integer", rawPathExposed: "boolean" } },
   { method: "models.importChunk", timeoutMs: 30_000, mode: "job", result: { importId: "string", modelId: "string", bytesWritten: "integer", complete: "boolean", rawPathExposed: "boolean" } },
   { method: "models.importFinish", timeoutMs: 120_000, mode: "job", result: { importId: "string", modelId: "string", imported: "boolean", rejected: "boolean", rawPathExposed: "boolean" } },

@@ -7,8 +7,10 @@ import {
   MAX_CORE_REQUEST_LINE_BYTES,
   MAX_CORE_RESPONSE_LINE_BYTES,
   parseCoreHandshake,
+  parseCoreEventLine,
   parseCoreResponseLine,
   type CoreResponse,
+  type CoreEvent,
 } from "./protocol.js";
 import { CORE_OPERATIONS, type CoreOperationDefinition } from "./operation-registry.js";
 import { RequestRegistry } from "./request-registry.js";
@@ -19,7 +21,15 @@ export type CoreSupervisorLifecycle =
   | "running"
   | "stopping"
   | "exited"
-  | "failed";
+  | "failed"
+  | "capture-connection-degraded";
+
+export interface CaptureDegradedMetadata {
+  at: string;
+  method: string;
+  recordingId: string | null;
+  lastConfirmedActive: true;
+}
 
 interface CoreSupervisorState {
   state: CoreSupervisorLifecycle;
@@ -39,6 +49,8 @@ interface CoreSupervisorState {
     version?: JsonValue;
     error?: string;
   } | null;
+  degradedCapture: CaptureDegradedMetadata | null;
+  captureRecoveryRequired: boolean;
 }
 
 type SpawnCore = (executable: string) => ChildProcessWithoutNullStreams;
@@ -49,6 +61,8 @@ interface CoreClientOptions {
   isDev: boolean;
   spawnCore?: SpawnCore;
   timeoutMsForTesting?: (method: string, configuredTimeoutMs: number) => number;
+  onCaptureConnectionDegraded?: (metadata: CaptureDegradedMetadata) => void | Promise<void>;
+  onCaptureRecoveryResolved?: () => void | Promise<void>;
 }
 
 const MAX_CORE_STDERR_BYTES = 64 * 1024;
@@ -82,6 +96,11 @@ function executableBasename(value: string): string {
   return path.win32.basename(value.replaceAll("/", "\\"));
 }
 
+function stringFromNestedResult(value: JsonValue | undefined, objectField: string, field: string): string | null {
+  const nested = objectValue(objectValue(value ?? null)[objectField] ?? null)[field];
+  return typeof nested === "string" && nested.length > 0 ? nested : null;
+}
+
 export class CoreClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private readonly registry = new RequestRegistry<CoreResponse>();
@@ -93,12 +112,17 @@ export class CoreClient {
     pid: null,
     lastExit: null,
     lastHandshake: null,
+    degradedCapture: null,
+    captureRecoveryRequired: false,
   };
   private hasStarted = false;
   private handshakePromise: Promise<ReturnType<typeof parseCoreHandshake>> | null = null;
   private stdoutBuffer = Buffer.alloc(0);
   private captureActive = false;
+  private activeRecordingId: string | null = null;
   private protocolFault: string | null = null;
+  private readonly eventListeners = new Set<(event: CoreEvent) => void>();
+  private recoveryPersistence: Promise<void> = Promise.resolve();
 
   constructor(private readonly options: CoreClientOptions) {}
 
@@ -113,6 +137,16 @@ export class CoreClient {
       lastExit: this.supervisor.lastExit,
       lastHandshake: this.supervisor.lastHandshake,
       captureActive: this.captureActive,
+      activeRecordingId: this.activeRecordingId,
+      degradedCapture: this.supervisor.degradedCapture
+        ? {
+            at: this.supervisor.degradedCapture.at,
+            method: this.supervisor.degradedCapture.method,
+            recordingId: this.supervisor.degradedCapture.recordingId,
+            lastConfirmedActive: true,
+          }
+        : null,
+      captureRecoveryRequired: this.supervisor.captureRecoveryRequired,
     };
   }
 
@@ -135,6 +169,8 @@ export class CoreClient {
           },
       lastHandshake: snapshot.lastHandshake ?? null,
       captureActive: snapshot.captureActive === true,
+      degradedCapture: snapshot.degradedCapture ?? null,
+      captureRecoveryRequired: snapshot.captureRecoveryRequired === true,
     };
   }
 
@@ -152,6 +188,45 @@ export class CoreClient {
     const validatedParams = operation.paramsSchema.parse(params);
     if (operation.requiresHandshake) await this.ensureHandshake();
     return this.rawCall(operation, validatedParams);
+  }
+
+  subscribe(listener: (event: CoreEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => this.eventListeners.delete(listener);
+  }
+
+  restoreCaptureRecovery(metadata: Omit<CaptureDegradedMetadata, "lastConfirmedActive">): void {
+    const restored: CaptureDegradedMetadata = { ...metadata, lastConfirmedActive: true };
+    this.supervisor.state = "capture-connection-degraded";
+    this.supervisor.degradedCapture = restored;
+    this.supervisor.captureRecoveryRequired = true;
+    this.activeRecordingId = restored.recordingId;
+  }
+
+  waitForRecoveryPersistence(): Promise<void> {
+    return this.recoveryPersistence;
+  }
+
+  async retryConnection(): Promise<JsonValue> {
+    if (this.supervisor.state === "capture-connection-degraded") {
+      const response = await this.call("capture.status");
+      if (!response.ok) {
+        throw new CoreClientError(
+          "CORE_UNAVAILABLE",
+          response.error?.message ?? "candor-core capture status could not be confirmed",
+          true,
+        );
+      }
+      this.supervisor.state = "running";
+      this.supervisor.degradedCapture = null;
+      return this.rendererSnapshot();
+    }
+    await this.ensureHandshake();
+    const response = await this.call("core.status");
+    if (!response.ok) {
+      throw new CoreClientError("CORE_UNAVAILABLE", response.error?.message ?? "candor-core is unavailable", true);
+    }
+    return this.rendererSnapshot();
   }
 
   async ensureHandshake(): Promise<ReturnType<typeof parseCoreHandshake>> {
@@ -297,6 +372,7 @@ export class CoreClient {
     this.supervisor.pid = null;
     this.supervisor.lastExit = null;
     this.supervisor.lastHandshake = null;
+    this.supervisor.degradedCapture = null;
     this.stdoutBuffer = Buffer.alloc(0);
     this.protocolFault = null;
 
@@ -353,6 +429,17 @@ export class CoreClient {
       this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
       if (!line) continue;
       try {
+        const event = parseCoreEventLine(line);
+        if (event) {
+          for (const listener of this.eventListeners) {
+            try {
+              listener(event);
+            } catch {
+              // A renderer listener cannot fault the trusted core transport.
+            }
+          }
+          continue;
+        }
         let response = parseCoreResponseLine(line);
         const method = this.registry.methodFor(response.requestId);
         if (!method) {
@@ -408,9 +495,12 @@ export class CoreClient {
   ): void {
     if (this.child !== child) return;
     const wasStopping = this.supervisor.state === "stopping";
+    const captureWasActive = this.captureActive;
+    if (captureWasActive) this.enterCaptureRecovery("core.processExit");
     this.child = null;
     this.handshakePromise = null;
     this.captureActive = false;
+    this.activeRecordingId = null;
     this.supervisor.pid = null;
     this.supervisor.state = this.protocolFault ? "failed" : wasStopping ? "stopped" : "exited";
     this.supervisor.lastExit = {
@@ -451,20 +541,57 @@ export class CoreClient {
 
   private updateCaptureState(method: string, response: CoreResponse): void {
     if (!response.ok) return;
-    if (method === "capture.stop") this.captureActive = false;
+    if (method === "capture.stop") {
+      this.captureActive = false;
+      this.activeRecordingId = null;
+      this.supervisor.captureRecoveryRequired = false;
+      this.supervisor.degradedCapture = null;
+      if (this.supervisor.state === "capture-connection-degraded") this.supervisor.state = "running";
+      this.resolveCaptureRecovery();
+    }
     else if (method === "capture.startMic" || method === "capture.startSystem" || method === "capture.startMicAndSystem") {
       this.captureActive = true;
+      this.activeRecordingId = stringFromNestedResult(response.result, "capture", "recordingId");
     } else if (method === "capture.status") {
-      this.captureActive = objectValue(response.result ?? null).active === true;
+      const status = objectValue(response.result ?? null);
+      this.captureActive = status.active === true;
+      this.activeRecordingId = this.captureActive
+        ? stringFromNestedResult(response.result, "activeSession", "recordingId")
+        : null;
+      if (this.supervisor.state === "capture-connection-degraded") {
+        this.supervisor.state = "running";
+        this.supervisor.degradedCapture = null;
+        this.supervisor.captureRecoveryRequired = false;
+        this.resolveCaptureRecovery();
+      }
     }
   }
 
-  private handleTimeout(_method: string): void {
-    this.supervisor.state = "failed";
-    if (!this.captureActive) {
-      this.protocolFault = "candor-core became unresponsive";
-      this.child?.kill();
+  private handleTimeout(method: string): void {
+    if (this.captureActive) {
+      this.enterCaptureRecovery(method);
+      return;
     }
+    this.supervisor.state = "failed";
+    this.protocolFault = "candor-core became unresponsive";
+    this.child?.kill();
+  }
+
+  private enterCaptureRecovery(method: string): void {
+    const metadata: CaptureDegradedMetadata = {
+      at: new Date().toISOString(),
+      method,
+      recordingId: this.activeRecordingId,
+      lastConfirmedActive: true,
+    };
+    this.supervisor.state = "capture-connection-degraded";
+    this.supervisor.degradedCapture = metadata;
+    this.supervisor.captureRecoveryRequired = true;
+    this.recoveryPersistence = Promise.resolve(this.options.onCaptureConnectionDegraded?.(metadata)).catch(() => undefined);
+  }
+
+  private resolveCaptureRecovery(): void {
+    this.recoveryPersistence = Promise.resolve(this.options.onCaptureRecoveryResolved?.()).catch(() => undefined);
   }
 
   private async stopForRestart(): Promise<void> {

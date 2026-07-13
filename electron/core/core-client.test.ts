@@ -94,6 +94,46 @@ function capturingThenSilentCore(): string {
   `;
 }
 
+function capturingCoreWithHungStatus(): string {
+  return `
+    const readline = require("node:readline");
+    const protocolVersion = ${JSON.stringify(CORE_PROTOCOL_VERSION)};
+    let active = true;
+    const input = readline.createInterface({ input: process.stdin });
+    input.on("line", (line) => {
+      const request = JSON.parse(line);
+      let result = null;
+      if (request.method === "core.version") result = {
+        version: "test",
+        protocolVersion,
+        schemaVersion: 1,
+        capabilities: ["stdio-json-lines"],
+        build: { target: "test-target", features: [] }
+      };
+      if (request.method === "capture.status") result = {
+        implemented: true,
+        active,
+        activeSession: active ? { recordingId: "recording-1" } : null,
+        sources: {},
+        rawPathExposed: false
+      };
+      if (request.method === "capture.stop") {
+        active = false;
+        result = {
+          recording: { recordingId: "recording-1", state: "finished" },
+          capture: { recordingId: "recording-1", integrityStatus: "verified" },
+          rawPathExposed: false
+        };
+      }
+      if (request.method === "core.shutdown") result = { shutdown: true };
+      if (result !== null) {
+        process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
+      }
+      if (request.method === "core.shutdown") setTimeout(() => process.exit(0), 5);
+    });
+  `;
+}
+
 const settle = (milliseconds = 20) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 describe("core client process boundary", () => {
@@ -155,8 +195,37 @@ describe("core client process boundary", () => {
     expect(client.snapshot()).toMatchObject({ state: "failed" });
   });
 
-  it("keeps an active capture process alive when a later request times out", async () => {
+  it("enters a degraded capture state without killing the active core", async () => {
     const child = spawnNode(capturingThenSilentCore());
+    const degraded: Array<{ method: string; recordingId: string | null }> = [];
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => child,
+      timeoutMsForTesting: (method, configured) => method === "core.status" ? 25 : configured,
+      onCaptureConnectionDegraded: (metadata) => {
+        degraded.push(metadata);
+      },
+    });
+
+    await client.ensureHandshake();
+    await client.call("capture.status");
+    await expect(client.call("core.status")).rejects.toThrow("timed out");
+    await settle();
+    expect(client.snapshot()).toMatchObject({
+      state: "capture-connection-degraded",
+      captureActive: true,
+      captureRecoveryRequired: true,
+    });
+    expect(degraded).toHaveLength(1);
+    expect(degraded[0]).toMatchObject({ method: "core.status", recordingId: null });
+    expect(child.killed).toBe(false);
+    child.kill();
+  });
+
+  it("reconnects or stops from the degraded capture state", async () => {
+    const child = spawnNode(capturingCoreWithHungStatus());
     const client = new CoreClient({
       executablePath: () => process.execPath,
       allowedMethods,
@@ -165,22 +234,27 @@ describe("core client process boundary", () => {
       timeoutMsForTesting: (method, configured) => method === "core.status" ? 25 : configured,
     });
 
-    await client.ensureHandshake();
     await client.call("capture.status");
     await expect(client.call("core.status")).rejects.toThrow("timed out");
-    await settle();
-    expect(client.snapshot()).toMatchObject({ state: "failed", captureActive: true });
-    expect(child.killed).toBe(false);
-    child.kill();
+    expect(client.snapshot()).toMatchObject({ state: "capture-connection-degraded", captureActive: true });
+    await client.retryConnection();
+    expect(client.snapshot()).toMatchObject({ state: "running", captureActive: true });
+    await client.finalizeCaptureForClose();
+    expect(client.captureGuardPhase()).toBe("idle");
+    await client.shutdown();
   });
 
   it("clears stale capture state when the core process exits", async () => {
     const child = spawnNode(responsiveCore(true));
+    const degraded: Array<{ method: string; recordingId: string | null }> = [];
     const client = new CoreClient({
       executablePath: () => process.execPath,
       allowedMethods,
       isDev: false,
       spawnCore: () => child,
+      onCaptureConnectionDegraded: (metadata) => {
+        degraded.push(metadata);
+      },
     });
 
     await client.ensureHandshake();
@@ -188,7 +262,29 @@ describe("core client process boundary", () => {
     expect(client.snapshot()).toMatchObject({ captureActive: true });
     child.kill();
     await settle();
-    expect(client.snapshot()).toMatchObject({ captureActive: false });
+    expect(client.snapshot()).toMatchObject({ captureActive: false, captureRecoveryRequired: true });
+    expect(degraded).toEqual([expect.objectContaining({ method: "core.processExit" })]);
+  });
+
+  it("hydrates recovery metadata before starting a replacement core", () => {
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => spawnNode(responsiveCore()),
+    });
+
+    client.restoreCaptureRecovery({
+      at: "2026-07-13T12:00:00.000Z",
+      method: "capture.stop",
+      recordingId: "recording-1",
+    });
+
+    expect(client.rendererSnapshot()).toMatchObject({
+      state: "capture-connection-degraded",
+      captureRecoveryRequired: true,
+      degradedCapture: { method: "capture.stop", recordingId: "recording-1" },
+    });
   });
 
   it("records a safe failed state when process spawn throws synchronously", async () => {
@@ -256,5 +352,38 @@ describe("core client process boundary", () => {
     await expect(client.call("capture.status")).rejects.toMatchObject({ code: "CORE_RESULT_SCHEMA_INVALID" });
     await settle();
     expect(client.snapshot()).toMatchObject({ state: "failed" });
+  });
+
+  it("delivers validated job events independently from request responses", async () => {
+    const script = responsiveCore().replace(
+      'if (request.method === "core.shutdown") result = { shutdown: true };',
+      `if (request.method === "core.status") {
+        process.stdout.write(JSON.stringify({
+          protocolVersion,
+          event: "jobs.changed",
+          payload: {
+            jobId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            type: "export",
+            state: "running",
+            terminal: false,
+            rawPathExposed: false
+          }
+        }) + "\\n");
+      }
+      if (request.method === "core.shutdown") result = { shutdown: true };`,
+    );
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => spawnNode(script),
+    });
+    const events: string[] = [];
+    const unsubscribe = client.subscribe((event) => events.push(event.event));
+
+    await client.call("core.status");
+    expect(events).toEqual(["jobs.changed"]);
+    unsubscribe();
+    await client.shutdown();
   });
 });

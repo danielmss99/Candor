@@ -2,6 +2,7 @@ import type { JsonValue } from "../core/json.js";
 import { INPUT_LIMITS, validModelId, validRecordingId } from "./input-limits.js";
 
 const IMPORT_ID = /^[A-Za-z0-9_-]{1,96}$/;
+const JOB_ID = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-fA-F0-9]{64}$/;
 const MAX_PATH_CHARACTERS = 32_768;
 const MAX_BASE64_CHUNK_CHARACTERS = 6_000_000;
@@ -49,6 +50,19 @@ function integer(method: string, value: unknown, field: string, minimum: number,
   return Number(value);
 }
 
+function boundedJson(method: string, value: unknown, field: string): JsonValue {
+  let serialized: string | undefined;
+  try {
+    serialized = JSON.stringify(value);
+  } catch {
+    return fail(method, `${field} must be JSON serializable`);
+  }
+  if (serialized === undefined || Buffer.byteLength(serialized, "utf8") > INPUT_LIMITS.eventPayloadBytes) {
+    return fail(method, `${field} exceeds the local payload limit`);
+  }
+  return JSON.parse(serialized) as JsonValue;
+}
+
 function recordingOnly(method: string, value: unknown): JsonValue {
   const input = objectInput(method, value);
   exactFields(method, input, ["recordingId"]);
@@ -56,9 +70,40 @@ function recordingOnly(method: string, value: unknown): JsonValue {
 }
 
 export function validatePrivateCoreParams(method: string, input: unknown): JsonValue {
-  if (method === "core.shutdown") {
+  if (method === "core.shutdown" || method === "jobs.list") {
     if (input !== null && input !== undefined) fail(method, "parameters are not accepted");
     return null;
+  }
+  if (method === "jobs.get" || method === "jobs.cancel" || method === "jobs.acknowledge") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["jobId"]);
+    if (typeof value.jobId !== "string" || !JOB_ID.test(value.jobId)) fail(method, "jobId is invalid");
+    return { jobId: value.jobId };
+  }
+  if (method === "transcription.start") {
+    return validateRendererCoreParamsAlias("transcription.runLocal", input);
+  }
+  if (method === "models.verify.start") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["modelId"]);
+    if (value.modelId === undefined) return {};
+    if (!validModelId(value.modelId)) fail(method, "modelId is invalid");
+    return { modelId: value.modelId };
+  }
+  if (method === "export.start") return validateRendererCoreParamsAlias("export.create", input);
+  if (method === "ai.recap.start" || method === "ai.ask.start") {
+    const value = objectInput(method, input);
+    exactFields(method, value, method === "ai.ask.start" ? ["recordingId", "question", "quality"] : ["recordingId", "quality"]);
+    const result: Record<string, JsonValue> = {
+      recordingId: requiredRecordingId(method, value.recordingId),
+    };
+    if (method === "ai.ask.start") {
+      result.question = requiredString(method, value.question, "question", INPUT_LIMITS.question);
+    }
+    const quality = value.quality ?? "fast";
+    if (quality !== "fast" && quality !== "best") fail(method, "quality must be fast or best");
+    result.quality = quality;
+    return result;
   }
   if (method === "models.importStart") {
     const value = objectInput(method, input);
@@ -85,12 +130,12 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
       dataBase64: requiredString(method, value.dataBase64, "dataBase64", MAX_BASE64_CHUNK_CHARACTERS),
     };
   }
-  if (method === "models.importFinish" || method === "models.importAbort") {
+  if (method === "models.importFinish" || method === "models.importFinish.start" || method === "models.importAbort") {
     const value = objectInput(method, input);
     exactFields(method, value, ["importId"]);
     return { importId: requiredImportId(method, value.importId) };
   }
-  if (method === "ai.instructAssetsImportFromPath") {
+  if (method === "ai.instructAssetsImportFromPath" || method === "ai.instructAssetsImport.start") {
     const value = objectInput(method, input);
     exactFields(method, value, ["assetKind", "sourcePath", "expectedSha256", "replace"]);
     if (value.assetKind !== "runner" && value.assetKind !== "model") fail(method, "assetKind is invalid");
@@ -136,7 +181,7 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
   if (method === "recording.durable.finish" || method === "recording.durable.delete") {
     return recordingOnly(method, input);
   }
-  if (method === "import.v2.fromFolder") {
+  if (method === "import.v2.fromFolder" || method === "import.v2.startFromFolder") {
     const value = objectInput(method, input);
     exactFields(method, value, ["sourcePath"]);
     return { sourcePath: requiredString(method, value.sourcePath, "sourcePath", MAX_PATH_CHARACTERS) };
@@ -148,4 +193,40 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
     return label === undefined ? {} : { label };
   }
   return fail(method, "method has no private input contract");
+}
+
+function validateRendererCoreParamsAlias(method: string, input: unknown): JsonValue {
+  if (method === "transcription.runLocal") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["recordingId", "channel", "modelId", "language", "initialPrompt"]);
+    const result: Record<string, JsonValue> = {
+      recordingId: requiredRecordingId(method, value.recordingId),
+    };
+    const channel = optionalString(method, value.channel, "channel", INPUT_LIMITS.channel);
+    const language = optionalString(method, value.language, "language", INPUT_LIMITS.language);
+    const prompt = optionalString(method, value.initialPrompt, "initialPrompt", INPUT_LIMITS.initialPrompt);
+    if (value.modelId !== undefined) {
+      if (!validModelId(value.modelId)) fail(method, "modelId is invalid");
+      result.modelId = value.modelId;
+    }
+    if (channel !== undefined) result.channel = channel;
+    if (language !== undefined) result.language = language;
+    if (prompt !== undefined) result.initialPrompt = prompt;
+    return result;
+  }
+  const value = objectInput(method, input);
+  exactFields(method, value, ["recordingId", "format", "channel", "report", "options"]);
+  const format = value.format ?? "markdown";
+  if (format !== "markdown" && format !== "docx" && format !== "pdf" && format !== "wav") {
+    fail(method, "format is not supported");
+  }
+  const result: Record<string, JsonValue> = {
+    recordingId: requiredRecordingId(method, value.recordingId),
+    format,
+  };
+  const channel = optionalString(method, value.channel, "channel", INPUT_LIMITS.channel);
+  if (channel !== undefined) result.channel = channel;
+  if (value.report !== undefined) result.report = boundedJson(method, value.report, "report");
+  if (value.options !== undefined) result.options = boundedJson(method, value.options, "options");
+  return result;
 }

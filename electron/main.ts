@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { CoreClient } from "./core/core-client.js";
+import { CaptureRecoveryStore } from "./core/capture-recovery-store.js";
 import { errorMessage } from "./core/core-errors.js";
 import { privateCoreMethods } from "./core/protocol.js";
 import { registerIpcHandlers } from "./ipc/register-ipc.js";
@@ -63,7 +64,14 @@ function corePath(): string {
   return path.join(process.resourcesPath, "bin", coreExecutableName());
 }
 
-const coreClient = new CoreClient({ executablePath: corePath, allowedMethods: privateCoreMethods, isDev });
+const captureRecoveryStore = new CaptureRecoveryStore(() => app.getPath("userData"));
+const coreClient = new CoreClient({
+  executablePath: corePath,
+  allowedMethods: privateCoreMethods,
+  isDev,
+  onCaptureConnectionDegraded: (metadata) => captureRecoveryStore.persist(metadata),
+  onCaptureRecoveryResolved: () => captureRecoveryStore.clear(),
+});
 let mainWindow: BrowserWindow | null = null;
 let licenseService: LicenseService | null = null;
 
@@ -131,6 +139,14 @@ app.on("web-contents-created", (_event, contents) => {
 
 app.whenReady().then(async () => {
   app.setAppUserModelId("com.candor.v3");
+  const pendingCaptureRecovery = await captureRecoveryStore.read();
+  if (pendingCaptureRecovery) {
+    coreClient.restoreCaptureRecovery({
+      at: pendingCaptureRecovery.recordedAt,
+      method: pendingCaptureRecovery.method,
+      recordingId: pendingCaptureRecovery.recordingId,
+    });
+  }
   if (isSmokeMode) {
     void runM0Smoke({
       core: coreClient,

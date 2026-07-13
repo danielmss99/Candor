@@ -1,5 +1,6 @@
 mod capture_service;
 mod consent_store;
+mod job_manager;
 mod local_ai_service;
 mod local_instruct_assets;
 mod local_instruct_model;
@@ -16,12 +17,14 @@ mod vault_store;
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::process;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use capture_service::{
     CaptureError, CaptureManager, CaptureStartMicAndSystemParams, CaptureStartParams,
 };
 use consent_store::{ConsentAcknowledgeParams, ConsentError, ConsentStore};
+use job_manager::{JobFailure, JobManager, JobManagerError};
 use local_ai_service::{
     LocalAiError, LocalAiProofParams, LocalAiService, LocalAskParams, LocalRecapParams,
 };
@@ -55,6 +58,7 @@ const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "m0-jsonrpc-stdio-1";
 const MAX_RPC_LINE_BYTES: usize = 4_000_000;
 const RECENT_REQUEST_ID_LIMIT: usize = 1_024;
+static PROTOCOL_OUTPUT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,6 +95,37 @@ struct RpcError {
     code: &'static str,
     message: String,
     retryable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct JobIdParams {
+    job_id: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum AiJobQuality {
+    #[default]
+    Fast,
+    Best,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AiRecapJobParams {
+    recording_id: String,
+    #[serde(default)]
+    quality: AiJobQuality,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AiAskJobParams {
+    recording_id: String,
+    question: String,
+    #[serde(default)]
+    quality: AiJobQuality,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +184,7 @@ struct CoreState {
     local_ai_service: LocalAiService,
     local_instruct_assets: LocalInstructAssetManager,
     local_instruct_model: LocalInstructModelService,
+    job_manager: JobManager,
     model_manager: ModelManager,
     model_scheduler: LocalModelScheduler,
     recording_store: RecordingStore,
@@ -180,6 +216,7 @@ impl CoreState {
                 instruct_assets_root.clone(),
             ),
             local_instruct_model: LocalInstructModelService::with_asset_root(instruct_assets_root),
+            job_manager: JobManager::new(PROTOCOL_VERSION),
             model_manager: ModelManager,
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
@@ -217,6 +254,7 @@ impl CoreState {
                 instruct_assets_root.clone(),
             ),
             local_instruct_model: LocalInstructModelService::with_asset_root(instruct_assets_root),
+            job_manager: JobManager::new(PROTOCOL_VERSION),
             model_manager: ModelManager,
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
@@ -382,6 +420,10 @@ fn make_v2_import_error(id: Value, error: V2ImportError) -> RpcResponse {
     make_error(id, error.code, error.message)
 }
 
+fn make_job_error(id: Value, error: JobManagerError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
 fn decode_params<T>(id: Value, params: Value) -> Result<T, RpcResponse>
 where
     T: for<'de> Deserialize<'de>,
@@ -440,6 +482,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "updates.status",
                 "import.v2.status",
                 "import.v2.fromFolder",
+                "import.v2.startFromFolder",
                 "import.v2.proofSynthetic",
                 "consent.status",
                 "consent.acknowledge",
@@ -455,9 +498,11 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "models.status",
                 "models.listLocal",
                 "models.verifyLocal",
+                "models.verify.start",
                 "models.importStart",
                 "models.importChunk",
                 "models.importFinish",
+                "models.importFinish.start",
                 "models.importAbort",
                 "models.proofSynthetic",
                 "ai.status",
@@ -466,6 +511,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "ai.instructStatus",
                 "ai.instructAssetsStatus",
                 "ai.instructAssetsImportFromPath",
+                "ai.instructAssetsImport.start",
                 "ai.proofInstructPreflight",
                 "ai.recapInstruct",
                 "ai.askInstruct",
@@ -473,9 +519,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "ai.proofHeuristicAsk",
                 "ai.proofHeuristicRecap",
                 "ai.proofSchedulerBusy",
+                "ai.ask.start",
+                "ai.recap.start",
                 "transcription.status",
                 "transcription.runLocal",
+                "transcription.start",
                 "transcription.proofSynthetic",
+                "jobs.list",
+                "jobs.get",
+                "jobs.cancel",
+                "jobs.acknowledge",
                 "recording.durable.status",
                 "recording.durable.start",
                 "recording.durable.writeTextChunk",
@@ -497,7 +550,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "recording.notes.save",
                 "retention.status",
                 "recording.index.status",
-                "export.create"
+                "export.create",
+                "export.start"
             ],
             "deniedCapabilities": [
                 "arbitraryFilesystem",
@@ -598,6 +652,24 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             {
                 Ok(value) => annotate_import_result(value, state),
                 Err(error) => return make_v2_import_error(id, error),
+            }
+        }
+        "import.v2.startFromFolder" => {
+            let params = match decode_params::<V2ImportFolderParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            match state.job_manager.submit("import", false, move |context| {
+                context.progress("scanning", 0, Some(2), Some("stage"));
+                let value = V2Importer
+                    .import_folder(&store, params)
+                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                context.progress("committing", 1, Some(2), Some("stage"));
+                Ok(value)
+            }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
             }
         }
         "import.v2.proofSynthetic" => {
@@ -718,6 +790,24 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(error) => return make_model_error(id, error),
             }
         }
+        "models.verify.start" => {
+            let params = match decode_params::<ModelIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            match state
+                .job_manager
+                .submit("model-verification", false, move |context| {
+                    context.progress("verifying", 0, Some(1), Some("model"));
+                    ModelManager
+                        .verify_local(&store, params)
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))
+                }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
         "models.importStart" => {
             let params = match decode_params::<ModelImportStartParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -757,6 +847,24 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(error) => return make_model_error(id, error),
             }
         }
+        "models.importFinish.start" => {
+            let params = match decode_params::<ModelImportFinishParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            match state
+                .job_manager
+                .submit("model-verification", false, move |context| {
+                    context.progress("verifying-and-installing", 0, Some(1), Some("model"));
+                    ModelManager
+                        .import_finish(&store, params)
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))
+                }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
         "models.importAbort" => {
             let params = match decode_params::<ModelImportAbortParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -793,6 +901,27 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state.local_instruct_assets.import_from_path(params) {
                 Ok(value) => value,
                 Err(error) => return make_instruct_asset_error(id, error),
+            }
+        }
+        "ai.instructAssetsImport.start" => {
+            let params = match decode_params::<InstructAssetImportParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let root = state
+                .recording_store
+                .models_root_for_core()
+                .join("instruct");
+            match state
+                .job_manager
+                .submit("model-import", false, move |context| {
+                    context.progress("verifying-and-importing", 0, Some(1), Some("asset"));
+                    LocalInstructAssetManager::with_root(root)
+                        .import_from_path(params)
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))
+                }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
             }
         }
         "ai.instructStatus" => state.local_instruct_model.status(&state.model_scheduler),
@@ -927,6 +1056,133 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "ai.proofSchedulerBusy" => state.model_scheduler.proof_busy_denies_second_job(),
+        "ai.recap.start" => {
+            let params = match decode_params::<AiRecapJobParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            let asset_root = store.models_root_for_core().join("instruct");
+            match state.job_manager.submit("recap", true, move |context| {
+                context.progress("preparing", 0, Some(3), Some("stage"));
+                let recording_id = params.recording_id;
+                let mut result = None;
+                if matches!(params.quality, AiJobQuality::Best) {
+                    let service = LocalInstructModelService::with_asset_root(asset_root);
+                    let mut scheduler = LocalModelScheduler::default();
+                    if service.status(&scheduler)["ready"] == true {
+                        context.progress("generating", 1, Some(3), Some("stage"));
+                        result = Some(
+                            service
+                                .recap(
+                                    &store,
+                                    &mut scheduler,
+                                    LocalInstructRecapParams {
+                                        recording_id: recording_id.clone(),
+                                        max_tokens: None,
+                                    },
+                                )
+                                .map_err(|error| {
+                                    JobFailure::new(error.code, error.message, true)
+                                })?,
+                        );
+                    }
+                }
+                if result.is_none() {
+                    context.progress("summarizing", 1, Some(3), Some("stage"));
+                    result = Some(
+                        LocalAiService
+                            .recap_heuristic(
+                                &store,
+                                LocalRecapParams {
+                                    recording_id: recording_id.clone(),
+                                },
+                            )
+                            .map_err(|error| JobFailure::new(error.code, error.message, true))?,
+                    );
+                }
+                let result = result.expect("recap result is assigned");
+                context.progress("saving-local-result", 2, Some(3), Some("stage"));
+                store
+                    .record_processing_fact(
+                        &recording_id,
+                        "local-ai-recap",
+                        result["engine"].as_str().unwrap_or("local-ai"),
+                        None,
+                        None,
+                    )
+                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                Ok(result)
+            }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
+        "ai.ask.start" => {
+            let params = match decode_params::<AiAskJobParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            let asset_root = store.models_root_for_core().join("instruct");
+            match state.job_manager.submit("ask", true, move |context| {
+                context.progress("preparing", 0, Some(3), Some("stage"));
+                let recording_id = params.recording_id;
+                let question = params.question;
+                let mut result = None;
+                if matches!(params.quality, AiJobQuality::Best) {
+                    let service = LocalInstructModelService::with_asset_root(asset_root);
+                    let mut scheduler = LocalModelScheduler::default();
+                    if service.status(&scheduler)["ready"] == true {
+                        context.progress("answering", 1, Some(3), Some("stage"));
+                        result = Some(
+                            service
+                                .ask(
+                                    &store,
+                                    &mut scheduler,
+                                    LocalInstructAskParams {
+                                        recording_id: recording_id.clone(),
+                                        question: question.clone(),
+                                        max_tokens: None,
+                                    },
+                                )
+                                .map_err(|error| {
+                                    JobFailure::new(error.code, error.message, true)
+                                })?,
+                        );
+                    }
+                }
+                if result.is_none() {
+                    context.progress("finding-evidence", 1, Some(3), Some("stage"));
+                    result = Some(
+                        LocalAiService
+                            .ask_heuristic(
+                                &store,
+                                LocalAskParams {
+                                    recording_id: recording_id.clone(),
+                                    question,
+                                },
+                            )
+                            .map_err(|error| JobFailure::new(error.code, error.message, true))?,
+                    );
+                }
+                let result = result.expect("ask result is assigned");
+                context.progress("saving-local-result", 2, Some(3), Some("stage"));
+                store
+                    .record_processing_fact(
+                        &recording_id,
+                        "local-ai-ask",
+                        result["engine"].as_str().unwrap_or("local-ai"),
+                        None,
+                        None,
+                    )
+                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                Ok(result)
+            }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
         "transcription.status" => state
             .transcription_service
             .status(&state.recording_store, &state.model_scheduler),
@@ -963,6 +1219,45 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 return make_recording_error(id, error);
             }
             value
+        }
+        "transcription.start" => {
+            let params = match decode_params::<TranscriptionRunLocalParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            match state
+                .job_manager
+                .submit("transcription", true, move |context| {
+                    let recording_id = params.recording_id.clone();
+                    context.progress("loading-audio", 0, Some(3), Some("stage"));
+                    let mut scheduler = LocalModelScheduler::default();
+                    let mut service = TranscriptionService;
+                    context.progress("transcribing", 1, Some(3), Some("stage"));
+                    let value = service
+                        .run_local(&store, &mut scheduler, params)
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                    context.progress("saving-transcript", 2, Some(3), Some("stage"));
+                    let model = value.get("model").and_then(Value::as_object);
+                    store
+                        .record_processing_fact(
+                            &recording_id,
+                            "transcription",
+                            value["engine"].as_str().unwrap_or("whisper-rs"),
+                            model
+                                .and_then(|value| value.get("modelId"))
+                                .and_then(Value::as_str),
+                            model
+                                .and_then(|value| value.get("sha256"))
+                                .and_then(Value::as_str),
+                        )
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                    Ok(value)
+                }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
         }
         "transcription.proofSynthetic" => {
             let params = match decode_params::<TranscriptionProofParams>(id.clone(), req.params) {
@@ -1156,6 +1451,58 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state.recording_store.save_notes(params) {
                 Ok(value) => value,
                 Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "jobs.list" => match state.job_manager.list() {
+            Ok(value) => value,
+            Err(error) => return make_job_error(id, error),
+        },
+        "jobs.get" => {
+            let params = match decode_params::<JobIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.job_manager.get(&params.job_id) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
+        "jobs.cancel" => {
+            let params = match decode_params::<JobIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.job_manager.cancel(&params.job_id) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
+        "jobs.acknowledge" => {
+            let params = match decode_params::<JobIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.job_manager.acknowledge(&params.job_id) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
+        "export.start" => {
+            let params = match decode_params::<ExportRecordingParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let store = state.recording_store.clone();
+            match state.job_manager.submit("export", false, move |context| {
+                context.progress("rendering", 0, Some(2), Some("stage"));
+                let value = store
+                    .export_create(params)
+                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                context.progress("finalizing", 1, Some(2), Some("stage"));
+                Ok(value)
+            }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
             }
         }
         "export.create" => {
@@ -1511,13 +1858,21 @@ fn handle_line(line: &str, state: &mut CoreState) -> Option<RpcResponse> {
     })
 }
 
-fn write_response(response: &RpcResponse) {
+pub(crate) fn write_protocol_value(value: &impl Serialize) {
+    let _guard = PROTOCOL_OUTPUT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .ok();
     let stdout = io::stdout();
     let mut lock = stdout.lock();
-    if serde_json::to_writer(&mut lock, response).is_ok() {
+    if serde_json::to_writer(&mut lock, value).is_ok() {
         let _ = lock.write_all(b"\n");
         let _ = lock.flush();
     }
+}
+
+fn write_response(response: &RpcResponse) {
+    write_protocol_value(response);
 }
 
 enum BoundedFrame {
@@ -1654,7 +2009,9 @@ mod tests {
     }
 
     fn assert_top_level_json_shape(actual: &Value, expected: &Value) {
-        let actual = actual.as_object().expect("fixture result must be an object");
+        let actual = actual
+            .as_object()
+            .expect("fixture result must be an object");
         let expected = expected
             .as_object()
             .expect("fixture contract must be an object");
@@ -1684,8 +2041,9 @@ mod tests {
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let fixture: Value = serde_json::from_slice(&fs::read(&path).expect("valid fixture read"))
-                .expect("valid fixture JSON");
+            let fixture: Value =
+                serde_json::from_slice(&fs::read(&path).expect("valid fixture read"))
+                    .expect("valid fixture JSON");
             let kind = fixture["kind"].as_str().expect("valid fixture kind");
             let (method, params, expected) = if kind == "handshake" {
                 ("core.version", Value::Null, &fixture["value"])
@@ -1697,7 +2055,11 @@ mod tests {
                 )
             };
             let response = handle_request(
-                request_with(json!(path.file_name().unwrap().to_string_lossy()), method, params),
+                request_with(
+                    json!(path.file_name().unwrap().to_string_lossy()),
+                    method,
+                    params,
+                ),
                 &mut state,
             );
             assert!(response.ok, "valid fixture {path:?} was rejected");
@@ -1707,16 +2069,75 @@ mod tests {
             );
         }
 
-        for entry in fs::read_dir(fixture_root.join("invalid")).expect("invalid fixture directory") {
+        for entry in fs::read_dir(fixture_root.join("invalid")).expect("invalid fixture directory")
+        {
             let path = entry.expect("invalid fixture entry").path();
             if path.extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
             }
-            let fixture: Value = serde_json::from_slice(&fs::read(&path).expect("invalid fixture read"))
-                .expect("invalid fixture JSON");
-            assert!(fixture["method"].is_string(), "invalid fixture must identify a method");
-            assert!(fixture["expectedCode"].is_string(), "invalid fixture must identify an error code");
+            let fixture: Value =
+                serde_json::from_slice(&fs::read(&path).expect("invalid fixture read"))
+                    .expect("invalid fixture JSON");
+            assert!(
+                fixture["method"].is_string(),
+                "invalid fixture must identify a method"
+            );
+            assert!(
+                fixture["expectedCode"].is_string(),
+                "invalid fixture must identify an error code"
+            );
         }
+    }
+
+    #[test]
+    fn async_export_job_survives_request_boundaries_until_acknowledged() {
+        let mut state = core_state();
+        let started = state
+            .recording_store
+            .start(StartRecordingParams {
+                label: Some("async export fixture".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = started["recordingId"].as_str().unwrap().to_string();
+        state
+            .recording_store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+
+        let accepted = handle_request(
+            request_with(
+                json!("export-start"),
+                "export.start",
+                json!({ "recordingId": recording_id, "format": "markdown" }),
+            ),
+            &mut state,
+        );
+        assert!(accepted.ok);
+        let job_id = accepted.result.unwrap()["jobId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let completed = (0..100)
+            .find_map(|_| {
+                let value = state.job_manager.get(&job_id).ok()?;
+                if value["terminal"] == true {
+                    Some(value)
+                } else {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    None
+                }
+            })
+            .expect("export job completion");
+        assert_eq!(completed["state"], "completed");
+        assert_eq!(completed["result"]["format"], "markdown");
+        assert_eq!(state.job_manager.list().unwrap()["jobCount"], 1);
+        assert_eq!(
+            state.job_manager.acknowledge(&job_id).unwrap()["acknowledged"],
+            true
+        );
     }
 
     #[test]

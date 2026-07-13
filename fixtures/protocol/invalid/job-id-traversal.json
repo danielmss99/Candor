@@ -1,0 +1,8 @@
+{
+  "kind": "operation-params",
+  "method": "jobs.get",
+  "value": {
+    "jobId": "../jobs/private"
+  },
+  "expectedCode": "CORE_PARAMS_SCHEMA_INVALID"
+}

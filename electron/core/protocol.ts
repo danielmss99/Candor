@@ -29,6 +29,12 @@ export interface CoreResponse {
   };
 }
 
+export interface CoreEvent {
+  protocolVersion: typeof CORE_PROTOCOL_VERSION;
+  event: "jobs.changed";
+  payload: JsonValue;
+}
+
 export interface CoreHandshake {
   protocolVersion: typeof CORE_PROTOCOL_VERSION;
   coreVersion: string;
@@ -119,6 +125,44 @@ export function parseCoreResponseLine(line: string): CoreResponse {
     };
   }
   return response;
+}
+
+export function parseCoreEventLine(line: string): CoreEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("event" in parsed)) {
+    return null;
+  }
+  const value = parsed as Record<string, unknown>;
+  if (value.protocolVersion !== CORE_PROTOCOL_VERSION) {
+    throw new CoreClientError("CORE_PROTOCOL_MISMATCH", "candor-core event uses an incompatible protocol version", false);
+  }
+  if (value.event !== "jobs.changed") {
+    throw new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core emitted an unknown event", false);
+  }
+  if (!value.payload || typeof value.payload !== "object" || Array.isArray(value.payload)) {
+    throw new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core emitted an invalid job event", false);
+  }
+  const payload = value.payload as Record<string, unknown>;
+  if (
+    typeof payload.jobId !== "string" ||
+    !/^[a-f0-9]{32}$/.test(payload.jobId) ||
+    typeof payload.type !== "string" ||
+    typeof payload.state !== "string" ||
+    typeof payload.terminal !== "boolean" ||
+    payload.rawPathExposed !== false
+  ) {
+    throw new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core emitted an invalid job event payload", false);
+  }
+  return {
+    protocolVersion: CORE_PROTOCOL_VERSION,
+    event: "jobs.changed",
+    payload: value.payload as JsonValue,
+  };
 }
 
 function stringArray(value: JsonValue, field: string): string[] {
