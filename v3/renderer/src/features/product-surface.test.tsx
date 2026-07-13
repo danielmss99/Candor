@@ -92,13 +92,17 @@ describe("simplified product surface", () => {
       privacyReceipt: receipt,
       networkCapabilities: network,
       custodyItems: [] as Array<[string, string]>,
-      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(),
+      diagnosticPreview: null,
+      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);
     expect(basicMarkup).not.toContain("Privacy and diagnostics");
     expect(advancedMarkup).toContain("Privacy and diagnostics");
     expect(advancedMarkup).toContain("Local AI");
+    const privacyMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="privacy" advancedOpen diagnosticPreview={{ contentPolicy: "metadata-only-no-user-content" }} />);
+    expect(privacyMarkup).toContain("Safe diagnostic report");
+    expect(privacyMarkup).toContain("Inspect exact report");
   });
 
   it("provides compact Transcript, Notes, and AI panes without splitting the meeting workflow", () => {

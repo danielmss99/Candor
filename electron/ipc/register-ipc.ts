@@ -4,6 +4,7 @@ import { registerExportIpc } from "./export-ipc.js";
 import { registerImportIpc } from "./import-ipc.js";
 import { registerLicensingIpc } from "./licensing-ipc.js";
 import { registerModelsIpc } from "./models-ipc.js";
+import { registerDiagnosticsIpc } from "./diagnostics-ipc.js";
 
 export function registerIpcHandlers(dependencies: IpcDependencies): void {
   registerCoreIpc(dependencies);
@@ -11,4 +12,5 @@ export function registerIpcHandlers(dependencies: IpcDependencies): void {
   registerModelsIpc(dependencies);
   registerImportIpc(dependencies);
   registerLicensingIpc(dependencies);
+  registerDiagnosticsIpc(dependencies);
 }

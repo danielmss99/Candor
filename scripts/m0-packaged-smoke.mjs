@@ -344,6 +344,11 @@ function assertSmokePayload(payload) {
   if (payload.rendererIsolationProbe?.shellKeys?.includes("openExternal")) {
     throw new Error("Renderer isolation probe found an exposed external navigation command.");
   }
+  for (const key of ["diagnosticsPreview", "diagnosticsSaveLocal"]) {
+    if (!payload.rendererIsolationProbe?.shellKeys?.includes(key)) {
+      throw new Error(`Renderer isolation probe did not find the exact diagnostic command: ${key}.`);
+    }
+  }
   for (const key of ["status", "activate", "startTrial", "deactivateDevice", "portalInfo"]) {
     if (!payload.rendererIsolationProbe?.licenseKeys?.includes(key)) {
       throw new Error(`Renderer isolation probe did not find the typed license command: ${key}.`);
@@ -357,6 +362,21 @@ function assertSmokePayload(payload) {
   }
   if (payload.rendererBridge?.status?.sidecarTransport !== "stdio-json-lines") {
     throw new Error("Renderer did not receive stdio sidecar status.");
+  }
+  const diagnosticText = JSON.stringify(payload.rendererBridge?.diagnosticPreview ?? null);
+  if (
+    payload.rendererBridge?.diagnosticPreview?.contentPolicy !== "metadata-only-no-user-content" ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.userContentIncluded !== false ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.rawPathsIncluded !== false ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.processIdsIncluded !== false ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.secretsIncluded !== false ||
+    diagnosticText.includes('"pid"') ||
+    diagnosticText.includes('"transcript"') ||
+    diagnosticText.includes('"notes"') ||
+    diagnosticText.includes('"prompt"') ||
+    diagnosticText.includes('"output"')
+  ) {
+    throw new Error("Packaged diagnostic preview included non-allowlisted or user-content fields.");
   }
   if (
     payload.rendererScreenshot?.captured !== true ||
@@ -436,6 +456,13 @@ function assertSmokePayload(payload) {
     }
   }
   const exportView = viewScreenshots.find((entry) => entry?.view === "export");
+  const advancedView = viewScreenshots.find((entry) => entry?.view === "advanced");
+  if (
+    advancedView?.navigation?.diagnosticPreviewVisible !== true ||
+    advancedView?.navigation?.diagnosticSaveVisible !== true
+  ) {
+    throw new Error("Packaged Advanced Settings did not expose the inspectable safe diagnostic report.");
+  }
   const exportFormats = Array.isArray(exportView?.navigation?.exportFormats)
     ? exportView.navigation.exportFormats
     : [];

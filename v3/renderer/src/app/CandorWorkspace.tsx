@@ -13,6 +13,7 @@ import {
   useMeetingWorkspace,
 } from "../features/meetings/useMeetingWorkspace";
 import { useOnboardingSettings } from "../features/onboarding/useOnboardingSettings";
+import { useDiagnosticExport } from "../features/privacy/useDiagnosticExport";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import { useWorkspaceStartup } from "../features/startup/useWorkspaceStartup";
 import { AppRouteOutlet } from "./AppRouteOutlet";
@@ -29,6 +30,11 @@ export function CandorWorkspace() {
   const activeRecordingId = asString(asObject(runtime.captureStatus.activeSession).recordingId);
   const captureSession = useCaptureSession(activeCapture, activeRecordingId);
   const operations = useOperationRunner(captureSession.failed);
+  const diagnostics = useDiagnosticExport({
+    api: window.candor?.shell,
+    run: operations.run,
+    setNotice: operations.setNotice,
+  });
   const handleLicenseLoadError = useCallback(
     (message: string) => operations.setError(message),
     [operations.setError],
@@ -174,6 +180,7 @@ export function CandorWorkspace() {
       meetingActions={meetingActions}
       report={report}
       onboarding={onboarding}
+      diagnostics={diagnostics}
       startup={startup}
     />
   );

@@ -391,6 +391,15 @@ async function captureSmokeView(
             await settle();
           }
           clicked = await clickExact('.settings-layout nav button', 'Privacy and diagnostics');
+          if (clicked) {
+            await clickExact('button', 'Prepare preview');
+            for (let index = 0; index < 80; index += 1) {
+              if (document.querySelector('.diagnostic-export details')) break;
+              await new Promise((resolve) => setTimeout(resolve, 50));
+            }
+            document.querySelector('.diagnostic-export')?.scrollIntoView({ block: 'center' });
+            await settle();
+          }
         }
         if (!clicked) return { clicked: false, reason: 'workflow-navigation-unavailable' };
         for (let index = 0; index < 80; index += 1) {
@@ -425,7 +434,10 @@ async function captureSmokeView(
               disabled: button instanceof HTMLButtonElement ? button.disabled : true,
               label: button?.textContent?.trim() ?? ''
             };
-          })()
+          })(),
+          diagnosticPreviewVisible: Boolean(document.querySelector('.diagnostic-export details')),
+          diagnosticSaveVisible: Array.from(document.querySelectorAll('.diagnostic-export button'))
+            .some((button) => button.textContent?.trim() === 'Save JSON')
         };
       })()
     `,
@@ -721,7 +733,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
           if (!window.candor?.core) {
             throw new Error("Candor preload bridge is not present.");
           }
-          const [status, capabilities, auditSnapshot, updateStatus, importStatus, consentStatus, aiStatus, instructAssetsStatus, instructStatus, schedulerStatus, transcriptionStatus, vaultStatusBeforeOpen, licenseStatus, licensePortalInfo] = await Promise.all([
+          const [status, capabilities, auditSnapshot, updateStatus, importStatus, consentStatus, aiStatus, instructAssetsStatus, instructStatus, schedulerStatus, transcriptionStatus, vaultStatusBeforeOpen, licenseStatus, licensePortalInfo, diagnosticPreview] = await Promise.all([
             window.candor.core.status(),
             window.candor.core.capabilities(),
             window.candor.core.privacyAuditSnapshot(),
@@ -735,7 +747,8 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
             window.candor.core.transcriptionStatus(),
             window.candor.core.vaultStatus(),
             window.candor.license.status(),
-            window.candor.license.portalInfo()
+            window.candor.license.portalInfo(),
+            window.candor.shell.diagnosticsPreview()
           ]);
           const vaultOpenLocal = vaultStatusBeforeOpen.localOpenAvailable
             ? await window.candor.core.vaultOpenLocal()
@@ -769,7 +782,8 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
             vaultOpenLocal,
             auditSnapshot,
             licenseStatus,
-            licensePortalInfo
+            licensePortalInfo,
+            diagnosticPreview
           };
         })()
       `,

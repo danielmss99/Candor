@@ -93,6 +93,8 @@ interface CandorApi {
     externalNavigationDisabled: boolean;
     networkPolicy: string;
     supervisorStatus(): Promise<JsonValue>;
+    diagnosticsPreview(): Promise<JsonValue>;
+    diagnosticsSaveLocal(): Promise<JsonValue>;
   };
 }
 

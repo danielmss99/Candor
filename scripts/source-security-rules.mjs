@@ -11,8 +11,10 @@ export const requiredSourcePaths = [
   "electron/core/protocol.ts",
   "electron/core/renderer-boundary.ts",
   "electron/core/request-registry.ts",
+  "electron/diagnostics/diagnostic-report.ts",
   "electron/export/local-report.ts",
   "electron/ipc/core-ipc.ts",
+  "electron/ipc/diagnostics-ipc.ts",
   "electron/ipc/export-ipc.ts",
   "electron/ipc/import-ipc.ts",
   "electron/ipc/ipc-types.ts",
@@ -195,6 +197,24 @@ export function evaluateSourceSecurity(input) {
     'if (this.captureGuardPhase() !== "idle")',
     "core shutdown is denied while capture is active or changing state",
   );
+  includes(
+    "diagnostics:allowlisted-report",
+    "electron/diagnostics/diagnostic-report.ts",
+    'contentPolicy: "metadata-only-no-user-content"',
+    "diagnostic output declares its metadata-only content policy",
+  );
+  includes(
+    "diagnostics:no-user-content",
+    "electron/diagnostics/diagnostic-report.ts",
+    "userContentIncluded: false",
+    "diagnostic output explicitly excludes user content",
+  );
+  includes(
+    "diagnostics:main-owned-save",
+    "electron/ipc/diagnostics-ipc.ts",
+    'ipcMain.handle("candor-diagnostics:saveLocal"',
+    "diagnostic saving is an exact main-process operation",
+  );
 
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [
@@ -204,6 +224,8 @@ export function evaluateSourceSecurity(input) {
     ["shell-frozen", "shell: Object.freeze("],
     ["named-core-channel", 'ipcRenderer.invoke("candor-core:core-status")'],
     ["durable-status", 'ipcRenderer.invoke("candor-core:recording-durable-status")'],
+    ["diagnostics-preview", 'ipcRenderer.invoke("candor-diagnostics:preview")'],
+    ["diagnostics-save", 'ipcRenderer.invoke("candor-diagnostics:saveLocal")'],
   ]) {
     includes(`preload:${id}`, preload, pattern, `preload requires ${id}`);
   }

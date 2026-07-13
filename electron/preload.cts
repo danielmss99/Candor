@@ -122,5 +122,7 @@ contextBridge.exposeInMainWorld("candor", {
     externalNavigationDisabled: true,
     networkPolicy: "disabled-by-default",
     supervisorStatus: () => ipcRenderer.invoke("candor-shell:supervisorStatus") as Promise<JsonValue>,
+    diagnosticsPreview: () => ipcRenderer.invoke("candor-diagnostics:preview") as Promise<JsonValue>,
+    diagnosticsSaveLocal: () => ipcRenderer.invoke("candor-diagnostics:saveLocal") as Promise<JsonValue>,
   }),
 });
