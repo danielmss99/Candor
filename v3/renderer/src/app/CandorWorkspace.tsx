@@ -17,6 +17,7 @@ import { useCaptureSession } from "../features/capture/useCaptureSession";
 import { useCaptureActions } from "../features/capture/useCaptureActions";
 import { useOperationRunner } from "../features/jobs/useOperationRunner";
 import { useLocalAiWorkspace } from "../features/local-ai/useLocalAiWorkspace";
+import { useReportWorkflow } from "../features/export/useReportWorkflow";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
   StartupLoading,
@@ -37,19 +38,13 @@ import {
   asNumber,
   asObject,
   asString,
-  exportFormatLabel,
-  exportReportItem,
   formatDuration,
   metric,
-  recapItemKey,
   type AppView,
   type CompactMeetingPane,
-  type ExportFormat,
-  type ExportPaperSize,
   type LibraryFilter,
   type MarkedMoment,
   type OnboardingStep,
-  type RecapItem,
 } from "../core/contracts";
 
 export function CandorWorkspace() {
@@ -65,22 +60,6 @@ export function CandorWorkspace() {
   const [compactMeetingPane, setCompactMeetingPane] = useState<CompactMeetingPane>("transcript");
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const [openMeetingIds, setOpenMeetingIds] = useState<string[]>([]);
-  const [reviewStates, setReviewStates] = useState<Record<string, "accepted" | "rejected">>({});
-  const [reviewSummaryDraft, setReviewSummaryDraft] = useState("");
-  const [exportFormat, setExportFormat] = useState<ExportFormat>("docx");
-  const [exportPaperSize, setExportPaperSize] = useState<ExportPaperSize>("letter");
-  const [exportSections, setExportSections] = useState({
-    summary: true,
-    decisions: true,
-    actions: true,
-    risks: true,
-    questions: true,
-    notes: true,
-    transcript: false,
-    timestamps: false,
-  });
-
-  const [markdownExport, setMarkdownExport] = useState("");
   const [audioUrl, setAudioUrl] = useState("");
   const meetingWorkspace = useMeetingWorkspace({ api, client });
   const {
@@ -237,6 +216,33 @@ export function CandorWorkspace() {
     generateRecap,
     ask: askSelectedRecording,
   } = localAi;
+  const reportWorkflow = useReportWorkflow({
+    api,
+    selectedRecordingId,
+    notesMarkdown,
+    notesDirty,
+    recap,
+    run,
+    setNotesStatus,
+    setNotesDirty,
+    setNotice,
+    refreshPrivacyReceipt,
+  });
+  const {
+    reviewStates,
+    summaryDraft: reviewSummaryDraft,
+    format: exportFormat,
+    paperSize: exportPaperSize,
+    sections: exportSections,
+    markdownExport,
+    preview: reportPreview,
+    setSummaryDraft: setReviewSummaryDraft,
+    setFormat: setExportFormat,
+    setPaperSize: setExportPaperSize,
+    toggleSection: toggleExportSection,
+    reviewItem,
+    save: saveLocalReport,
+  } = reportWorkflow;
   const selectedRecording = recordings.find((item) => item.recordingId === selectedRecordingId);
   const selectedTitle = selectedRecording?.label || recordingTitle || "Untitled local meeting";
   const combinedCaptureAvailable = asBool(asObject(asObject(captureStatus.sources).system).simultaneousMicAndSystem);
@@ -321,10 +327,6 @@ export function CandorWorkspace() {
   }, [recordings]);
 
   useEffect(() => {
-    setReviewSummaryDraft(recap?.summary ?? "");
-  }, [recap]);
-
-  useEffect(() => {
     return () => {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
@@ -359,58 +361,6 @@ export function CandorWorkspace() {
   async function loadMoreTranscript() {
     if (!selectedRecordingId || !transcriptHasMore) return;
     await run("load transcript", loadMoreTranscriptPage, "transcript-page");
-  }
-
-  function reviewedItems(items: RecapItem[]): RecapItem[] {
-    return items.filter((item) => reviewStates[recapItemKey(item)] !== "rejected");
-  }
-
-  function buildLocalExportParams(format: ExportFormat) {
-    return {
-      recordingId: selectedRecordingId,
-      format,
-      report: {
-        summary: reviewSummaryDraft || recap?.summary || "",
-        decisions: reviewedItems(recap?.decisions ?? []).map(exportReportItem),
-        actions: reviewedItems(recap?.actions ?? []).map(exportReportItem),
-        risks: reviewedItems(recap?.risks ?? []).map(exportReportItem),
-        questions: reviewedItems(recap?.questions ?? []).map(exportReportItem),
-      },
-      options: {
-        includeSummary: exportSections.summary,
-        includeDecisions: exportSections.decisions,
-        includeActions: exportSections.actions,
-        includeRisks: exportSections.risks,
-        includeQuestions: exportSections.questions,
-        includeNotes: exportSections.notes,
-        includeTranscript: exportSections.transcript,
-        includeTimestamps: exportSections.timestamps,
-        paperSize: exportPaperSize,
-      },
-    };
-  }
-
-  async function saveLocalReport() {
-    if (!api || !selectedRecordingId) return;
-    await run("export", async () => {
-      if (notesDirty) {
-        const notesResult = await api.recordingNotesSave(selectedRecordingId, notesMarkdown);
-        setNotesStatus(asObject(notesResult));
-        setNotesDirty(false);
-      }
-      const result = await api.exportSaveLocal(buildLocalExportParams(exportFormat));
-      const object = asObject(result);
-      if (asBool(object.canceled)) {
-        setNotice("Export canceled. No file was written.");
-        return;
-      }
-      if (!asBool(object.saved) || !asBool(object.savedLocally)) {
-        throw new Error("The local report was not saved.");
-      }
-      setMarkdownExport(exportFormat === "markdown" ? asString(object.markdown) : "");
-      setNotice(`Saved ${asString(object.fileName, exportFormatLabel(exportFormat))} locally`);
-      await refreshPrivacyReceipt();
-    }, "document-write", "export");
   }
 
   async function saveMeetingNotes() {
@@ -854,10 +804,6 @@ export function CandorWorkspace() {
   }
 
   function renderReview() {
-    const previewDecisions = exportSections.decisions ? reviewedItems(recap?.decisions ?? []) : [];
-    const previewActions = exportSections.actions ? reviewedItems(recap?.actions ?? []) : [];
-    const previewRisks = exportSections.risks ? reviewedItems(recap?.risks ?? []) : [];
-    const previewQuestions = exportSections.questions ? reviewedItems(recap?.questions ?? []) : [];
     return (
       <ReviewView
         title={selectedTitle}
@@ -872,10 +818,10 @@ export function CandorWorkspace() {
         includeSummary={exportSections.summary}
         includeNotes={exportSections.notes}
         includeTranscript={exportSections.transcript}
-        previewDecisions={previewDecisions}
-        previewActions={previewActions}
-        previewRisks={previewRisks}
-        previewQuestions={previewQuestions}
+        previewDecisions={reportPreview.decisions}
+        previewActions={reportPreview.actions}
+        previewRisks={reportPreview.risks}
+        previewQuestions={reportPreview.questions}
         selectedRecordingId={selectedRecordingId}
         busy={Boolean(busy)}
         onSectionChange={setReviewSection}
@@ -883,7 +829,7 @@ export function CandorWorkspace() {
         onNotesChange={updateNotes}
         onSaveNotes={() => void saveMeetingNotes()}
         onGenerateRecap={() => void generateRecap()}
-        onReviewItem={(key, state) => setReviewStates((current) => ({ ...current, [key]: state }))}
+        onReviewItem={reviewItem}
         onOpenExport={() => setView("export")}
       />
     );
@@ -946,16 +892,8 @@ export function CandorWorkspace() {
     );
   }
 
-  function toggleExportSection(key: keyof typeof exportSections) {
-    setExportSections((current) => ({ ...current, [key]: !current[key] }));
-  }
-
   function renderExport() {
-    const previewDecisions = exportSections.decisions ? reviewedItems(recap?.decisions ?? []) : [];
-    const previewActions = exportSections.actions ? reviewedItems(recap?.actions ?? []) : [];
-    const previewRisks = exportSections.risks ? reviewedItems(recap?.risks ?? []) : [];
-    const previewQuestions = exportSections.questions ? reviewedItems(recap?.questions ?? []) : [];
-    return <ExportView title={selectedTitle} summary={reviewSummaryDraft || recap?.summary || ""} format={exportFormat} paperSize={exportPaperSize} sections={exportSections} decisions={previewDecisions} actions={previewActions} risks={previewRisks} questions={previewQuestions} markdownExport={markdownExport} canExport={Boolean(selectedRecordingId)} saving={busy === "export"} onFormatChange={setExportFormat} onPaperSizeChange={setExportPaperSize} onToggleSection={toggleExportSection} onBack={() => setView("review")} onSave={() => void saveLocalReport()} />;
+    return <ExportView title={selectedTitle} summary={reviewSummaryDraft || recap?.summary || ""} format={exportFormat} paperSize={exportPaperSize} sections={exportSections} decisions={reportPreview.decisions} actions={reportPreview.actions} risks={reportPreview.risks} questions={reportPreview.questions} markdownExport={markdownExport} canExport={Boolean(selectedRecordingId)} saving={busy === "export"} onFormatChange={setExportFormat} onPaperSizeChange={setExportPaperSize} onToggleSection={toggleExportSection} onBack={() => setView("review")} onSave={() => void saveLocalReport()} />;
   }
 
   function renderCurrentView() {
