@@ -53,7 +53,7 @@ export function HomeView({
       <section className="dashboard-actions" aria-label="Quick actions">
         <RecordAction variant="dashboard" active={activeCapture} captureLabel={combinedCaptureAvailable ? "Microphone and system audio" : "Microphone audio"} onClick={onStartRecording} disabled={busy || (recordingBlocked && !activeCapture)} />
         <button className="surface-action" type="button" onClick={onOpenLibrary}>Open meetings</button>
-        <button className="surface-action" type="button" onClick={onImport} disabled={busy || !importAvailable}>Import v2 folder</button>
+        <button className="surface-action" type="button" onClick={onImport} disabled={busy || !importAvailable}>Import previous Candor folder</button>
         <label className="quick-title-field"><span>Next recording title</span><input value={recordingTitle} onChange={(event) => onRecordingTitleChange(event.target.value)} /></label>
       </section>
       <section className="dashboard-section">

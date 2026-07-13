@@ -2,6 +2,8 @@
 
 Use this runbook only with a release candidate built from a committed, clean source tree. Synthetic smokes do not satisfy these gates.
 
+Copy [`manual-release-evidence.template.json`](manual-release-evidence.template.json) to the ignored `release-v3/manual-evidence/windows-release-matrix.json` path before testing. Replace each pending field only from observed evidence. Evidence references use opaque `proof://`, `artifact://`, or `ticket://` identifiers so the redacted receipt never contains full local paths or meeting content.
+
 ## Stop rules
 
 Stop the release immediately when:
@@ -26,6 +28,7 @@ Preserve failed-machine logs and the untouched source vault. Do not rerun a dest
 5. Record commit, package filename, byte size, SHA-256, OS version, architecture, operator, and UTC time.
 6. Copy the installer and `SHA256SUMS` to the test machine through the planned distribution channel.
 7. Verify the checksum on the destination before launch.
+8. Record the signed installer filename, byte size, SHA-256, source commit, and timestamp evidence in the manual matrix.
 
 ## Clean install
 
@@ -112,8 +115,9 @@ Attach screenshots, proof JSON, checksum output, signature verification, capture
 
 ```powershell
 npm run m0:proof-audit:strict
+npm run v3:manual-release-matrix:strict
 npm run v3:release-readiness-audit:strict
 npm run v3:goal-audit:strict
 ```
 
-Do not publish unless all three strict commands pass against the same committed source identity and package hashes.
+Do not publish unless all four strict commands pass against the same committed source identity and package hashes.

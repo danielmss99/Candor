@@ -84,9 +84,9 @@ struct RpcResponse {
     protocol_version: &'static str,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    result: Option<Value>,
+    result: Option<Box<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<RpcError>,
+    error: Option<Box<RpcError>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -372,11 +372,11 @@ fn make_error(id: Value, code: &'static str, message: impl Into<String>) -> RpcR
         protocol_version: PROTOCOL_VERSION,
         ok: false,
         result: None,
-        error: Some(RpcError {
+        error: Some(Box::new(RpcError {
             code,
             message: message.into(),
             retryable: false,
-        }),
+        })),
     }
 }
 
@@ -1535,7 +1535,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
         request_id: None,
         protocol_version: PROTOCOL_VERSION,
         ok: true,
-        result: Some(result),
+        result: Some(Box::new(result)),
         error: None,
     }
 }

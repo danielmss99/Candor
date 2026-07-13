@@ -96,10 +96,11 @@ const staticChecks = {
     failures,
   ),
   preloadExposesStatusOnly: staticCheck(
-    preloadSource.includes("updateStatus") &&
+    preloadSource.includes("getUpdateStatus") &&
       preloadSource.includes('"candor-core:updates-status"') &&
+      !preloadSource.includes("checkForUpdates") &&
       !preloadSource.includes("updateCheck"),
-    "Preload must expose updateStatus without updateCheck",
+    "Preload must expose getUpdateStatus without an update-check operation",
     failures,
   ),
   rendererBlocksConnect: staticCheck(

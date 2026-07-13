@@ -17,6 +17,11 @@ const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "ut
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
 const releaseChecksums = readFileSync(resolve(repoRoot, "scripts", "v3-release-checksums.mjs"), "utf8");
+const releaseSbom = readFileSync(resolve(repoRoot, "scripts", "v3-release-sbom.mjs"), "utf8");
+const manualReleaseMatrix = readFileSync(resolve(repoRoot, "scripts", "v3-manual-release-matrix.mjs"), "utf8");
+const visualEvidence = readFileSync(resolve(repoRoot, "tests", "e2e", "visual-evidence.spec.ts"), "utf8");
+const mainArchitecture = readFileSync(resolve(repoRoot, "scripts", "verify-main-architecture.mjs"), "utf8");
+const productIdentity = readFileSync(resolve(repoRoot, "scripts", "verify-product-identity.mjs"), "utf8");
 const releaseArtifacts = readFileSync(resolve(repoRoot, "scripts", "release-artifacts.mjs"), "utf8");
 const releaseChecksumValidation = readFileSync(resolve(repoRoot, "scripts", "release-checksum-validation.mjs"), "utf8");
 const packagedSmoke = readFileSync(resolve(repoRoot, "scripts", "m0-packaged-smoke.mjs"), "utf8");
@@ -115,6 +120,7 @@ const requiredPatterns = [
   ["os: [windows-latest, macos-26, ubuntu-latest]", "three-OS matrix with pinned macOS SDK"],
   ["fail-fast: false", "non-short-circuiting matrix"],
   ["node-version: 22", "Electron-compatible Node.js version"],
+  ["fetch-depth: 0", "full Git history for remote-main verification"],
   ["sudo apt-get install -y", "Linux native dependency install"],
   ["dbus-daemon", "Linux isolated D-Bus session dependency"],
   ["libasound2-dev", "Linux audio build dependency"],
@@ -127,6 +133,8 @@ const requiredPatterns = [
   ['test "$sdk_major" -ge 26', "macOS SDK 26 minimum"],
   ['echo "MACOSX_DEPLOYMENT_TARGET=13.0" >> "$GITHUB_ENV"', "macOS 13 deployment target"],
   ["npm run v3:verify", "staged local verifier"],
+  ["npm run v3:verify-main-architecture && npm run v3:identity:verify", "remote-main architecture and product identity gate"],
+  ["npm run v3:verify-main-architecture -- --release-commit \"${GITHUB_SHA}\"", "main release commit reachability gate"],
   ["npm run electron:v3:dist", "release artifact build"],
   ["Configure Linux Chromium sandbox for runtime proof", "Linux sandbox preparation"],
   ["sudo chown root:root release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox root ownership"],
@@ -135,6 +143,7 @@ const requiredPatterns = [
   ["npm run v3:release-artifact-smoke", "release artifact contents smoke"],
   ["name: Record release artifact provenance", "pre-checksum artifact provenance step"],
   ["npm run v3:release-checksums && npm run v3:release-checksums:verify", "release checksum generation and verification"],
+  ["npm run v3:sbom && npm run v3:sbom:verify", "release SBOM generation and verification"],
   ["npm run m0:packaged-smoke", "packaged smoke"],
   ["xvfb-run -a npm run m0:packaged-smoke", "Linux packaged smoke display wrapper"],
   ["npm run test:electron", "Electron integration and accessibility tests"],
@@ -254,6 +263,9 @@ for (const [contents, pattern, label] of [
   [releaseReadinessAudit, "validateReleaseArtifactSmoke", "release readiness artifact smoke validator"],
   [releaseReadinessAudit, "V3 signed release and installer proof", "release readiness signing gate"],
   [releaseReadinessAudit, "validateReleaseSigning", "release readiness signing validator"],
+  [releaseReadinessAudit, "validateGuiStateMatrix", "release readiness GUI evidence validator"],
+  [releaseReadinessAudit, "validateReleaseSbom", "release readiness SBOM validator"],
+  [releaseReadinessAudit, "validateManualReleaseProof", "release readiness manual Windows matrix validator"],
   [releaseReadinessAudit, "release signing proof must match artifact manifest and release artifact smoke hashes", "release readiness signing artifact consistency validator"],
   [releaseSigningProof, "artifactConsistency", "release signing artifact consistency check"],
   [releaseSigningProof, "releaseArtifactsMatchManifest", "release signing manifest hash match evidence"],
@@ -282,6 +294,15 @@ for (const [contents, pattern, label] of [
   [releaseChecksums, "rawPathExposed: false", "release checksum path redaction evidence"],
   [releaseChecksums, "tracked source tree must be clean", "release checksum clean-source enforcement"],
   [releaseChecksums, "bindArtifactManifest", "release checksum artifact-manifest binding"],
+  [releaseSbom, 'spdxVersion: "SPDX-2.3"', "SPDX 2.3 release inventory"],
+  [releaseSbom, "networkAttempted: false", "local SBOM generation"],
+  [manualReleaseMatrix, 'proofKind: "v3-manual-release-matrix"', "manual Windows release proof kind"],
+  [manualReleaseMatrix, "validateManualReleaseEvidence", "manual release evidence validation"],
+  [visualEvidence, "screenshotCount: evidence.length", "critical GUI screenshot evidence count"],
+  [visualEvidence, "horizontal viewport overflow", "critical GUI horizontal overflow assertion"],
+  [mainArchitecture, 'const remoteRef = "origin/main"', "origin/main architecture verification"],
+  [mainArchitecture, "releaseCommitReachable", "release commit reachability evidence"],
+  [productIdentity, 'appIdMigration: appId === "com.candor.desktop" ? "proven" : "deferred-pending-upgrade-proof"', "data-safe app ID migration decision"],
   [releaseArtifacts, "release-blockmap", "release artifact blockmap classification"],
   [releaseArtifacts, "update-metadata", "release artifact update metadata classification"],
   [releaseChecksumValidation, "total artifact count does not match manifest artifact count", "release checksum two-way count validation"],
@@ -317,6 +338,10 @@ for (const [contents, pattern, label] of [
   [m4RealLocalInstruct, "--self-test", "M4 real local instruct quality self-test"],
   [m4RealLocalInstructDoc, "does not download either asset", "M4 real local instruct no-download documentation"],
   [packageJson, "\"v3:goal-audit\"", "goal audit npm script"],
+  [packageJson, "\"v3:identity:verify\"", "product identity npm script"],
+  [packageJson, "\"v3:verify-main-architecture\"", "remote-main architecture npm script"],
+  [packageJson, "\"v3:sbom:verify\"", "release SBOM verification npm script"],
+  [packageJson, "\"v3:manual-release-matrix:strict\"", "strict manual Windows release matrix npm script"],
   [packageJson, "\"email\": \"danielmss99@users.noreply.github.com\"", "Linux package maintainer email"],
   [packageJson, "\"desktopName\": \"Candor\"", "Linux desktop application identity"],
   [electronBuilder, "category: Office", "Linux desktop category"],
@@ -376,7 +401,12 @@ for (const [pattern, label] of [
 }
 
 requireOrder(
-  "npm run v3:verify",
+  "npm run v3:verify-main-architecture && npm run v3:identity:verify",
+  "run: npm run v3:verify\n",
+  "architecture and identity before staged verification",
+);
+requireOrder(
+  "run: npm run v3:verify\n",
   "npm run electron:v3:dist",
   "verify before packaging",
 );
@@ -394,6 +424,11 @@ requireOrder(
   "name: Record release artifact provenance",
   "npm run v3:release-checksums && npm run v3:release-checksums:verify",
   "package provenance before checksum verification",
+);
+requireOrder(
+  "npm run v3:release-checksums && npm run v3:release-checksums:verify",
+  "npm run v3:sbom && npm run v3:sbom:verify",
+  "checksums before SBOM publication",
 );
 requireOrder(
   "npm run v3:release-artifact-smoke",

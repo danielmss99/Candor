@@ -4,8 +4,8 @@ import { validateReleaseChecksums } from "./release-checksum-validation.mjs";
 
 function validProof() {
   const artifacts = [
-    { name: "Candor Setup 2.0.0.exe", sha256: "a".repeat(64) },
-    { name: "Candor Setup 2.0.0.exe.blockmap", sha256: "b".repeat(64) },
+    { name: "Candor Setup 0.4.0.exe", sha256: "a".repeat(64) },
+    { name: "Candor Setup 0.4.0.exe.blockmap", sha256: "b".repeat(64) },
   ];
   return {
     ok: true,
@@ -56,7 +56,7 @@ describe("validateReleaseChecksums", () => {
 
 describe("release artifact names", () => {
   it("classifies package metadata while rejecting path-shaped names", () => {
-    expect(isReleaseArtifactName("Candor Setup 2.0.0.exe.blockmap")).toBe(true);
+    expect(isReleaseArtifactName("Candor Setup 0.4.0.exe.blockmap")).toBe(true);
     expect(isReleaseArtifactName("latest.yml")).toBe(true);
     expect(isUnsafeReleaseArtifactName("Candor\nSetup.exe")).toBe(true);
     expect(isUnsafeReleaseArtifactName("nested\\Candor.exe")).toBe(true);

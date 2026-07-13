@@ -3,6 +3,8 @@
 Use this before publishing any installer. Execute the hardware, upgrade,
 network-denial, and signing gates with
 [`docs/testing/MANUAL_RELEASE_PROOF_RUNBOOK.md`](testing/MANUAL_RELEASE_PROOF_RUNBOOK.md).
+The provisional Windows scope and evidence policy are in
+[`docs/testing/SUPPORTED_WINDOWS_AND_HARDWARE.md`](testing/SUPPORTED_WINDOWS_AND_HARDWARE.md).
 
 ## Source And Tests
 
@@ -21,6 +23,8 @@ network-denial, and signing gates with
 - [ ] `npm run m0:artifact-manifest` records final hashes.
 - [ ] `npm run audit:release` finds no profile path, checkout path, or secret.
 - [ ] `npm run v3:release-checksums:verify` matches every release package.
+- [ ] `npm run v3:sbom:verify` binds an SPDX 2.3 dependency inventory to the candidate.
+- [ ] The 100-image critical GUI state matrix exists and is included in CI proof artifacts.
 - [ ] The renderer has no Node.js globals and exposes the exact preload surface.
 - [ ] Navigation, popups, webviews, and unauthorized network attempts are blocked.
 
@@ -45,6 +49,7 @@ network-denial, and signing gates with
 - [ ] Permission denial and recovery are understandable.
 - [ ] 1366 by 768 at 125 and 150 percent scaling is usable.
 - [ ] Keyboard-only and accessibility checks pass.
+- [ ] `npm run v3:manual-release-matrix:strict` passes against the candidate commit and installer hash.
 
 ## Signing And Distribution
 
@@ -56,6 +61,7 @@ network-denial, and signing gates with
 - [ ] A clean-machine install and upgrade from the previous release pass.
 - [ ] A rollback installer is retained.
 - [ ] Privacy, terms, support, and third-party notices are current.
+- [ ] `npm run v3:release-readiness-audit:strict` passes using the same candidate identity.
 
 ## Stop Conditions
 

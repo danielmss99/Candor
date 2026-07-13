@@ -33,7 +33,7 @@ export function PrivacyReceipt({ receipt, network, compact = false }: PrivacyRec
     <section className={`privacy-receipt${compact ? " compact" : ""}`} aria-label="Meeting privacy receipt">
       <header>
         <span className="receipt-seal verified" aria-hidden="true" />
-        <div><strong>Private on this computer</strong><p>Facts reported by the local core for this meeting</p></div>
+        <div><strong>Private on this computer</strong><p>Facts reported by Candor's local service for this meeting</p></div>
         <span className="receipt-status">Verified locally</span>
       </header>
       <dl className="receipt-facts">

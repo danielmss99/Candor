@@ -39,6 +39,7 @@ function ciProvenance() {
 
 const steps = [
   { name: "V3 icon reproducibility", command: npmCommand, args: ["run", "v3:icons:check"] },
+  { name: "Candor product identity", command: npmCommand, args: ["run", "v3:identity:verify"] },
   { name: "M0 CI contract smoke", command: npmCommand, args: ["run", "m0:ci-contract-smoke"] },
   {
     name: "M0 local verification",

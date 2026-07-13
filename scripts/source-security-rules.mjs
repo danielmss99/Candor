@@ -219,13 +219,20 @@ export function evaluateSourceSecurity(input) {
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [
     ["context-bridge", 'contextBridge.exposeInMainWorld("candor"'],
-    ["core-frozen", "core: Object.freeze("],
-    ["license-frozen", "license: Object.freeze("],
-    ["shell-frozen", "shell: Object.freeze("],
-    ["named-core-channel", 'ipcRenderer.invoke("candor-core:core-status")'],
-    ["durable-status", 'ipcRenderer.invoke("candor-core:recording-durable-status")'],
-    ["diagnostics-preview", 'ipcRenderer.invoke("candor-diagnostics:preview")'],
-    ["diagnostics-save", 'ipcRenderer.invoke("candor-diagnostics:saveLocal")'],
+    ["api-version", "version: 2 as const"],
+    ["app-frozen", "app: Object.freeze("],
+    ["capture-frozen", "capture: Object.freeze("],
+    ["meetings-frozen", "meetings: Object.freeze("],
+    ["transcript-frozen", "transcript: Object.freeze("],
+    ["ai-frozen", "ai: Object.freeze("],
+    ["exports-frozen", "exports: Object.freeze("],
+    ["settings-frozen", "settings: Object.freeze("],
+    ["licensing-frozen", "licensing: Object.freeze("],
+    ["events-frozen", "events: Object.freeze("],
+    ["named-status-channel", 'invoke("candor-app:getStatus")'],
+    ["durable-status", 'invoke("candor-core:recording-durable-status")'],
+    ["diagnostics-preview", 'invoke("candor-diagnostics:preview")'],
+    ["diagnostics-save", 'invoke("candor-diagnostics:saveLocal")'],
   ]) {
     includes(`preload:${id}`, preload, pattern, `preload requires ${id}`);
   }
@@ -238,6 +245,7 @@ export function evaluateSourceSecurity(input) {
   );
   excludes("preload:no-selected-path", preload, /selectedPath|destinationPath/, "renderer never receives selected paths");
   excludes("preload:no-generic-core-channel", preload, /candor-core:call|\bcallCore\b|\ballowedMethods\b/, "preload uses fixed product channels only");
+  excludes("preload:no-infrastructure-groups", preload, /\b(?:core|shell|license):\s*Object\.freeze/, "preload exposes product domains instead of infrastructure groups");
   add(
     "electron-main:no-generic-core-channel",
     !/candor-core:call/.test(electronRuntimeSource),
@@ -265,10 +273,16 @@ export function evaluateSourceSecurity(input) {
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";
   includes(
-    "renderer-api:durable-status",
+    "renderer-api:v2",
     rendererDeclaration,
-    "recordingDurableStatus(): Promise<JsonValue>",
-    "renderer declaration matches durable status preload operation",
+    "interface CandorApiV2",
+    "renderer declaration matches the domain preload API version",
+  );
+  includes(
+    "renderer-api:meetings-storage-status",
+    rendererDeclaration,
+    "getStorageStatus(): Promise<JsonValue>",
+    "renderer declaration includes the meeting storage status operation",
   );
   excludes(
     "renderer-api:no-generic-capabilities",

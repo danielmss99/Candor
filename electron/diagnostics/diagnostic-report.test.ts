@@ -4,7 +4,7 @@ import { buildDiagnosticReport, diagnosticReportBytes, diagnosticReportSha256 } 
 describe("safe diagnostic report", () => {
   it("includes allowlisted custody facts and excludes injected user content", () => {
     const report = buildDiagnosticReport({
-      appVersion: "2.0.0",
+      appVersion: "0.4.0",
       platform: "win32",
       arch: "x64",
       packaged: true,
