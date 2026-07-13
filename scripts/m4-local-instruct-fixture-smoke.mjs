@@ -97,15 +97,15 @@ function requireSource(source, pattern, label) {
 function verifyRendererSurface() {
   for (const [method, channel] of [
     ["ai.instructStatus", "candor-core:ai-instruct-status"],
-    ["ai.recapInstruct", "candor-core:ai-recap-instruct"],
-    ["ai.askInstruct", "candor-core:ai-ask-instruct"],
+    ["ai.recap.start", "candor-ai:recap"],
+    ["ai.ask.start", "candor-ai:ask"],
   ]) {
     requireSource(electronMainSource, `\"${method}\"`, "Electron renderer allowlist");
     requireSource(preloadSource, `\"${channel}\"`, "preload named channel");
   }
-  requireSource(electronMainSource, 'operation("candor-core:ai-ask-instruct", "ai.askInstruct", 60_000)', "Electron Ask timeout");
-  requireSource(electronMainSource, 'operation("candor-core:ai-recap-instruct", "ai.recapInstruct", 60_000)', "Electron recap timeout");
-  for (const apiMethod of ["aiInstructStatus", "aiRecapInstruct", "aiAskInstruct"]) {
+  requireSource(electronMainSource, '{ method: "ai.ask.start", timeoutMs: 10_000, mode: "job"', "Electron Ask job contract");
+  requireSource(electronMainSource, '{ method: "ai.recap.start", timeoutMs: 10_000, mode: "job"', "Electron recap job contract");
+  for (const apiMethod of ["getEnhancedStatus", "generateRecap", "ask"]) {
     requireSource(preloadSource, apiMethod, "preload bridge");
     requireSource(apiTypesSource, apiMethod, "renderer API types");
     requireSource(rendererSource, apiMethod, "renderer workspace");
@@ -117,7 +117,7 @@ function verifyRendererSurface() {
   requireSource(rendererSource, 'aria-pressed={aiMode === "fast"}', "renderer fast mode");
   rendererSurface.qualityModeImplemented = true;
 
-  requireSource(rendererSource, "Fast fallback, model unavailable", "renderer fallback status");
+  requireSource(rendererSource, "Fast local fallback", "renderer fallback status");
   requireSource(rendererSource, 'aiMode === "quality" && instructReady', "renderer fallback branch");
   rendererSurface.fallbackImplemented = true;
 

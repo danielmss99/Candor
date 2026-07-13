@@ -108,12 +108,14 @@ describe("simplified product surface", () => {
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);
-    expect(basicMarkup).not.toContain("Privacy and diagnostics");
-    expect(advancedMarkup).toContain("Privacy and diagnostics");
+    expect(basicMarkup).not.toContain("Privacy and network");
+    expect(basicMarkup).not.toContain("Diagnostics");
+    expect(advancedMarkup).toContain("Privacy and network");
+    expect(advancedMarkup).toContain("Diagnostics");
     expect(advancedMarkup).toContain("Local AI");
-    const privacyMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="privacy" advancedOpen diagnosticPreview={{ contentPolicy: "metadata-only-no-user-content" }} />);
-    expect(privacyMarkup).toContain("Safe diagnostic report");
-    expect(privacyMarkup).toContain("Inspect exact report");
+    const diagnosticsMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="diagnostics" advancedOpen diagnosticPreview={{ contentPolicy: "metadata-only-no-user-content" }} />);
+    expect(diagnosticsMarkup).toContain("Safe diagnostic report");
+    expect(diagnosticsMarkup).toContain("Inspect exact report");
   });
 
   it("provides compact Transcript, Notes, and AI panes without splitting the meeting workflow", () => {

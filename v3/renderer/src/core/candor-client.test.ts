@@ -5,14 +5,24 @@ import { EXPECTED_PROTOCOL_VERSION } from "./contracts";
 type CoreApi = ConstructorParameters<typeof CandorClient>[0];
 
 function coreApi(overrides: Record<string, unknown> = {}): CoreApi {
+  const app = {
+    getVersion: vi.fn().mockResolvedValue({ version: "0.1.0", protocolVersion: EXPECTED_PROTOCOL_VERSION }),
+  };
+  const meetings = {
+    list: vi.fn(),
+    getTranscript: vi.fn(),
+    getPrivacyReceipt: vi.fn(),
+  };
+  const settings = { getNetworkPolicy: vi.fn() };
+  const ai = { listSpeechModels: vi.fn() };
+  if (overrides.version) app.getVersion = overrides.version as typeof app.getVersion;
+  if (overrides.recordingDurableListPage) meetings.list = overrides.recordingDurableListPage as typeof meetings.list;
   return {
-    version: vi.fn().mockResolvedValue({ version: "0.1.0", protocolVersion: EXPECTED_PROTOCOL_VERSION }),
-    recordingDurableListPage: vi.fn(),
-    recordingDurableTranscriptPage: vi.fn(),
-    recordingPrivacyReceipt: vi.fn(),
-    privacyCapabilities: vi.fn(),
-    modelsStatus: vi.fn(),
-    ...overrides,
+    version: 2,
+    app,
+    meetings,
+    settings,
+    ai,
   } as unknown as CoreApi;
 }
 
@@ -22,7 +32,7 @@ describe("CandorClient", () => {
     const client = new CandorClient(api);
     await client.object("first", async () => ({ ok: true }));
     await client.object("second", async () => ({ ok: true }));
-    expect(api.version).toHaveBeenCalledTimes(1);
+    expect(api.app.getVersion).toHaveBeenCalledTimes(1);
   });
 
   it("turns malformed core payloads into visible protocol errors", async () => {

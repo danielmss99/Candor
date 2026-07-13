@@ -80,6 +80,7 @@ const rendererConfigs: readonly OperationConfig[] = [
 
 const privateConfigs: readonly OperationConfig[] = [
   { method: "core.shutdown", timeoutMs: 2_000, result: { shutdown: "boolean" } },
+  { method: "recording.durable.recover", timeoutMs: 30_000, result: { rootKind: "string", recoveredRecordings: "array", recoveredCount: "integer", quarantinedRecordings: "array", quarantinedCount: "integer", completedDeletionCount: "integer", pendingDeletionCount: "integer", vaultIndex: "object", rawPathExposed: "boolean" } },
   { method: "jobs.list", result: { jobs: "array", jobCount: "integer", rawPathExposed: "boolean" } },
   { method: "jobs.get", result: { jobId: "string", type: "string", state: "string", createdAt: "string", updatedAt: "string", terminal: "boolean", rawPathExposed: "boolean" } },
   { method: "jobs.cancel", result: { jobId: "string", state: "string", cancelRequested: "boolean", terminal: "boolean", rawPathExposed: "boolean" } },
@@ -150,4 +151,25 @@ export function getCoreOperation(method: string): CoreOperationDefinition {
   const operation = CORE_OPERATIONS.get(method);
   if (!operation) throw new Error(`Core operation is not registered: ${method}`);
   return operation;
+}
+
+const completedJobResultSchemas: ReadonlyMap<string, JsonRuntimeSchema> = new Map([
+  ["transcription", jsonObjectResultSchema("transcription job", { recordingId: "string", engine: "string", segmentCount: "integer", rawPathExposed: "boolean" })],
+  ["recap", jsonObjectResultSchema("recap job", { recordingId: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" })],
+  ["ask", jsonObjectResultSchema("ask job", { recordingId: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" })],
+  ["export", jsonObjectResultSchema("export job", { format: "string", fileName: "string", bytes: "integer", rawPathExposed: "boolean" })],
+  ["legacy-import", jsonObjectResultSchema("legacy import job", { importedCount: "integer", skippedCount: "integer", originalsUntouched: "boolean", rawPathExposed: "boolean" })],
+  ["speech-model-verification", jsonObjectResultSchema("speech model verification job", { modelId: "string", installed: "boolean", verified: "boolean", rawPathExposed: "boolean" })],
+  ["speech-model-import", jsonObjectResultSchema("speech model import job", { importId: "string", modelId: "string", imported: "boolean", rejected: "boolean", rawPathExposed: "boolean" })],
+  ["local-ai-component-import", jsonObjectResultSchema("local AI component import job", { assetKind: "string", imported: "boolean", integrityVerified: "boolean", rawPathExposed: "boolean" })],
+]);
+
+export function validateCompletedJobResult(value: JsonValue): JsonValue {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const job = value as Record<string, JsonValue>;
+  if (job.state !== "completed") return value;
+  if (typeof job.type !== "string") throw new Error("Completed job omitted its type");
+  const schema = completedJobResultSchemas.get(job.type);
+  if (!schema) throw new Error(`Completed job type is not registered: ${job.type}`);
+  return { ...job, result: schema.parse(job.result) };
 }

@@ -70,7 +70,7 @@ function recordingOnly(method: string, value: unknown): JsonValue {
 }
 
 export function validatePrivateCoreParams(method: string, input: unknown): JsonValue {
-  if (method === "core.shutdown" || method === "jobs.list") {
+  if (method === "core.shutdown" || method === "jobs.list" || method === "recording.durable.recover") {
     if (input !== null && input !== undefined) fail(method, "parameters are not accepted");
     return null;
   }

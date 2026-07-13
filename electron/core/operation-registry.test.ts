@@ -8,6 +8,7 @@ import {
   privateCoreMethods,
   rendererCoreMethods,
   rendererCoreOperations,
+  validateCompletedJobResult,
 } from "./operation-registry.js";
 
 interface Fixture {
@@ -28,6 +29,21 @@ function fixtures(group: "valid" | "invalid"): Fixture[] {
 }
 
 describe("core operation registry", () => {
+  it("validates completed job results by work type", () => {
+    expect(validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "export",
+      state: "completed",
+      result: { format: "pdf", fileName: "report.pdf", bytes: 10, rawPathExposed: false },
+    })).toMatchObject({ result: { format: "pdf", bytes: 10 } });
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "export",
+      state: "completed",
+      result: { format: "pdf", fileName: "report.pdf", bytes: "ten", rawPathExposed: false },
+    })).toThrow("bytes");
+  });
+
   it("is the complete source for renderer and private allowlists", () => {
     expect(CORE_OPERATIONS.size).toBeGreaterThan(40);
     expect(privateCoreMethods).toEqual(new Set(CORE_OPERATIONS.keys()));

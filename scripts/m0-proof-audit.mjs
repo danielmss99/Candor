@@ -361,8 +361,8 @@ function validateSmokeProof(payload) {
     failures,
   );
   requireField(
-    payload?.rendererIsolationProbe?.coreKeys?.includes("transcriptionRunLocal") &&
-      payload?.rendererIsolationProbe?.coreKeys?.includes("modelsImportFromFile"),
+    payload?.rendererIsolationProbe?.coreKeys?.includes("transcript.start") &&
+      payload?.rendererIsolationProbe?.coreKeys?.includes("ai.chooseSpeechModel"),
     "renderer isolation probe must find typed transcription and model import methods",
     failures,
   );
@@ -866,8 +866,8 @@ function minimalValidSmokeProof() {
       candorPresent: true,
       coreFrozen: true,
       shellFrozen: true,
-      coreKeys: ["modelsImportFromFile", "transcriptionRunLocal"],
-      shellKeys: ["externalNavigationDisabled", "networkPolicy", "supervisorStatus"],
+      coreKeys: ["ai.chooseSpeechModel", "transcript.start"],
+      shellKeys: ["getConnectionStatus", "prepareDiagnostics", "saveDiagnostics"],
       forbiddenCoreKeysPresent: [],
       forbiddenShellKeysPresent: [],
       forbiddenGlobalsPresent: [],

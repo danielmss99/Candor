@@ -68,7 +68,7 @@ export function DesktopShell({
             {notice ? <div className="app-message success" role="status"><span>{notice}</span><button type="button" aria-label="Dismiss notification" title="Dismiss" onClick={onDismissNotice}>x</button></div> : null}
             {error ? <div className="app-message error" role="alert"><span>{error}</span><button type="button" aria-label="Dismiss error" title="Dismiss" onClick={onDismissError}>x</button></div> : null}
           </div>
-          {persistentAlerts.length ? <div className="system-alert-stack" aria-label="Local system status">{persistentAlerts.map((alert) => <section className={`system-alert ${alert.severity}`} role={alert.severity === "error" ? "alert" : "status"} key={alert.id}><strong>{alert.title}</strong><span>{alert.message}</span></section>)}</div> : null}
+          {persistentAlerts.length ? <div className="system-alert-stack" aria-label="Local system status">{persistentAlerts.map((alert) => <section className={`system-alert ${alert.severity}`} role={alert.severity === "error" ? "alert" : "status"} key={alert.id}><div><strong>{alert.title}</strong><span>{alert.message}</span></div>{alert.actions?.length ? <div className="system-alert-actions">{alert.actions.map((action) => <button type="button" className={action.primary ? "primary" : ""} onClick={action.onActivate} key={action.label}>{action.label}</button>)}</div> : null}</section>)}</div> : null}
           {children}
         </section>
       </div>

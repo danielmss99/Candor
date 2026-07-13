@@ -1,104 +1,101 @@
-type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-interface CandorApi {
-  core: {
-    ping(): Promise<JsonValue>;
-    version(): Promise<JsonValue>;
-    capabilities(): Promise<JsonValue>;
-    status(): Promise<JsonValue>;
-    vaultOpenLocal(): Promise<JsonValue>;
-    vaultStatus(): Promise<JsonValue>;
-    privacyAuditSnapshot(): Promise<JsonValue>;
-    privacyCapabilities(): Promise<JsonValue>;
-    updateStatus(): Promise<JsonValue>;
-    v2ImportStatus(): Promise<JsonValue>;
-    v2ImportFromFolder(): Promise<JsonValue>;
-    consentStatus(): Promise<JsonValue>;
-    consentAcknowledge(params: { items: string[] }): Promise<JsonValue>;
-    captureStatus(): Promise<JsonValue>;
-    captureDevices(): Promise<JsonValue>;
-    captureStartMic(params?: { label?: string; deviceId?: string; chunkMs?: number }): Promise<JsonValue>;
-    captureStartSystem(params?: { label?: string; deviceId?: string; chunkMs?: number }): Promise<JsonValue>;
-    captureStartMicAndSystem(params?: {
+interface JobAccepted {
+  jobId: string;
+  type: string;
+  state: "queued";
+  createdAt: string;
+  rawPathExposed: false;
+}
+
+interface CandorApiV2 {
+  version: 2;
+  app: {
+    getStatus(): Promise<JsonValue>;
+    getConnectionStatus(): Promise<JsonValue>;
+    getVersion(): Promise<JsonValue>;
+    getCapabilities(): Promise<JsonValue>;
+    retryCore(): Promise<JsonValue>;
+    listJobs(): Promise<JsonValue>;
+    getJob(jobId: string): Promise<JsonValue>;
+    acknowledgeJob(jobId: string): Promise<JsonValue>;
+    prepareDiagnostics(): Promise<JsonValue>;
+    saveDiagnostics(): Promise<JsonValue>;
+  };
+  capture: {
+    getStatus(): Promise<JsonValue>;
+    getDevices(): Promise<JsonValue>;
+    getConsent(): Promise<JsonValue>;
+    acknowledgeConsent(items: string[]): Promise<JsonValue>;
+    start(input: {
+      source: "microphone" | "system-audio" | "microphone-and-system-audio";
       label?: string;
+      deviceId?: string;
       micDeviceId?: string;
       systemDeviceId?: string;
       chunkMs?: number;
     }): Promise<JsonValue>;
-    captureStop(): Promise<JsonValue>;
-    modelsStatus(): Promise<JsonValue>;
-    modelsListLocal(): Promise<JsonValue>;
-    modelsVerifyLocal(params?: { modelId?: string }): Promise<JsonValue>;
-    aiStatus(): Promise<JsonValue>;
-    aiAskHeuristic(recordingId: string, question: string): Promise<JsonValue>;
-    aiRecapHeuristic(recordingId: string): Promise<JsonValue>;
-    aiInstructAssetsStatus(): Promise<JsonValue>;
-    aiInstructAssetImportFromFile(params: {
-      assetKind: "runner" | "model";
-      expectedSha256: string;
-      replace?: boolean;
-    }): Promise<JsonValue>;
-    aiInstructStatus(): Promise<JsonValue>;
-    aiAskInstruct(recordingId: string, question: string, maxTokens?: number): Promise<JsonValue>;
-    aiRecapInstruct(recordingId: string, maxTokens?: number): Promise<JsonValue>;
-    aiSchedulerStatus(): Promise<JsonValue>;
-    modelsImportFromFile(params: { modelId: string; replace?: boolean }): Promise<JsonValue>;
-    transcriptionStatus(): Promise<JsonValue>;
-    transcriptionRunLocal(params: {
-      recordingId: string;
-      channel?: string;
-      modelId?: string;
-      language?: string;
-      initialPrompt?: string;
-    }): Promise<JsonValue>;
-    recordingDurableStatus(): Promise<JsonValue>;
-    recordingDurableListPage(offset?: number, limit?: number): Promise<JsonValue>;
-    recordingDurableRead(recordingId: string): Promise<JsonValue>;
-    recordingDurableReplayManifest(recordingId: string): Promise<JsonValue>;
-    recordingDurableTranscriptPage(recordingId: string, offset?: number, limit?: number): Promise<JsonValue>;
-    recordingPrivacyReceipt(recordingId: string): Promise<JsonValue>;
-    recordingDurableReadAudioChunk(recordingId: string, index: number): Promise<JsonValue>;
-    recordingDurableSearch(query: string): Promise<JsonValue>;
-    recordingDelete(recordingId: string): Promise<JsonValue>;
-    recordingNotesRead(recordingId: string): Promise<JsonValue>;
-    recordingNotesSave(recordingId: string, markdown: string): Promise<JsonValue>;
-    retentionStatus(): Promise<JsonValue>;
-    exportCreate(params: {
-      recordingId: string;
-      format?: "markdown" | "docx" | "pdf" | "wav";
-      channel?: string;
-      report?: JsonValue;
-      options?: JsonValue;
-    }): Promise<JsonValue>;
-    exportSaveLocal(params: {
-      recordingId: string;
-      format: "markdown" | "docx" | "pdf";
-      report: JsonValue;
-      options: JsonValue;
-    }): Promise<JsonValue>;
+    stop(): Promise<JsonValue>;
+    recover(): Promise<JsonValue>;
   };
-  license: {
-    status(): Promise<JsonValue>;
-    activate(params: { licenseKey: string; purchaserEmail?: string }): Promise<JsonValue>;
+  meetings: {
+    getStorageStatus(): Promise<JsonValue>;
+    list(offset?: number, limit?: number): Promise<JsonValue>;
+    get(recordingId: string): Promise<JsonValue>;
+    getReplayManifest(recordingId: string): Promise<JsonValue>;
+    getTranscript(recordingId: string, offset?: number, limit?: number): Promise<JsonValue>;
+    getPrivacyReceipt(recordingId: string): Promise<JsonValue>;
+    readAudioChunk(recordingId: string, index: number): Promise<JsonValue>;
+    search(query: string): Promise<JsonValue>;
+    delete(recordingId: string): Promise<JsonValue>;
+    getNotes(recordingId: string): Promise<JsonValue>;
+    updateNotes(recordingId: string, markdown: string): Promise<JsonValue>;
+    getImportStatus(): Promise<JsonValue>;
+    importLegacy(): Promise<JsonValue>;
+  };
+  transcript: {
+    getStatus(): Promise<JsonValue>;
+    start(input: { recordingId: string; channel?: string; modelId?: string; language?: string; initialPrompt?: string }): Promise<JobAccepted>;
+    cancel(jobId: string): Promise<JsonValue>;
+  };
+  ai: {
+    getStatus(): Promise<JsonValue>;
+    getEnhancedAssetsStatus(): Promise<JsonValue>;
+    getEnhancedStatus(): Promise<JsonValue>;
+    getWorkloadStatus(): Promise<JsonValue>;
+    listSpeechModels(): Promise<JsonValue>;
+    verifySpeechModel(modelId?: string): Promise<JobAccepted>;
+    chooseSpeechModel(modelId: string): Promise<JobAccepted | JsonValue>;
+    chooseEnhancedComponent(input: { component: "engine" | "model"; expectedSha256: string }): Promise<JobAccepted | JsonValue>;
+    generateRecap(recordingId: string, quality: "fast" | "best"): Promise<JobAccepted>;
+    ask(recordingId: string, question: string, quality: "fast" | "best"): Promise<JobAccepted>;
+    cancel(jobId: string): Promise<JsonValue>;
+  };
+  exports: {
+    create(input: JsonValue): Promise<JobAccepted>;
+    saveCompleted(jobId: string): Promise<JsonValue>;
+    cancel(jobId: string): Promise<JsonValue>;
+  };
+  settings: {
+    openLocalStorage(): Promise<JsonValue>;
+    getStorageStatus(): Promise<JsonValue>;
+    getPrivacyAudit(): Promise<JsonValue>;
+    getNetworkPolicy(): Promise<JsonValue>;
+    getUpdateStatus(): Promise<JsonValue>;
+    getRetentionStatus(): Promise<JsonValue>;
+  };
+  licensing: {
+    getStatus(): Promise<JsonValue>;
+    activate(input: { licenseKey: string; purchaserEmail?: string }): Promise<JsonValue>;
     startTrial(): Promise<JsonValue>;
-    deactivateDevice(): Promise<JsonValue>;
-    portalInfo(): Promise<JsonValue>;
+    deactivate(): Promise<JsonValue>;
+    getPortalInfo(): Promise<JsonValue>;
   };
-  shell: {
-    externalNavigationDisabled: boolean;
-    networkPolicy: string;
-    supervisorStatus(): Promise<JsonValue>;
-    diagnosticsPreview(): Promise<JsonValue>;
-    diagnosticsSaveLocal(): Promise<JsonValue>;
+  events: {
+    subscribe(eventName: "jobs.changed", listener: (payload: JsonValue) => void): () => void;
   };
 }
 
 interface Window {
-  candor?: CandorApi;
+  candor?: CandorApiV2;
 }

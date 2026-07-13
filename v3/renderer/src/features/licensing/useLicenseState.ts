@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { asObject, asString, type JsonObject } from "../../core/contracts";
 
-type LicenseApi = NonNullable<Window["candor"]>["license"];
+type LicenseApi = NonNullable<Window["candor"]>["licensing"];
 
 export function isLicenseActive(status: JsonObject): boolean {
   const state = asString(status.state, "inactive");
@@ -22,7 +22,7 @@ export function useLicenseState(licenseApi: LicenseApi | undefined, onLoadError:
       setLoaded(true);
       return;
     }
-    const [nextStatus, nextPortal] = await Promise.all([licenseApi.status(), licenseApi.portalInfo()]);
+    const [nextStatus, nextPortal] = await Promise.all([licenseApi.getStatus(), licenseApi.getPortalInfo()]);
     setStatus(asObject(nextStatus));
     setPortalInfo(asObject(nextPortal));
     setLoaded(true);
@@ -58,7 +58,7 @@ export function useLicenseState(licenseApi: LicenseApi | undefined, onLoadError:
 
   const deactivate = useCallback(async () => {
     if (!licenseApi) return status;
-    const next = asObject(await licenseApi.deactivateDevice());
+    const next = asObject(await licenseApi.deactivate());
     setStatus(next);
     setPromptDismissed(true);
     await reload();

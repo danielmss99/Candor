@@ -10,7 +10,7 @@ import {
 } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 
 interface UseOnboardingSettingsOptions {
   api: CoreApi | undefined;
@@ -123,7 +123,7 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
       return;
     }
     await run("consent", async () => {
-      setConsentStatus(asObject(await api.consentAcknowledge({ items: ["localOnlyStorage", "micRecording"] })));
+      setConsentStatus(asObject(await api.capture.acknowledgeConsent(["localOnlyStorage", "micRecording"])));
       await refreshCapture();
       setStep("system-audio");
       setNotice("Microphone recording consent saved locally");
@@ -139,7 +139,7 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
     }
     const required = asArray(consentStatus.requiredForSystemAudio).map((item) => asString(item)).filter(Boolean);
     await run("consent", async () => {
-      setConsentStatus(asObject(await api.consentAcknowledge({ items: required.length ? required : ["localOnlyStorage", "systemAudioRecording"] })));
+      setConsentStatus(asObject(await api.capture.acknowledgeConsent(required.length ? required : ["localOnlyStorage", "systemAudioRecording"])));
       await refreshCapture();
       setStep("storage");
       setNotice("System audio consent saved locally");
@@ -149,7 +149,7 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
   const completeStorage = useCallback(async () => {
     if (!api) return;
     await run("storage", async () => {
-      if (asBool(vaultStatus.localOpenAvailable)) await api.vaultOpenLocal();
+      if (asBool(vaultStatus.localOpenAvailable)) await api.settings.openLocalStorage();
       await refreshVaultAndRetention();
       setStep("local-ai");
       setNotice("Local storage is ready");
@@ -165,7 +165,7 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
   const acknowledgeMic = useCallback(async () => {
     if (!api) return;
     await run("consent", async () => {
-      setConsentStatus(asObject(await api.consentAcknowledge({ items: ["localOnlyStorage", "micRecording"] })));
+      setConsentStatus(asObject(await api.capture.acknowledgeConsent(["localOnlyStorage", "micRecording"])));
       setNotice("Microphone recording consent saved locally");
       await refreshCapture();
     });
@@ -175,7 +175,7 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
     if (!api) return;
     const required = asArray(consentStatus.requiredForSystemAudio).map((item) => asString(item)).filter(Boolean);
     await run("consent", async () => {
-      setConsentStatus(asObject(await api.consentAcknowledge({ items: required.length ? required : ["localOnlyStorage", "systemAudioRecording"] })));
+      setConsentStatus(asObject(await api.capture.acknowledgeConsent(required.length ? required : ["localOnlyStorage", "systemAudioRecording"])));
       setNotice("System audio consent saved locally");
       await refreshCapture();
     });

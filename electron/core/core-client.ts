@@ -12,7 +12,7 @@ import {
   type CoreResponse,
   type CoreEvent,
 } from "./protocol.js";
-import { CORE_OPERATIONS, type CoreOperationDefinition } from "./operation-registry.js";
+import { CORE_OPERATIONS, validateCompletedJobResult, type CoreOperationDefinition } from "./operation-registry.js";
 import { RequestRegistry } from "./request-registry.js";
 
 export type CoreSupervisorLifecycle =
@@ -205,6 +205,15 @@ export class CoreClient {
 
   waitForRecoveryPersistence(): Promise<void> {
     return this.recoveryPersistence;
+  }
+
+  completeCaptureRecovery(): void {
+    this.captureActive = false;
+    this.activeRecordingId = null;
+    this.supervisor.captureRecoveryRequired = false;
+    this.supervisor.degradedCapture = null;
+    if (this.supervisor.state === "capture-connection-degraded") this.supervisor.state = "running";
+    this.resolveCaptureRecovery();
   }
 
   async retryConnection(): Promise<JsonValue> {
@@ -453,7 +462,11 @@ export class CoreClient {
         }
         if (response.ok) {
           try {
-            response = { ...response, result: operation.resultSchema.parse(response.result) };
+            const result = operation.resultSchema.parse(response.result);
+            response = {
+              ...response,
+              result: method === "jobs.get" ? validateCompletedJobResult(result) : result,
+            };
           } catch (error) {
             const contractError = error instanceof CoreClientError
               ? error

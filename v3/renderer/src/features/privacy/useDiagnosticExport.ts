@@ -2,7 +2,7 @@ import { useCallback, useState } from "react";
 import { asBool, asObject, asString, type JsonObject } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
 
-type ShellApi = NonNullable<Window["candor"]>["shell"];
+type ShellApi = NonNullable<Window["candor"]>["app"];
 
 interface UseDiagnosticExportOptions {
   api: ShellApi | undefined;
@@ -16,7 +16,7 @@ export function useDiagnosticExport({ api, run, setNotice }: UseDiagnosticExport
   const prepare = useCallback(async () => {
     if (!api) return;
     await run("diagnostics", async () => {
-      setPreview(asObject(await api.diagnosticsPreview()));
+      setPreview(asObject(await api.prepareDiagnostics()));
       setNotice("Diagnostic preview prepared without meeting content");
     }, "diagnostics-preview");
   }, [api, run, setNotice]);
@@ -24,7 +24,7 @@ export function useDiagnosticExport({ api, run, setNotice }: UseDiagnosticExport
   const save = useCallback(async () => {
     if (!api) return;
     await run("diagnostics", async () => {
-      const result = asObject(await api.diagnosticsSaveLocal());
+      const result = asObject(await api.saveDiagnostics());
       if (asBool(result.canceled)) {
         setNotice("Diagnostic export canceled");
         return;

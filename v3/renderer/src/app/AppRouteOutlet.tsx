@@ -78,6 +78,19 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
     recordingStatus: runtime.recordingStatus,
     quarantinedCount: meeting.quarantinedCount,
   });
+  const connectionDegraded = asString(runtime.connectionStatus.state) === "capture-connection-degraded";
+  if (connectionDegraded && activeCapture) {
+    persistentAlerts.unshift({
+      id: "capture-connection-degraded",
+      severity: "error",
+      title: "Recording connection interrupted",
+      message: "Candor lost contact with the recording service. The recording may still be active.",
+      actions: [
+        { label: "Try to reconnect", primary: true, onActivate: () => void runtime.retryConnection() },
+        { label: "Stop recording", onActivate: () => void captureActions.stop() },
+      ],
+    });
+  }
   const activeRecordingId = asString(asObject(runtime.captureStatus.activeSession).recordingId);
   const selectedRecording = meeting.recordings.find((item) => item.recordingId === meeting.selectedRecordingId);
   const selectedTitle = selectedRecording?.label || meeting.recordingTitle || "Untitled local meeting";
@@ -85,6 +98,7 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
   const licenseKeyInvalid = license.licenseKeyTouched && !license.licenseKey.trim();
   const captureMachine = captureSession.state;
   const jobMachine = operations.jobMachine;
+  const rehydratedJob = runtime.jobs.find((job) => !asBool(job.terminal));
   const captureStatusLabel = captureMachine.phase === "idle"
     ? "Ready"
     : captureMachine.phase === "recording"
@@ -92,7 +106,9 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
       : captureMachine.phase === "requesting-permission"
         ? "Checking permission"
         : captureMachine.phase[0].toUpperCase() + captureMachine.phase.slice(1).replace("-", " ");
-  const jobStatusLabel = jobMachine.phase === "running" && jobMachine.kind
+  const jobStatusLabel = rehydratedJob
+    ? `${metric(rehydratedJob.type, "Local work")} ${metric(rehydratedJob.stage, "running")}`
+    : jobMachine.phase === "running" && jobMachine.kind
     ? `${jobMachine.kind.replace("-", " ")} running locally`
     : jobMachine.phase === "failed"
       ? "Local job needs attention"
@@ -100,7 +116,7 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
   const custodyItems: Array<[string, string]> = [
     ["Network", metric(runtime.coreStatus.networkPolicy, "disabled-by-default")],
     ["Updates", asBool(runtime.updateStatus.backgroundChecks) ? "background" : metric(runtime.updateStatus.policy, "manual-check-only")],
-    ["Vault", metric(runtime.vaultStatus.backend, "sqlcipher")],
+    ["Encrypted storage", asBool(runtime.vaultStatus.encrypted) ? "protected" : "local"],
     ["Consent", asBool(runtime.consentStatus.readyForMicAndSystemAudioRecording) ? "all ready" : asBool(runtime.consentStatus.readyForMicRecording) ? "mic ready" : "required"],
     ["Notes", meeting.notesDirty ? "unsaved" : asBool(meeting.notesStatus.savedLocally) ? "saved" : "empty"],
     ["Retention", metric(runtime.retentionStatus.policy, "manual-delete-only")],
@@ -108,8 +124,8 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
     ["External calls", metric(runtime.privacyAudit.externalCallsAttempted, "0")],
     ["Transport", metric(runtime.coreStatus.sidecarTransport, "stdio-json-lines")],
     ["Local AI", localAi.instructReady ? "model ready" : asBool(runtime.aiStatus.heuristicRecapImplemented) ? "fast fallback" : "pending"],
-    ["V2 import", asBool(runtime.v2ImportStatus.implemented) ? "native picker" : "pending"],
-    ["Scheduler", asBool(runtime.schedulerStatus.whisperLlmConcurrent) ? "unsafe" : "single job"],
+    ["Legacy import", asBool(runtime.v2ImportStatus.implemented) ? "available" : "pending"],
+    ["Local processing", asBool(runtime.schedulerStatus.whisperLlmConcurrent) ? "needs attention" : "one task at a time"],
     ["Model import", metric(runtime.modelStatus.manualImportMethod, "native picker")],
     ["Diagnostics", runtime.diagnosticFailures.length ? `${runtime.diagnosticFailures.length} unavailable` : "ready"],
   ];
@@ -152,6 +168,9 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
 
   if (!license.loaded || startup.phase === "loading") return <StartupLoading />;
   if (startup.phase === "failed") return <StartupRecovery message={startup.error} retrying={false} onRetry={startup.retry} />;
+  if (asBool(runtime.connectionStatus.captureRecoveryRequired) && !activeCapture) {
+    return <StartupRecovery message="An interrupted recording must be checked before Candor continues." title="Recording recovery required" description="Candor preserved a local recovery marker after losing contact with the recording service. Existing meetings remain available and unchanged." actionLabel="Recover recording" retrying={runtime.recoveryBusy} onRetry={() => void runtime.recoverCapture()} />;
+  }
 
   const showActivationPrompt = shouldShowActivationPrompt({
     licenseAvailable: props.licenseApiAvailable,
@@ -168,7 +187,7 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
 
   let content;
   if (navigation.view === "home") {
-    content = <HomeView recordings={meeting.recordings} activeCapture={activeCapture} combinedCaptureAvailable={combinedCaptureAvailable} busy={Boolean(operations.busy)} recordingBlocked={recordingBlocked} storageHealth={storageHealth} importAvailable={asBool(runtime.v2ImportStatus.implemented)} recordingTitle={meeting.recordingTitle} vaultBackend={runtime.vaultStatus.backend} instructReady={localAi.instructReady} verifiedModelCount={runtime.modelStatus.verifiedModelCount} aiModeStatus={localAi.aiModeStatus} onStartRecording={() => void captureActions.startPreferred()} onOpenLibrary={() => navigation.setView("library")} onImport={() => void meetingActions.importV2Folder()} onRecordingTitleChange={meeting.setRecordingTitle} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "detail")} />;
+    content = <HomeView recordings={meeting.recordings} activeCapture={activeCapture} combinedCaptureAvailable={combinedCaptureAvailable} busy={Boolean(operations.busy)} recordingBlocked={recordingBlocked} storageHealth={storageHealth} importAvailable={asBool(runtime.v2ImportStatus.implemented)} recordingTitle={meeting.recordingTitle} instructReady={localAi.instructReady} verifiedModelCount={runtime.modelStatus.verifiedModelCount} aiModeStatus={localAi.aiModeStatus} onStartRecording={() => void captureActions.startPreferred()} onOpenLibrary={() => navigation.setView("library")} onImport={() => void meetingActions.importV2Folder()} onRecordingTitleChange={meeting.setRecordingTitle} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "detail")} />;
   } else if (navigation.view === "meeting") {
     content = <LiveMeetingView title={selectedTitle} selectedRecording={selectedRecording} selectedRecordingId={meeting.selectedRecordingId} activeRecordingId={activeRecordingId} activeCapture={activeCapture} consentReady={asBool(runtime.consentStatus.readyForMicRecording)} durationMs={timelineDurationMs} audioUrl={meetingActions.audioUrl} markers={evidenceMarkers} compactPane={meetingActions.compactMeetingPane} notesPanelMode={meetingActions.notesPanelMode} notesMarkdown={meeting.notesMarkdown} notesDirty={meeting.notesDirty} notesSaved={asBool(meeting.notesStatus.savedLocally)} recapSuggestions={recapSuggestions} aiMode={localAi.aiMode} aiModeStatus={localAi.aiModeStatus} captureStatusLabel={captureStatusLabel} jobStatusLabel={jobStatusLabel} busy={Boolean(operations.busy)} transcriptContent={transcriptContent} onReview={() => navigation.setView("review")} onReviewConsent={() => { navigation.setSettingsSection("recording"); navigation.setView("settings"); }} onLoadAudio={() => void meetingActions.loadAudio()} onMarkMoment={meetingActions.markMoment} onCompactPaneChange={meetingActions.setCompactMeetingPane} onNotesPanelModeChange={meetingActions.setNotesPanelMode} onTranscribe={() => void localAi.transcribe()} onNotesChange={meeting.updateNotes} onSaveNotes={() => void meetingActions.saveMeetingNotes()} onGenerateRecap={() => void localAi.generateRecap()} onAiModeChange={localAi.setAiMode} onStartStop={() => void captureActions.startPreferred()} />;
   } else if (navigation.view === "library") {

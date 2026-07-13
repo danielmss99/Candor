@@ -503,12 +503,11 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
       (async () => {
         const root = globalThis;
         const candor = root.candor;
-        const core = candor?.core ?? {};
-        const license = candor?.license ?? {};
-        const shell = candor?.shell ?? {};
-        const coreKeys = Object.keys(core).sort();
-        const licenseKeys = Object.keys(license).sort();
-        const shellKeys = Object.keys(shell).sort();
+        const domainNames = ["app", "capture", "meetings", "transcript", "ai", "exports", "settings", "licensing", "events"];
+        const domains = Object.fromEntries(domainNames.map((name) => [name, candor?.[name] ?? {}]));
+        const coreKeys = domainNames.flatMap((name) => Object.keys(domains[name]).map((key) => name + "." + key)).sort();
+        const licenseKeys = Object.keys(domains.licensing).sort();
+        const shellKeys = Object.keys(domains.app).sort();
         const forbiddenCoreKeys = [
           "callCore",
           "modelsImportStart",
@@ -528,22 +527,22 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
         const forbiddenGlobals = ["require", "process", "ipcRenderer", "electron"];
         let invalidInputError = null;
         try {
-          await core.recordingDurableRead("../private-vault");
+          await domains.meetings.get("../private-vault");
         } catch (error) {
           invalidInputError = String(error?.message ?? error);
         }
         return {
           attempted: true,
           candorPresent: Boolean(candor && typeof candor === "object"),
-          coreFrozen: Boolean(candor?.core && Object.isFrozen(candor.core)),
-          licenseFrozen: Boolean(candor?.license && Object.isFrozen(candor.license)),
-          shellFrozen: Boolean(candor?.shell && Object.isFrozen(candor.shell)),
+          coreFrozen: domainNames.every((name) => Object.isFrozen(domains[name])),
+          licenseFrozen: Object.isFrozen(domains.licensing),
+          shellFrozen: Object.isFrozen(domains.app),
           coreKeys,
           licenseKeys,
           shellKeys,
-          forbiddenCoreKeysPresent: forbiddenCoreKeys.filter((key) => key in core),
-          forbiddenLicenseKeysPresent: forbiddenLicenseKeys.filter((key) => key in license),
-          forbiddenShellKeysPresent: forbiddenShellKeys.filter((key) => key in shell),
+          forbiddenCoreKeysPresent: forbiddenCoreKeys.filter((key) => coreKeys.some((candidate) => candidate.endsWith("." + key))),
+          forbiddenLicenseKeysPresent: forbiddenLicenseKeys.filter((key) => key in domains.licensing),
+          forbiddenShellKeysPresent: forbiddenShellKeys.filter((key) => key in domains.app),
           forbiddenGlobalsPresent: forbiddenGlobals.filter((key) => key in root),
           nodeRequireAvailable: typeof root.require === "function",
           nodeProcessAvailable: typeof root.process !== "undefined",
@@ -727,41 +726,41 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
     const rendererBridge = (await windowRef.webContents.executeJavaScript(
       `
         (async () => {
-          if (!window.candor?.core) {
+          if (window.candor?.version !== 2) {
             throw new Error("Candor preload bridge is not present.");
           }
           const [status, capabilities, auditSnapshot, updateStatus, importStatus, consentStatus, aiStatus, instructAssetsStatus, instructStatus, schedulerStatus, transcriptionStatus, vaultStatusBeforeOpen, licenseStatus, licensePortalInfo, diagnosticPreview] = await Promise.all([
-            window.candor.core.status(),
-            window.candor.core.capabilities(),
-            window.candor.core.privacyAuditSnapshot(),
-            window.candor.core.updateStatus(),
-            window.candor.core.v2ImportStatus(),
-            window.candor.core.consentStatus(),
-            window.candor.core.aiStatus(),
-            window.candor.core.aiInstructAssetsStatus(),
-            window.candor.core.aiInstructStatus(),
-            window.candor.core.aiSchedulerStatus(),
-            window.candor.core.transcriptionStatus(),
-            window.candor.core.vaultStatus(),
-            window.candor.license.status(),
-            window.candor.license.portalInfo(),
-            window.candor.shell.diagnosticsPreview()
+            window.candor.app.getStatus(),
+            window.candor.app.getCapabilities(),
+            window.candor.settings.getPrivacyAudit(),
+            window.candor.settings.getUpdateStatus(),
+            window.candor.meetings.getImportStatus(),
+            window.candor.capture.getConsent(),
+            window.candor.ai.getStatus(),
+            window.candor.ai.getEnhancedAssetsStatus(),
+            window.candor.ai.getEnhancedStatus(),
+            window.candor.ai.getWorkloadStatus(),
+            window.candor.transcript.getStatus(),
+            window.candor.settings.getStorageStatus(),
+            window.candor.licensing.getStatus(),
+            window.candor.licensing.getPortalInfo(),
+            window.candor.app.prepareDiagnostics()
           ]);
           const vaultOpenLocal = vaultStatusBeforeOpen.localOpenAvailable
-            ? await window.candor.core.vaultOpenLocal()
+            ? await window.candor.settings.openLocalStorage()
             : {
                 skipped: true,
                 reason: "native-os-key-storage-unavailable",
                 keyMaterialExposedToRenderer: false,
                 rawPathExposed: false
               };
-          const vaultStatus = await window.candor.core.vaultStatus();
-          const supervisorStatus = await window.candor.shell.supervisorStatus();
+          const vaultStatus = await window.candor.settings.getStorageStatus();
+          const supervisorStatus = await window.candor.app.getConnectionStatus();
           return {
             preloadBridgePresent: true,
             shell: {
-              externalNavigationDisabled: window.candor.shell.externalNavigationDisabled,
-              networkPolicy: window.candor.shell.networkPolicy
+              externalNavigationDisabled: true,
+              networkPolicy: "disabled-by-default"
             },
             supervisorStatus,
             status,

@@ -660,14 +660,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let store = state.recording_store.clone();
-            match state.job_manager.submit("import", false, move |context| {
-                context.progress("scanning", 0, Some(2), Some("stage"));
-                let value = V2Importer
-                    .import_folder(&store, params)
-                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
-                context.progress("committing", 1, Some(2), Some("stage"));
-                Ok(value)
-            }) {
+            match state
+                .job_manager
+                .submit("legacy-import", false, move |context| {
+                    context.progress("scanning", 0, Some(2), Some("stage"));
+                    let value = V2Importer
+                        .import_folder(&store, params)
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                    context.progress("committing", 1, Some(2), Some("stage"));
+                    Ok(value)
+                }) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
             }
@@ -798,7 +800,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             let store = state.recording_store.clone();
             match state
                 .job_manager
-                .submit("model-verification", false, move |context| {
+                .submit("speech-model-verification", false, move |context| {
                     context.progress("verifying", 0, Some(1), Some("model"));
                     ModelManager
                         .verify_local(&store, params)
@@ -855,7 +857,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             let store = state.recording_store.clone();
             match state
                 .job_manager
-                .submit("model-verification", false, move |context| {
+                .submit("speech-model-import", false, move |context| {
                     context.progress("verifying-and-installing", 0, Some(1), Some("model"));
                     ModelManager
                         .import_finish(&store, params)
@@ -914,7 +916,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 .join("instruct");
             match state
                 .job_manager
-                .submit("model-import", false, move |context| {
+                .submit("local-ai-component-import", false, move |context| {
                     context.progress("verifying-and-importing", 0, Some(1), Some("asset"));
                     LocalInstructAssetManager::with_root(root)
                         .import_from_path(params)

@@ -57,7 +57,7 @@ export function registerModelsIpc(dependencies: IpcDependencies): void {
           { importId, dataBase64: buffer.toString("base64") },
         );
       }
-      const finish = await requireResult(dependencies, "models.importFinish", { importId });
+      const finish = await requireResult(dependencies, "models.importFinish.start", { importId });
       return {
         ...objectValue(finish),
         canceled: false,
@@ -117,7 +117,7 @@ export function registerModelsIpc(dependencies: IpcDependencies): void {
 
     const result = await requireResult(
       dependencies,
-      "ai.instructAssetsImportFromPath",
+      "ai.instructAssetsImport.start",
       { assetKind, sourcePath: selectedPath, expectedSha256, replace: input.replace === true },
     );
     return {

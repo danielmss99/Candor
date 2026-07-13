@@ -465,8 +465,10 @@ fn safe_failure_message(job_type: &str, _message: &str) -> String {
         "transcription" => "Local transcription could not be completed.".to_string(),
         "recap" | "ask" => "Local AI could not complete this request.".to_string(),
         "export" => "The local report could not be created.".to_string(),
-        "import" => "The local import could not be completed.".to_string(),
-        "model-verification" => "The local model could not be verified.".to_string(),
+        "legacy-import" => "The local import could not be completed.".to_string(),
+        "speech-model-verification" | "speech-model-import" | "local-ai-component-import" => {
+            "The local model could not be verified.".to_string()
+        }
         _ => "The local operation could not be completed.".to_string(),
     }
 }
