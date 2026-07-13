@@ -11,6 +11,7 @@ import {
   type LocalJsonValue,
   type MarkedMoment,
   type MeetingPrivacyReceipt,
+  type QuarantinedRecording,
   type RecordingSummary,
   type TranscriptSegment,
 } from "../../core/contracts";
@@ -49,6 +50,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
   const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
   const [recordingTotalCount, setRecordingTotalCount] = useState(0);
   const [recordingsHaveMore, setRecordingsHaveMore] = useState(false);
+  const [quarantinedRecordings, setQuarantinedRecordings] = useState<QuarantinedRecording[]>([]);
+  const [quarantinedCount, setQuarantinedCount] = useState(0);
   const [selectedRecordingId, setSelectedRecordingId] = useState("");
   const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
   const [transcriptTotalCount, setTranscriptTotalCount] = useState(0);
@@ -123,6 +126,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     setRecordings((current) => offset === 0 ? page.recordings : mergeRecordingPages(current, page.recordings));
     setRecordingTotalCount(page.totalCount);
     setRecordingsHaveMore(page.hasMore);
+    setQuarantinedRecordings(page.quarantinedRecordings);
+    setQuarantinedCount(page.quarantinedCount);
     return page.recordings;
   }, [client]);
 
@@ -179,6 +184,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     recordings,
     recordingTotalCount,
     recordingsHaveMore,
+    quarantinedRecordings,
+    quarantinedCount,
     selectedRecordingId,
     transcript,
     transcriptTotalCount,

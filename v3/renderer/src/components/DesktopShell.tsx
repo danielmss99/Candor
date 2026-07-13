@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { RecordAction } from "./RecordAction";
-import type { AppView, RecordingSummary } from "../core/contracts";
+import type { AppView, PersistentAlert, RecordingSummary } from "../core/contracts";
 
 interface DesktopShellProps {
   view: AppView;
@@ -12,6 +12,7 @@ interface DesktopShellProps {
   busy: boolean;
   notice: string;
   error: string;
+  persistentAlerts?: PersistentAlert[];
   children: ReactNode;
   onHome: () => void;
   onStartRecording: () => void;
@@ -32,6 +33,7 @@ export function DesktopShell({
   busy,
   notice,
   error,
+  persistentAlerts = [],
   children,
   onHome,
   onStartRecording,
@@ -66,6 +68,7 @@ export function DesktopShell({
             {notice ? <div className="app-message success" role="status"><span>{notice}</span><button type="button" aria-label="Dismiss notification" title="Dismiss" onClick={onDismissNotice}>x</button></div> : null}
             {error ? <div className="app-message error" role="alert"><span>{error}</span><button type="button" aria-label="Dismiss error" title="Dismiss" onClick={onDismissError}>x</button></div> : null}
           </div>
+          {persistentAlerts.length ? <div className="system-alert-stack" aria-label="Local system status">{persistentAlerts.map((alert) => <section className={`system-alert ${alert.severity}`} role={alert.severity === "error" ? "alert" : "status"} key={alert.id}><strong>{alert.title}</strong><span>{alert.message}</span></section>)}</div> : null}
           {children}
         </section>
       </div>

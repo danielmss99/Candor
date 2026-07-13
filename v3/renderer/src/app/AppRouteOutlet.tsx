@@ -10,6 +10,7 @@ import { ReviewView } from "../features/review/ReviewView";
 import { SettingsView } from "../features/settings/SettingsView";
 import { StartupLoading, StartupRecovery } from "../features/startup/StartupState";
 import { shouldShowActivationPrompt } from "../features/licensing/access-policy";
+import { buildPersistentAlerts } from "../features/recovery/system-alerts";
 import {
   DEFAULT_MODEL,
   asBool,
@@ -67,6 +68,16 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
     startup,
   } = props;
   const activeCapture = asBool(runtime.captureStatus.active);
+  const storageHealth = asObject(runtime.recordingStatus.storageHealth);
+  const storageLevel = asString(storageHealth.level, "unavailable");
+  const recordingBlocked = storageLevel === "blocking" || storageLevel === "unavailable";
+  const recordControlDisabled = Boolean(operations.busy) || (recordingBlocked && !activeCapture);
+  const persistentAlerts = buildPersistentAlerts({
+    coreStatus: runtime.coreStatus,
+    captureStatus: runtime.captureStatus,
+    recordingStatus: runtime.recordingStatus,
+    quarantinedCount: meeting.quarantinedCount,
+  });
   const activeRecordingId = asString(asObject(runtime.captureStatus.activeSession).recordingId);
   const selectedRecording = meeting.recordings.find((item) => item.recordingId === meeting.selectedRecordingId);
   const selectedTitle = selectedRecording?.label || meeting.recordingTitle || "Untitled local meeting";
@@ -93,6 +104,7 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
     ["Consent", asBool(runtime.consentStatus.readyForMicAndSystemAudioRecording) ? "all ready" : asBool(runtime.consentStatus.readyForMicRecording) ? "mic ready" : "required"],
     ["Notes", meeting.notesDirty ? "unsaved" : asBool(meeting.notesStatus.savedLocally) ? "saved" : "empty"],
     ["Retention", metric(runtime.retentionStatus.policy, "manual-delete-only")],
+    ["Storage", storageLevel],
     ["External calls", metric(runtime.privacyAudit.externalCallsAttempted, "0")],
     ["Transport", metric(runtime.coreStatus.sidecarTransport, "stdio-json-lines")],
     ["Local AI", localAi.instructReady ? "model ready" : asBool(runtime.aiStatus.heuristicRecapImplemented) ? "fast fallback" : "pending"],
@@ -156,11 +168,11 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
 
   let content;
   if (navigation.view === "home") {
-    content = <HomeView recordings={meeting.recordings} activeCapture={activeCapture} combinedCaptureAvailable={combinedCaptureAvailable} busy={Boolean(operations.busy)} importAvailable={asBool(runtime.v2ImportStatus.implemented)} recordingTitle={meeting.recordingTitle} vaultBackend={runtime.vaultStatus.backend} instructReady={localAi.instructReady} verifiedModelCount={runtime.modelStatus.verifiedModelCount} aiModeStatus={localAi.aiModeStatus} onStartRecording={() => void captureActions.startPreferred()} onOpenLibrary={() => navigation.setView("library")} onImport={() => void meetingActions.importV2Folder()} onRecordingTitleChange={meeting.setRecordingTitle} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "detail")} />;
+    content = <HomeView recordings={meeting.recordings} activeCapture={activeCapture} combinedCaptureAvailable={combinedCaptureAvailable} busy={Boolean(operations.busy)} recordingBlocked={recordingBlocked} storageHealth={storageHealth} importAvailable={asBool(runtime.v2ImportStatus.implemented)} recordingTitle={meeting.recordingTitle} vaultBackend={runtime.vaultStatus.backend} instructReady={localAi.instructReady} verifiedModelCount={runtime.modelStatus.verifiedModelCount} aiModeStatus={localAi.aiModeStatus} onStartRecording={() => void captureActions.startPreferred()} onOpenLibrary={() => navigation.setView("library")} onImport={() => void meetingActions.importV2Folder()} onRecordingTitleChange={meeting.setRecordingTitle} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "detail")} />;
   } else if (navigation.view === "meeting") {
     content = <LiveMeetingView title={selectedTitle} selectedRecording={selectedRecording} selectedRecordingId={meeting.selectedRecordingId} activeRecordingId={activeRecordingId} activeCapture={activeCapture} consentReady={asBool(runtime.consentStatus.readyForMicRecording)} durationMs={timelineDurationMs} audioUrl={meetingActions.audioUrl} markers={evidenceMarkers} compactPane={meetingActions.compactMeetingPane} notesPanelMode={meetingActions.notesPanelMode} notesMarkdown={meeting.notesMarkdown} notesDirty={meeting.notesDirty} notesSaved={asBool(meeting.notesStatus.savedLocally)} recapSuggestions={recapSuggestions} aiMode={localAi.aiMode} aiModeStatus={localAi.aiModeStatus} captureStatusLabel={captureStatusLabel} jobStatusLabel={jobStatusLabel} busy={Boolean(operations.busy)} transcriptContent={transcriptContent} onReview={() => navigation.setView("review")} onReviewConsent={() => { navigation.setSettingsSection("recording"); navigation.setView("settings"); }} onLoadAudio={() => void meetingActions.loadAudio()} onMarkMoment={meetingActions.markMoment} onCompactPaneChange={meetingActions.setCompactMeetingPane} onNotesPanelModeChange={meetingActions.setNotesPanelMode} onTranscribe={() => void localAi.transcribe()} onNotesChange={meeting.updateNotes} onSaveNotes={() => void meetingActions.saveMeetingNotes()} onGenerateRecap={() => void localAi.generateRecap()} onAiModeChange={localAi.setAiMode} onStartStop={() => void captureActions.startPreferred()} />;
   } else if (navigation.view === "library") {
-    content = <LibraryView recordings={meeting.recordings} filteredRecordings={filteredRecordings} recordingTotalCount={meeting.recordingTotalCount} recordingsHaveMore={meeting.recordingsHaveMore} searchQuery={meeting.searchQuery} searchMatches={meeting.searchMatches} libraryFilter={meetingActions.libraryFilter} busy={Boolean(operations.busy)} onSearchQueryChange={meeting.setSearchQuery} onSearch={() => void meetingActions.searchRecordings()} onFilterChange={meetingActions.setLibraryFilter} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "detail")} onStartRecording={() => void captureActions.startPreferred()} onLoadMore={() => void meetingActions.loadMoreRecordings()} />;
+    content = <LibraryView recordings={meeting.recordings} filteredRecordings={filteredRecordings} recordingTotalCount={meeting.recordingTotalCount} recordingsHaveMore={meeting.recordingsHaveMore} searchQuery={meeting.searchQuery} searchMatches={meeting.searchMatches} libraryFilter={meetingActions.libraryFilter} busy={Boolean(operations.busy)} recordingBlocked={recordingBlocked} onSearchQueryChange={meeting.setSearchQuery} onSearch={() => void meetingActions.searchRecordings()} onFilterChange={meetingActions.setLibraryFilter} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "detail")} onStartRecording={() => void captureActions.startPreferred()} onLoadMore={() => void meetingActions.loadMoreRecordings()} />;
   } else if (navigation.view === "detail") {
     content = <MeetingDetailView title={selectedTitle} selectedRecording={selectedRecording} selectedRecordingId={meeting.selectedRecordingId} detailSection={navigation.detailSection} transcriptContent={transcriptContent} transcriptTotalCount={meeting.transcriptTotalCount} notesMarkdown={meeting.notesMarkdown} notesDirty={meeting.notesDirty} recap={localAi.recap} askQuestion={localAi.askQuestion} askAnswer={localAi.askAnswer} aiModeStatus={localAi.aiModeStatus} privacyReceipt={meeting.privacyReceipt} networkCapabilities={runtime.networkCapabilities} busy={Boolean(operations.busy)} onDetailSectionChange={navigation.setDetailSection} onReview={() => navigation.setView("review")} onDelete={() => void meetingActions.deleteRecording()} onNotesChange={meeting.updateNotes} onSaveNotes={() => void meetingActions.saveMeetingNotes()} onGenerateRecap={() => void localAi.generateRecap()} onAskQuestionChange={localAi.setAskQuestion} onAsk={() => void localAi.ask()} />;
   } else if (navigation.view === "review") {
@@ -172,7 +184,7 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
   }
 
   return (
-    <AppShell view={navigation.view} recordings={meeting.recordings} openMeetingIds={meetingActions.openMeetingIds} selectedRecordingId={meeting.selectedRecordingId} activeCapture={activeCapture} combinedCaptureAvailable={combinedCaptureAvailable} busy={Boolean(operations.busy)} notice={operations.notice} error={operations.error} onHome={() => navigation.setView("home")} onStartRecording={() => void captureActions.startPreferred()} onNavigate={navigation.setView} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "meeting")} onCloseMeeting={meetingActions.closeMeetingTab} onDismissNotice={() => operations.setNotice("")} onDismissError={() => operations.setError("")}>
+    <AppShell view={navigation.view} recordings={meeting.recordings} openMeetingIds={meetingActions.openMeetingIds} selectedRecordingId={meeting.selectedRecordingId} activeCapture={activeCapture} combinedCaptureAvailable={combinedCaptureAvailable} busy={recordControlDisabled} notice={operations.notice} error={operations.error} persistentAlerts={persistentAlerts} onHome={() => navigation.setView("home")} onStartRecording={() => void captureActions.startPreferred()} onNavigate={navigation.setView} onOpenRecording={(recordingId) => void meetingActions.openRecording(recordingId, "meeting")} onCloseMeeting={meetingActions.closeMeetingTab} onDismissNotice={() => operations.setNotice("")} onDismissError={() => operations.setError("")}>
       {content}
     </AppShell>
   );

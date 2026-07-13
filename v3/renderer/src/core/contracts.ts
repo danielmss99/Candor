@@ -36,10 +36,26 @@ export interface RecordingSummary {
 
 export interface RecordingPage {
   recordings: RecordingSummary[];
+  quarantinedRecordings: QuarantinedRecording[];
+  quarantinedCount: number;
   offset: number;
   limit: number;
   totalCount: number;
   hasMore: boolean;
+}
+
+export interface QuarantinedRecording {
+  recordingId: string;
+  reasonCode: string;
+  receiptPersisted: boolean;
+  contentModified: boolean;
+}
+
+export interface PersistentAlert {
+  id: string;
+  severity: "info" | "warning" | "error";
+  title: string;
+  message: string;
 }
 
 export interface TranscriptSegment {
@@ -289,8 +305,22 @@ export function parseRecordingPage(value: unknown): RecordingPage {
         updatedAtMs: numberField(row.updatedAtMs, `recordings[${index}].updatedAtMs`),
       };
     });
+  const quarantinedRecordings = optionalArray(
+    object.quarantinedRecordings,
+    "recording.durable.listPage.quarantinedRecordings",
+  ).map((item, index) => {
+    const row = expectObject(item, `recording.durable.listPage.quarantinedRecordings[${index}]`);
+    return {
+      recordingId: stringField(row.recordingId, `quarantinedRecordings[${index}].recordingId`),
+      reasonCode: stringField(row.reasonCode, `quarantinedRecordings[${index}].reasonCode`),
+      receiptPersisted: booleanField(row.receiptPersisted, `quarantinedRecordings[${index}].receiptPersisted`, false),
+      contentModified: booleanField(row.contentModified, `quarantinedRecordings[${index}].contentModified`, false),
+    };
+  });
   return {
     recordings,
+    quarantinedRecordings,
+    quarantinedCount: numberField(object.quarantinedCount, "recording.durable.listPage.quarantinedCount", quarantinedRecordings.length),
     offset: numberField(object.offset, "recording.durable.listPage.offset"),
     limit: numberField(object.limit, "recording.durable.listPage.limit"),
     totalCount: numberField(object.totalCount, "recording.durable.listPage.totalCount"),

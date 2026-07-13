@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { CandorClient } from "../../core/candor-client";
 import {
   type JsonObject,
@@ -47,20 +47,23 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const [modelStatus, setModelStatus] = useState<JsonObject>({ models: [] });
   const [transcriptionStatus, setTranscriptionStatus] = useState<JsonObject>({});
   const [retentionStatus, setRetentionStatus] = useState<JsonObject>({});
+  const [recordingStatus, setRecordingStatus] = useState<JsonObject>({});
   const [diagnosticFailures, setDiagnosticFailures] = useState<string[]>([]);
 
   const loadCritical = useCallback(async () => {
     if (!api || !client) throw new Error("Candor preload API is unavailable");
-    const [nextCore, nextConsent, nextVault, nextCapture] = await Promise.all([
+    const [nextCore, nextConsent, nextVault, nextCapture, nextRecording] = await Promise.all([
       client.object("core.status", () => api.status()),
       client.object("consent.status", () => api.consentStatus()),
       client.object("vault.status", () => api.vaultStatus()),
       client.object("capture.status", () => api.captureStatus()),
+      client.object("recording.durable.status", () => api.recordingDurableStatus()),
     ]);
     setCoreStatus(nextCore);
     setConsentStatus(nextConsent);
     setVaultStatus(nextVault);
     setCaptureStatus(nextCapture);
+    setRecordingStatus(nextRecording);
   }, [api, client]);
 
   const loadDiagnostics = useCallback(async () => {
@@ -86,13 +89,48 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
 
   const refreshCapture = useCallback(async () => {
     if (!api || !client) return;
-    const [nextCapture, nextConsent] = await Promise.all([
+    const [nextCapture, nextConsent, nextRecording] = await Promise.all([
       client.object("capture.status", () => api.captureStatus()),
       client.object("consent.status", () => api.consentStatus()),
+      client.object("recording.durable.status", () => api.recordingDurableStatus()),
     ]);
     setCaptureStatus(nextCapture);
     setConsentStatus(nextConsent);
+    setRecordingStatus(nextRecording);
   }, [api, client]);
+
+  const refreshRecordingStatus = useCallback(async () => {
+    if (!api || !client) return;
+    setRecordingStatus(await client.object(
+      "recording.durable.status",
+      () => api.recordingDurableStatus(),
+    ));
+  }, [api, client]);
+
+  useEffect(() => {
+    if (!api || !client) return;
+    const captureActive = captureStatus.active === true;
+    const refreshDelayMs = captureActive ? 1_000 : 30_000;
+    let cancelled = false;
+    let timeout = 0;
+
+    const poll = async () => {
+      try {
+        if (captureActive) await refreshCapture();
+        else await refreshRecordingStatus();
+      } catch {
+        // The last measured state remains visible. Startup recovery owns disconnect handling.
+      } finally {
+        if (!cancelled) timeout = window.setTimeout(poll, refreshDelayMs);
+      }
+    };
+
+    timeout = window.setTimeout(poll, refreshDelayMs);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeout);
+    };
+  }, [api, captureStatus.active, client, refreshCapture, refreshRecordingStatus]);
 
   const refreshModelsAndAi = useCallback(async () => {
     if (!api || !client) return;
@@ -124,12 +162,14 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
 
   const refreshVaultAndRetention = useCallback(async () => {
     if (!api || !client) return;
-    const [nextVault, nextRetention] = await Promise.all([
+    const [nextVault, nextRetention, nextRecording] = await Promise.all([
       client.object("vault.status", () => api.vaultStatus()),
       client.object("retention.status", () => api.retentionStatus()),
+      client.object("recording.durable.status", () => api.recordingDurableStatus()),
     ]);
     setVaultStatus(nextVault);
     setRetentionStatus(nextRetention);
+    setRecordingStatus(nextRecording);
   }, [api, client]);
 
   return {
@@ -149,14 +189,15 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     modelStatus,
     transcriptionStatus,
     retentionStatus,
+    recordingStatus,
     diagnosticFailures,
     setConsentStatus,
     loadCritical,
     loadDiagnostics,
     refreshCapture,
+    refreshRecordingStatus,
     refreshModelsAndAi,
     refreshPrivacyFacts,
     refreshVaultAndRetention,
   };
 }
-

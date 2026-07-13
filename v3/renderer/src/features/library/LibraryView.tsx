@@ -10,6 +10,7 @@ interface LibraryViewProps {
   searchMatches: LocalJsonValue[];
   libraryFilter: LibraryFilter;
   busy: boolean;
+  recordingBlocked: boolean;
   onSearchQueryChange: (value: string) => void;
   onSearch: () => void;
   onFilterChange: (filter: LibraryFilter) => void;
@@ -27,6 +28,7 @@ export function LibraryView({
   searchMatches,
   libraryFilter,
   busy,
+  recordingBlocked,
   onSearchQueryChange,
   onSearch,
   onFilterChange,
@@ -52,7 +54,7 @@ export function LibraryView({
             <span><small>{formatDuration(recording.audioDurationMs)}</small><em>{recording.state}</em></span>
           </button>
         ))}
-        {!filteredRecordings.length ? <EmptyState title={recordings.length ? "No meetings match" : "No meetings yet"} description={recordings.length ? "Change the filter or search term to see other local meetings." : "Start a meeting and Candor will keep its audio, transcript, and notes on this computer."} actionLabel={recordings.length ? undefined : "Start a meeting"} onAction={recordings.length ? undefined : onStartRecording} /> : null}
+        {!filteredRecordings.length ? <EmptyState title={recordings.length ? "No meetings match" : "No meetings yet"} description={recordings.length ? "Change the filter or search term to see other local meetings." : "Start a meeting and Candor will keep its audio, transcript, and notes on this computer."} actionLabel={recordings.length || recordingBlocked ? undefined : "Start a meeting"} onAction={recordings.length || recordingBlocked ? undefined : onStartRecording} /> : null}
         {recordingsHaveMore ? <button type="button" className="load-more-button" onClick={onLoadMore} disabled={busy}>Load more meetings</button> : null}
       </div>
     </section>

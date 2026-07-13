@@ -61,6 +61,12 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     onOpenRecordingSettings();
   }, [captureSession, onError, onOpenRecordingSettings]);
 
+  const refreshAfterCaptureAction = useCallback(async (refreshRecordings: boolean) => {
+    const refreshes: Array<Promise<unknown>> = [refreshCapture()];
+    if (refreshRecordings) refreshes.push(refreshLibrary(0));
+    await Promise.allSettled(refreshes);
+  }, [refreshCapture, refreshLibrary]);
+
   const startMicrophone = useCallback(async () => {
     if (!api) return;
     captureSession.requestPermission();
@@ -72,15 +78,17 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
       return;
     }
     captureSession.permissionGranted();
+    let started = false;
     await run("record", async () => {
       const result = await api.captureStartMic({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
       const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
+      started = true;
       captureSession.started(recordingId);
       onNotice(`Recording ${recordingId}`);
       onShowLive();
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
     }, "capture");
-  }, [api, captureSession, consentStatus.readyForMicRecording, failForConsent, onNotice, onShowLive, recordingTitle, refreshCapture, refreshLibrary, run]);
+    await refreshAfterCaptureAction(started);
+  }, [api, captureSession, consentStatus.readyForMicRecording, failForConsent, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
 
   const startSystem = useCallback(async () => {
     if (!api) return;
@@ -98,15 +106,17 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
       return;
     }
     captureSession.permissionGranted();
+    let started = false;
     await run("record", async () => {
       const result = await api.captureStartSystem({ label: recordingTitle.trim() || "Untitled local system audio", chunkMs: 500 });
       const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
+      started = true;
       captureSession.started(recordingId);
       onNotice("System audio recording started locally");
       onShowLive();
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
     }, "capture");
-  }, [api, captureSession, captureStatus.sources, consentStatus.readyForSystemAudioRecording, failForConsent, onError, onNotice, onShowLive, recordingTitle, refreshCapture, refreshLibrary, run]);
+    await refreshAfterCaptureAction(started);
+  }, [api, captureSession, captureStatus.sources, consentStatus.readyForSystemAudioRecording, failForConsent, onError, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
 
   const startCombined = useCallback(async () => {
     if (!api) return;
@@ -124,32 +134,41 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
       return;
     }
     captureSession.permissionGranted();
+    let started = false;
     await run("record", async () => {
       const result = await api.captureStartMicAndSystem({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
       const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
+      started = true;
       captureSession.started(recordingId);
       onNotice("Microphone and system audio recording started locally");
       onShowLive();
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
     }, "capture");
-  }, [api, captureSession, combinedCaptureAvailable, consentStatus.readyForMicAndSystemAudioRecording, failForConsent, onError, onNotice, onShowLive, recordingTitle, refreshCapture, refreshLibrary, run]);
+    await refreshAfterCaptureAction(started);
+  }, [api, captureSession, combinedCaptureAvailable, consentStatus.readyForMicAndSystemAudioRecording, failForConsent, onError, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
 
   const stop = useCallback(async () => {
     if (!api) return;
     captureSession.stopRequested();
+    let savedRecordingId = "";
     await run("stop", async () => {
       captureSession.finalizing();
       const result = await api.captureStop();
       const recordingId = asString(asObject(asObject(result).capture).recordingId);
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
       if (!recordingId) throw new Error("Recording finalization did not return a durable recording ID.");
+      savedRecordingId = recordingId;
       captureSession.saved(recordingId);
       onSelectRecording(recordingId);
       onPinRecording(recordingId);
-      await loadRecording(recordingId);
-      onNotice("Recording saved locally");
     }, "capture");
-  }, [api, captureSession, loadRecording, onNotice, onPinRecording, onSelectRecording, refreshCapture, refreshLibrary, run]);
+    await refreshAfterCaptureAction(Boolean(savedRecordingId));
+    if (!savedRecordingId) return;
+    try {
+      await loadRecording(savedRecordingId);
+      onNotice("Recording saved locally");
+    } catch {
+      onError("Recording was saved locally, but its detail view could not be loaded. Open it again from Meetings.");
+    }
+  }, [api, captureSession, loadRecording, onError, onNotice, onPinRecording, onSelectRecording, refreshAfterCaptureAction, run]);
 
   const startPreferred = useCallback(async () => {
     const action = preferredCaptureAction(
@@ -164,4 +183,3 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
 
   return { startMicrophone, startSystem, startCombined, startPreferred, stop };
 }
-

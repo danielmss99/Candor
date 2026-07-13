@@ -60,6 +60,16 @@ describe("simplified product surface", () => {
     expect(markup).toContain("+2");
   });
 
+  it("keeps recovery conditions visible and blocks only new recording starts", () => {
+    const markup = renderToStaticMarkup(
+      <DesktopShell view="home" recordings={[]} openMeetingIds={[]} selectedRecordingId="" activeCapture={false} combinedCaptureAvailable={false} busy notice="" error="" persistentAlerts={[{ id: "storage-blocking", severity: "error", title: "New recordings blocked by low storage", message: "400 MiB available. Free local space before recording again." }]} onHome={vi.fn()} onStartRecording={vi.fn()} onNavigate={vi.fn()} onOpenRecording={vi.fn()} onCloseMeeting={vi.fn()} onDismissNotice={vi.fn()} onDismissError={vi.fn()}><div>Existing meeting access remains available</div></DesktopShell>,
+    );
+    expect(markup).toContain("Local system status");
+    expect(markup).toContain("New recordings blocked by low storage");
+    expect(markup).toContain("Existing meeting access remains available");
+    expect(markup).toMatch(/class="record-action sidebar-record-action"[^>]*disabled/);
+  });
+
   it("renders a pathless, core-backed privacy receipt", () => {
     const markup = renderToStaticMarkup(<PrivacyReceipt receipt={receipt} network={network} />);
     expect(markup).toContain("Private on this computer");
