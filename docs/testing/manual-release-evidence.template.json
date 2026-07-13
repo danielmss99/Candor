@@ -1,0 +1,229 @@
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "productName": "Candor",
+    "version": "0.4.0",
+    "commit": "REPLACE_WITH_FULL_GIT_SHA",
+    "installer": {
+      "filename": "Candor Setup 0.4.0.exe",
+      "sha256": "REPLACE_WITH_SHA256",
+      "bytes": 0,
+      "signatureValid": false,
+      "timestampValid": false,
+      "evidenceRefs": ["proof://signing/windows-installer"]
+    }
+  },
+  "environment": {
+    "windowsVersion": "Windows 11 24H2 build REPLACE",
+    "architecture": "x64",
+    "machineRef": "REPLACE_REDACTED_MACHINE_REF",
+    "operatorRef": "REPLACE_REDACTED_OPERATOR_REF",
+    "testedAt": "REPLACE_WITH_ISO_TIMESTAMP"
+  },
+  "windowsMatrix": {
+    "cleanInstall": {
+      "passed": false,
+      "evidenceRefs": ["proof://windows/clean-install"]
+    },
+    "upgradeFromPreviousElectronPrerelease": {
+      "passed": false,
+      "previousVersion": "0.3.0",
+      "backupVerified": false,
+      "dataPreserved": false,
+      "migrationVerified": false,
+      "rollbackRetained": false,
+      "evidenceRefs": ["proof://windows/upgrade"]
+    },
+    "uninstallDataPreserved": {
+      "passed": false,
+      "vaultPreserved": false,
+      "evidenceRefs": ["proof://windows/uninstall"]
+    },
+    "standardUser": {
+      "passed": false,
+      "evidenceRefs": ["proof://windows/standard-user"]
+    },
+    "administrator": {
+      "passed": false,
+      "evidenceRefs": ["proof://windows/administrator"]
+    },
+    "offlineLaunch": {
+      "passed": false,
+      "outboundConnections": -1,
+      "evidenceRefs": ["proof://windows/offline-launch"]
+    },
+    "licenseServiceUnavailable": {
+      "passed": false,
+      "existingDataOpened": false,
+      "existingDataExported": false,
+      "existingDataDeleted": false,
+      "evidenceRefs": ["proof://windows/license-unavailable"]
+    },
+    "updateServiceUnavailable": {
+      "passed": false,
+      "evidenceRefs": ["proof://windows/update-unavailable"]
+    }
+  },
+  "hardwareMatrix": {
+    "microphones": [
+      {
+        "kind": "built-in",
+        "deviceRef": "REPLACE_REDACTED_DEVICE_REF",
+        "passed": false,
+        "evidenceRefs": ["proof://hardware/mic-built-in"]
+      },
+      {
+        "kind": "usb",
+        "deviceRef": "REPLACE_REDACTED_DEVICE_REF",
+        "passed": false,
+        "evidenceRefs": ["proof://hardware/mic-usb"]
+      },
+      {
+        "kind": "bluetooth",
+        "deviceRef": "REPLACE_REDACTED_DEVICE_REF",
+        "passed": false,
+        "evidenceRefs": ["proof://hardware/mic-bluetooth"]
+      }
+    ],
+    "systemAudio": {
+      "passed": false,
+      "evidenceRefs": ["proof://hardware/system-audio"]
+    },
+    "combinedAudio": {
+      "passed": false,
+      "evidenceRefs": ["proof://hardware/combined-audio"]
+    },
+    "deviceDisconnectAndSwitch": {
+      "passed": false,
+      "lossReportedAccurately": false,
+      "evidenceRefs": ["proof://hardware/device-switch"]
+    },
+    "sleepResume": {
+      "passed": false,
+      "deterministicOutcome": false,
+      "evidenceRefs": ["proof://hardware/sleep-resume"]
+    },
+    "lockUnlock": {
+      "passed": false,
+      "recordingStateAccurate": false,
+      "evidenceRefs": ["proof://hardware/lock-unlock"]
+    }
+  },
+  "recordings": [
+    {
+      "targetMinutes": 5,
+      "passed": false,
+      "actualSeconds": 0,
+      "durationDeltaSeconds": 0,
+      "configuredChunkSeconds": 5,
+      "droppedChunks": 0,
+      "fileBytes": 0,
+      "transcriptionSeconds": 0,
+      "cpuPeakPercent": 0,
+      "memoryPeakMiB": 0,
+      "storageStartBytes": 0,
+      "storageEndBytes": 0,
+      "playbackVerified": false,
+      "transcriptVerified": false,
+      "exportVerified": false,
+      "audioSha256": "REPLACE_WITH_SHA256",
+      "logRef": "artifact://logs/recording-5m.json",
+      "recoveryResult": "not-required",
+      "forceKillRecovery": false,
+      "recoveredLossSeconds": null,
+      "evidenceRefs": ["proof://duration/5-minute"]
+    },
+    {
+      "targetMinutes": 30,
+      "passed": false,
+      "actualSeconds": 0,
+      "durationDeltaSeconds": 0,
+      "configuredChunkSeconds": 5,
+      "droppedChunks": 0,
+      "fileBytes": 0,
+      "transcriptionSeconds": 0,
+      "cpuPeakPercent": 0,
+      "memoryPeakMiB": 0,
+      "storageStartBytes": 0,
+      "storageEndBytes": 0,
+      "playbackVerified": false,
+      "transcriptVerified": false,
+      "exportVerified": false,
+      "audioSha256": "REPLACE_WITH_SHA256",
+      "logRef": "artifact://logs/recording-30m.json",
+      "recoveryResult": "pending",
+      "forceKillRecovery": false,
+      "recoveredLossSeconds": null,
+      "evidenceRefs": ["proof://duration/30-minute"]
+    },
+    {
+      "targetMinutes": 60,
+      "passed": false,
+      "actualSeconds": 0,
+      "durationDeltaSeconds": 0,
+      "configuredChunkSeconds": 5,
+      "droppedChunks": 0,
+      "fileBytes": 0,
+      "transcriptionSeconds": 0,
+      "cpuPeakPercent": 0,
+      "memoryPeakMiB": 0,
+      "storageStartBytes": 0,
+      "storageEndBytes": 0,
+      "playbackVerified": false,
+      "transcriptVerified": false,
+      "exportVerified": false,
+      "audioSha256": "REPLACE_WITH_SHA256",
+      "logRef": "artifact://logs/recording-60m.json",
+      "recoveryResult": "not-required",
+      "forceKillRecovery": false,
+      "recoveredLossSeconds": null,
+      "evidenceRefs": ["proof://duration/60-minute"]
+    },
+    {
+      "targetMinutes": 180,
+      "passed": false,
+      "actualSeconds": 0,
+      "durationDeltaSeconds": 0,
+      "configuredChunkSeconds": 5,
+      "droppedChunks": 0,
+      "fileBytes": 0,
+      "transcriptionSeconds": 0,
+      "cpuPeakPercent": 0,
+      "memoryPeakMiB": 0,
+      "storageStartBytes": 0,
+      "storageEndBytes": 0,
+      "playbackVerified": false,
+      "transcriptVerified": false,
+      "exportVerified": false,
+      "audioSha256": "REPLACE_WITH_SHA256",
+      "logRef": "artifact://logs/recording-180m.json",
+      "recoveryResult": "not-required",
+      "forceKillRecovery": false,
+      "recoveredLossSeconds": null,
+      "evidenceRefs": ["proof://duration/180-minute"]
+    }
+  ],
+  "coreHangRecovery": {
+    "passed": false,
+    "captureOutcomeExplicit": false,
+    "committedDataPreserved": false,
+    "evidenceRefs": ["proof://recovery/core-hang"]
+  },
+  "diskPressure": {
+    "passed": false,
+    "falseSavedStatePrevented": false,
+    "evidenceRefs": ["proof://recovery/disk-pressure"]
+  },
+  "accessibility": {
+    "keyboardRecordReviewExport": false,
+    "focusRestoration": false,
+    "highContrast": false,
+    "reducedMotion": false,
+    "zoom200": false,
+    "evidenceRefs": ["proof://accessibility/manual"]
+  },
+  "diagnostics": {
+    "contentAndSecretsExcluded": false,
+    "evidenceRefs": ["proof://diagnostics/redaction"]
+  }
+}

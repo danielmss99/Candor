@@ -487,8 +487,8 @@ p {
 
 .system-alert {
   display: grid;
-  grid-template-columns: minmax(190px, max-content) minmax(0, 1fr);
-  align-items: baseline;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
   gap: 10px 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -496,6 +496,13 @@ p {
   color: var(--text);
   line-height: 1.4;
   padding: 10px 12px;
+}
+
+.system-alert > div:first-child {
+  display: grid;
+  grid-template-columns: minmax(190px, max-content) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px 16px;
 }
 
 .system-alert strong {
@@ -526,6 +533,28 @@ p {
 
 .system-alert.error strong {
   color: var(--error);
+}
+
+.system-alert-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.system-alert-actions button {
+  min-height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.system-alert-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-on-accent);
 }
 
 .page-view {
@@ -2780,6 +2809,11 @@ p {
   }
 
   .system-alert {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .system-alert > div:first-child {
     grid-template-columns: 1fr;
     gap: 3px;
   }

@@ -22,7 +22,7 @@ export function registerImportIpc(dependencies: IpcDependencies): void {
     const selectedPath = await realpath(selected);
     const selectedStat = await stat(selectedPath);
     if (!selectedStat.isDirectory()) throw new Error("Selected v2 import target is not a folder.");
-    const response = await dependencies.core.call("import.v2.fromFolder", { sourcePath: selectedPath }, 120_000);
+    const response = await dependencies.core.call("import.v2.startFromFolder", { sourcePath: selectedPath });
     if (!response.ok) throw new Error(response.error?.message ?? "import.v2.fromFolder failed");
     return {
       ...objectValue(response.result ?? null),

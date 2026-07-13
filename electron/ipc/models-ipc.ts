@@ -7,8 +7,8 @@ import { validModelId } from "../security/input-limits.js";
 import { validateIpcSender } from "../security/validate-sender.js";
 import type { IpcDependencies } from "./ipc-types.js";
 
-async function requireResult(dependencies: IpcDependencies, method: string, params: JsonValue, timeoutMs: number) {
-  const response = await dependencies.core.call(method, params, timeoutMs);
+async function requireResult(dependencies: IpcDependencies, method: string, params: JsonValue) {
+  const response = await dependencies.core.call(method, params);
   if (!response.ok) throw new Error(response.error?.message ?? `${method} failed`);
   return response.result ?? null;
 }
@@ -42,7 +42,6 @@ export function registerModelsIpc(dependencies: IpcDependencies): void {
       dependencies,
       "models.importStart",
       { modelId, expectedBytes: selectedStat.size, replace },
-      15_000,
     );
     const importId = stringField(start, "importId");
     if (!importId) throw new Error("candor-core did not return a model import id.");
@@ -56,10 +55,9 @@ export function registerModelsIpc(dependencies: IpcDependencies): void {
           dependencies,
           "models.importChunk",
           { importId, dataBase64: buffer.toString("base64") },
-          30_000,
         );
       }
-      const finish = await requireResult(dependencies, "models.importFinish", { importId }, 120_000);
+      const finish = await requireResult(dependencies, "models.importFinish.start", { importId });
       return {
         ...objectValue(finish),
         canceled: false,
@@ -69,7 +67,7 @@ export function registerModelsIpc(dependencies: IpcDependencies): void {
         keyMaterialExposedToRenderer: false,
       };
     } catch (error) {
-      await dependencies.core.call("models.importAbort", { importId }, 15_000).catch(() => undefined);
+      await dependencies.core.call("models.importAbort", { importId }).catch(() => undefined);
       throw error;
     }
   });
@@ -119,9 +117,8 @@ export function registerModelsIpc(dependencies: IpcDependencies): void {
 
     const result = await requireResult(
       dependencies,
-      "ai.instructAssetsImportFromPath",
+      "ai.instructAssetsImport.start",
       { assetKind, sourcePath: selectedPath, expectedSha256, replace: input.replace === true },
-      10 * 60_000,
     );
     return {
       ...objectValue(result),

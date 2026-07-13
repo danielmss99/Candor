@@ -4,20 +4,15 @@ import path from "node:path";
 import { launchCandor, type CandorElectronSession } from "./candor-electron";
 
 const expectedPreloadSurface = {
-  core: [
-    "aiAskHeuristic", "aiAskInstruct", "aiInstructAssetImportFromFile", "aiInstructAssetsStatus",
-    "aiInstructStatus", "aiRecapHeuristic", "aiRecapInstruct", "aiSchedulerStatus", "aiStatus",
-    "capabilities", "captureDevices", "captureStartMic", "captureStartMicAndSystem", "captureStartSystem",
-    "captureStatus", "captureStop", "consentAcknowledge", "consentStatus", "exportCreate", "exportSaveLocal",
-    "modelsImportFromFile", "modelsListLocal", "modelsStatus", "modelsVerifyLocal", "ping", "privacyAuditSnapshot",
-    "privacyCapabilities", "recordingDelete", "recordingDurableListPage", "recordingDurableRead",
-    "recordingDurableReadAudioChunk", "recordingDurableReplayManifest", "recordingDurableSearch",
-    "recordingDurableStatus", "recordingDurableTranscriptPage", "recordingNotesRead", "recordingNotesSave",
-    "recordingPrivacyReceipt", "retentionStatus", "status", "transcriptionRunLocal", "transcriptionStatus",
-    "updateStatus", "v2ImportFromFolder", "v2ImportStatus", "vaultOpenLocal", "vaultStatus", "version",
-  ],
-  license: ["activate", "deactivateDevice", "portalInfo", "startTrial", "status"],
-  shell: ["diagnosticsPreview", "diagnosticsSaveLocal", "externalNavigationDisabled", "networkPolicy", "supervisorStatus"],
+  app: ["acknowledgeJob", "getCapabilities", "getConnectionStatus", "getJob", "getStatus", "getVersion", "listJobs", "prepareDiagnostics", "retryCore", "saveDiagnostics"],
+  capture: ["acknowledgeConsent", "getConsent", "getDevices", "getStatus", "recover", "start", "stop"],
+  meetings: ["delete", "get", "getImportStatus", "getNotes", "getPrivacyReceipt", "getReplayManifest", "getStorageStatus", "getTranscript", "importLegacy", "list", "readAudioChunk", "search", "updateNotes"],
+  transcript: ["cancel", "getStatus", "start"],
+  ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getEnhancedAssetsStatus", "getEnhancedStatus", "getStatus", "getWorkloadStatus", "listSpeechModels", "verifySpeechModel"],
+  exports: ["cancel", "create", "saveCompleted"],
+  settings: ["getNetworkPolicy", "getPrivacyAudit", "getRetentionStatus", "getStorageStatus", "getUpdateStatus", "openLocalStorage"],
+  licensing: ["activate", "deactivate", "getPortalInfo", "getStatus", "startTrial"],
+  events: ["subscribe"],
 };
 
 function violationSummary(violations: Array<{ id: string; impact?: string | null; nodes: unknown[] }>): string {
@@ -81,8 +76,11 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
       webSecurity: true,
     });
 
-    const renderer = await session.page.evaluate(() => {
-      const candor = window.candor as unknown as Record<string, Record<string, unknown>>;
+    const renderer = await session.page.evaluate((domainNames) => {
+      const candor = window.candor as unknown as Record<string, Record<string, unknown> | number>;
+      const domains = Object.fromEntries(
+        domainNames.map((name) => [name, Object.keys(candor[name] as Record<string, unknown>).sort()]),
+      );
       return {
         globals: {
           require: typeof Reflect.get(window, "require"),
@@ -90,17 +88,17 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
           Buffer: typeof Reflect.get(window, "Buffer"),
         },
         topLevel: Object.keys(candor).sort(),
-        core: Object.keys(candor.core).sort(),
-        license: Object.keys(candor.license).sort(),
-        shell: Object.keys(candor.shell).sort(),
+        version: candor.version,
+        domains,
       };
-    });
+    }, Object.keys(expectedPreloadSurface));
     expect(renderer.globals).toEqual({ require: "undefined", process: "undefined", Buffer: "undefined" });
-    expect(renderer.topLevel).toEqual(["core", "license", "shell"]);
-    expect(renderer.core).toEqual([...expectedPreloadSurface.core].sort());
-    expect(renderer.license).toEqual([...expectedPreloadSurface.license].sort());
-    expect(renderer.shell).toEqual([...expectedPreloadSurface.shell].sort());
-    expect(renderer.core).not.toEqual(expect.arrayContaining(["invoke", "openPath", "readFile", "runProcess", "writeFile"]));
+    expect(renderer.version).toBe(2);
+    expect(renderer.topLevel).toEqual([...Object.keys(expectedPreloadSurface), "version"].sort());
+    for (const [domain, methods] of Object.entries(expectedPreloadSurface)) {
+      expect(renderer.domains[domain]).toEqual([...methods].sort());
+      expect(renderer.domains[domain]).not.toEqual(expect.arrayContaining(["invoke", "openPath", "readFile", "runProcess", "writeFile"]));
+    }
 
     const initialUrl = session.page.url();
     const popupResult = await session.page.evaluate(() => window.open("https://example.com") === null);

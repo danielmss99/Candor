@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isCandorProcessName } from "./m0-process-identity.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -88,6 +89,10 @@ function parsePktapPacket(line) {
   const metadata = line.match(/\((.*)\)\s+(?:IP|IP6)\b/)?.[1] ?? "";
   const processMatch = metadata.match(/(?:^|,\s*)proc\s+([^,]*?):(\d+)(?:,|$)/);
   const effectiveProcessMatch = metadata.match(/(?:^|,\s*)eproc\s+([^,]*?):(\d+)(?:,|$)/);
+  const flowIdMatch = metadata.match(/(?:^|,\s*)flowid\s+(0x[0-9a-f]+)(?:,|$)/i);
+  const networkMatch = line.match(/\b(IP6?)\s+(\S+)\s+>\s+(\S+):\s/);
+  const tcpFlagsMatch = line.match(/\bFlags\s+\[([^\]]+)\]/);
+  const payloadLengthMatch = line.match(/\blength\s+(\d+)(?:\s|$)/);
   return {
     line,
     processName: processMatch?.[1]?.trim() ?? null,
@@ -97,7 +102,191 @@ function parsePktapPacket(line) {
       ? Number.parseInt(effectiveProcessMatch[2], 10)
       : null,
     direction: /(?:^|,\s*)out(?:,|$)/.test(metadata) ? "out" : null,
+    flowId: flowIdMatch?.[1]?.toLowerCase() ?? null,
+    networkProtocol: networkMatch?.[1] ?? null,
+    sourceEndpoint: networkMatch?.[2]?.toLowerCase() ?? null,
+    destinationEndpoint: networkMatch?.[3]?.toLowerCase() ?? null,
+    transportProtocol: tcpFlagsMatch ? "TCP" : /:\s+UDP(?:,|\s|$)/.test(line) ? "UDP" : null,
+    tcpFlags: tcpFlagsMatch?.[1] ?? null,
+    payloadLength: payloadLengthMatch
+      ? Number.parseInt(payloadLengthMatch[1], 10)
+      : null,
   };
+}
+
+function hasPrimaryAttribution(packet) {
+  return (
+    Number.isInteger(packet.pid) &&
+    typeof packet.processName === "string" &&
+    (packet.processName.length > 0 || packet.pid === 0)
+  );
+}
+
+function hasEffectiveAttribution(packet) {
+  return (
+    Number.isInteger(packet.effectivePid) &&
+    typeof packet.effectiveProcessName === "string" &&
+    (packet.effectiveProcessName.length > 0 || packet.effectivePid === 0)
+  );
+}
+
+function hasNamedProcessAttribution(packet) {
+  return (
+    (Number.isInteger(packet.pid) && packet.pid > 0 && packet.processName?.length > 0) ||
+    (Number.isInteger(packet.effectivePid) &&
+      packet.effectivePid > 0 &&
+      packet.effectiveProcessName?.length > 0)
+  );
+}
+
+function isExplicitKernelAttribution(packet) {
+  return (
+    (packet.pid === 0 && packet.processName === "") ||
+    (packet.effectivePid === 0 && packet.effectiveProcessName === "")
+  );
+}
+
+function isNonZeroPktapFlowId(value) {
+  return (
+    typeof value === "string" &&
+    /^0x[0-9a-f]+$/.test(value) &&
+    !/^0x0+$/.test(value)
+  );
+}
+
+function flowCorrelationKey(packet) {
+  if (
+    !isNonZeroPktapFlowId(packet.flowId) ||
+    !packet.networkProtocol ||
+    !packet.transportProtocol ||
+    !packet.sourceEndpoint ||
+    !packet.destinationEndpoint
+  ) {
+    return null;
+  }
+  return [
+    packet.flowId,
+    packet.networkProtocol,
+    packet.transportProtocol,
+    packet.sourceEndpoint,
+    packet.destinationEndpoint,
+  ].join("|");
+}
+
+function processOwner(packet) {
+  return {
+    processName: packet.processName,
+    pid: packet.pid,
+    effectiveProcessName: packet.effectiveProcessName,
+    effectivePid: packet.effectivePid,
+  };
+}
+
+function processOwnerSignature(owner) {
+  return JSON.stringify([
+    owner.processName ?? "",
+    owner.pid ?? "",
+    owner.effectiveProcessName ?? "",
+    owner.effectivePid ?? "",
+  ]);
+}
+
+function isProcesslessKernelControlCandidate(packet) {
+  return (
+    !hasPrimaryAttribution(packet) &&
+    !hasEffectiveAttribution(packet) &&
+    packet.direction === "out" &&
+    packet.transportProtocol === "TCP" &&
+    flowCorrelationKey(packet) !== null &&
+    typeof packet.tcpFlags === "string" &&
+    packet.tcpFlags.includes("R") &&
+    packet.payloadLength === 0
+  );
+}
+
+const FLOW_CORRELATION_REASON =
+  "matched named non-Candor flow by PKTAP flow ID and endpoint tuple; zero-length outbound TCP reset";
+const FLOW_CORRELATION_EVIDENCE_LIMIT = 25;
+
+function flowOwnerEvidence(packet, packetIndex) {
+  return {
+    packetIndex,
+    ...processOwner(packet),
+    direction: packet.direction,
+    flowId: packet.flowId,
+    networkProtocol: packet.networkProtocol,
+    transportProtocol: packet.transportProtocol,
+    sourceEndpoint: packet.sourceEndpoint,
+    destinationEndpoint: packet.destinationEndpoint,
+    tcpFlags: packet.tcpFlags,
+    payloadLength: packet.payloadLength,
+  };
+}
+
+function correlateKernelControlPackets(packets, applicationProcessIds = new Set()) {
+  const backgroundOwners = new Map();
+  const ambiguousFlows = new Set();
+
+  for (const [arrayIndex, packet] of packets.entries()) {
+    const key = flowCorrelationKey(packet);
+    const applicationAttributed =
+      applicationProcessIds.has(packet.pid) ||
+      applicationProcessIds.has(packet.effectivePid) ||
+      isCandorProcessName(packet.processName) ||
+      isCandorProcessName(packet.effectiveProcessName);
+    if (
+      !key ||
+      packet.direction !== "out" ||
+      packet.transportProtocol !== "TCP" ||
+      applicationAttributed ||
+      !hasNamedProcessAttribution(packet)
+    ) {
+      continue;
+    }
+
+    const owner = processOwner(packet);
+    const existing = backgroundOwners.get(key);
+    if (
+      existing &&
+      processOwnerSignature(existing.owner) !== processOwnerSignature(owner)
+    ) {
+      ambiguousFlows.add(key);
+      backgroundOwners.delete(key);
+      continue;
+    }
+    if (!ambiguousFlows.has(key) && !existing) {
+      const packetIndex = Number.isInteger(packet.packetIndex) ? packet.packetIndex : arrayIndex;
+      backgroundOwners.set(key, {
+        owner,
+        packetIndex,
+        packetEvidence: flowOwnerEvidence(packet, packetIndex),
+      });
+    }
+  }
+
+  return packets.flatMap((packet, arrayIndex) => {
+    if (!isProcesslessKernelControlCandidate(packet)) return [];
+    const key = flowCorrelationKey(packet);
+    const matched = key ? backgroundOwners.get(key) : null;
+    const packetIndex = Number.isInteger(packet.packetIndex) ? packet.packetIndex : arrayIndex;
+    if (!matched || ambiguousFlows.has(key) || matched.packetIndex >= packetIndex) return [];
+    return [
+      {
+        ...packet,
+        packetIndex,
+        reason: FLOW_CORRELATION_REASON,
+        matchedProcess: matched.owner,
+        matchedFlow: {
+          flowId: packet.flowId,
+          networkProtocol: packet.networkProtocol,
+          transportProtocol: packet.transportProtocol,
+          sourceEndpoint: packet.sourceEndpoint,
+          destinationEndpoint: packet.destinationEndpoint,
+        },
+        matchedPacket: matched.packetEvidence,
+      },
+    ];
+  });
 }
 
 function parsePfRuleStats(text) {
@@ -157,23 +346,27 @@ function processTreeSnapshot(rootPid) {
   return processes.filter((process) => descendants.has(process.pid));
 }
 
-function isCandorProcessName(name) {
-  const normalized = String(name ?? "").trim().toLowerCase();
-  return (
-    normalized === "candor" ||
-    normalized === "candor-core" ||
-    normalized.startsWith("candor helper")
-  );
-}
-
 function runPacketParserSelfTest() {
+  if (
+    !["Candor", "candor-core", "Candor Helper (Renderer)"].every(isCandorProcessName) ||
+    isCandorProcessName("nsurlsessiond")
+  ) {
+    throw new Error("Candor process identity classifier self-test failed");
+  }
   const parsed = parsePktapPacket(
-    "00:00:00.000000 (en0, proc Candor Helper (Renderer):77619, out, so) IP 10.0.0.1.1 > 1.1.1.1.443",
+    "00:00:00.000000 (proc Candor Helper (Renderer):77619, out, so, flowid 0x1234) IP 10.0.0.1.1 > 1.1.1.1.443: Flags [P.], length 42",
   );
   if (
     parsed.processName !== "Candor Helper (Renderer)" ||
     parsed.pid !== 77619 ||
-    parsed.direction !== "out"
+    parsed.direction !== "out" ||
+    parsed.flowId !== "0x1234" ||
+    parsed.networkProtocol !== "IP" ||
+    parsed.sourceEndpoint !== "10.0.0.1.1" ||
+    parsed.destinationEndpoint !== "1.1.1.1.443" ||
+    parsed.transportProtocol !== "TCP" ||
+    parsed.tcpFlags !== "P." ||
+    parsed.payloadLength !== 42
   ) {
     throw new Error("macOS PKTAP packet parser self-test failed");
   }
@@ -223,6 +416,72 @@ function runPacketParserSelfTest() {
     kernelPacket.direction !== "out"
   ) {
     throw new Error("macOS PKTAP kernel-attribution parser self-test failed");
+  }
+
+  const namedBackgroundPacket = parsePktapPacket(
+    "00:00:00.000000 (proc nsurlsessiond:244, out, so, flowid 0xabc123) IP 192.168.64.2.58230 > 17.253.5.154.443: Flags [P.], length 80",
+  );
+  const matchingKernelReset = parsePktapPacket(
+    "00:00:00.000001 (out, flowid 0xabc123) IP 192.168.64.2.58230 > 17.253.5.154.443: Flags [R], length 0",
+  );
+  const unrelatedKernelReset = parsePktapPacket(
+    "00:00:00.000002 (out, flowid 0xabc124) IP 192.168.64.2.58230 > 17.253.5.154.443: Flags [R], length 0",
+  );
+  const ordinaryProcesslessPacket = parsePktapPacket(
+    "00:00:00.000003 (out, flowid 0xabc123) IP 192.168.64.2.58230 > 17.253.5.154.443: Flags [P.], length 1",
+  );
+  const correlations = correlateKernelControlPackets([
+    namedBackgroundPacket,
+    matchingKernelReset,
+    unrelatedKernelReset,
+    ordinaryProcesslessPacket,
+  ]);
+  if (
+    correlations.length !== 1 ||
+    correlations[0].line !== matchingKernelReset.line ||
+    correlations[0].matchedProcess.processName !== "nsurlsessiond" ||
+    correlations[0].matchedProcess.pid !== 244
+  ) {
+    throw new Error("macOS PKTAP kernel-control flow correlation self-test failed");
+  }
+
+  const secondOwnerPacket = parsePktapPacket(
+    "00:00:00.000006 (proc mDNSResponder:99, out, so, flowid 0xabc123) IP 192.168.64.2.58230 > 17.253.5.154.443: Flags [P.], length 40",
+  );
+  if (
+    correlateKernelControlPackets([
+      namedBackgroundPacket,
+      secondOwnerPacket,
+      matchingKernelReset,
+    ]).length !== 0
+  ) {
+    throw new Error("macOS PKTAP correlation must reject ambiguous-owner flows");
+  }
+
+  if (
+    correlateKernelControlPackets([matchingKernelReset, namedBackgroundPacket]).length !== 0
+  ) {
+    throw new Error("macOS PKTAP correlation must reject future-only flow ownership");
+  }
+
+  const paddedZeroOwner = parsePktapPacket(
+    "00:00:00.000007 (proc nsurlsessiond:244, out, so, flowid 0x00000000) IP 192.168.64.2.58231 > 17.253.5.154.443: Flags [P.], length 80",
+  );
+  const paddedZeroReset = parsePktapPacket(
+    "00:00:00.000008 (out, flowid 0x00000000) IP 192.168.64.2.58231 > 17.253.5.154.443: Flags [R], length 0",
+  );
+  if (correlateKernelControlPackets([paddedZeroOwner, paddedZeroReset]).length !== 0) {
+    throw new Error("macOS PKTAP correlation must reject all-zero flow identifiers");
+  }
+
+  const namedCandorPacket = parsePktapPacket(
+    "00:00:00.000004 (proc Candor:900, out, so, flowid 0xc0de) IP 10.0.0.2.60000 > 1.1.1.1.443: Flags [P.], length 80",
+  );
+  const candorKernelReset = parsePktapPacket(
+    "00:00:00.000005 (out, flowid 0xc0de) IP 10.0.0.2.60000 > 1.1.1.1.443: Flags [R], length 0",
+  );
+  if (correlateKernelControlPackets([namedCandorPacket, candorKernelReset]).length !== 0) {
+    throw new Error("macOS PKTAP correlation must never reclassify a Candor flow");
   }
 }
 
@@ -606,7 +865,7 @@ try {
     try {
       const parseResult = spawnSync(
         "tcpdump",
-        ["-n", "-k", "NPD", "-r", captureFilePath, "tcp or udp"],
+        ["-n", "-k", "NPDfF", "-r", captureFilePath, "tcp or udp"],
         {
           cwd: repoRoot,
           encoding: "utf8",
@@ -638,7 +897,10 @@ try {
 const smokeProof = existsSync(smokeProofPath)
   ? JSON.parse(readFileSync(smokeProofPath, "utf8"))
   : null;
-const parsedPackets = packets.map(parsePktapPacket);
+const parsedPackets = packets.map((line, packetIndex) => ({
+  ...parsePktapPacket(line),
+  packetIndex,
+}));
 const captureStats = parseTcpdumpCaptureStats(tcpdumpError);
 const observedProcessIds = new Set(observedProcesses.keys());
 const observedProcessList = [...observedProcesses.values()].sort((left, right) => left.pid - right.pid);
@@ -649,22 +911,26 @@ const escapedApplicationPackets = parsedPackets.filter(
     isCandorProcessName(packet.processName) ||
     isCandorProcessName(packet.effectiveProcessName),
 );
-const kernelAttributedPackets = parsedPackets.filter(
-  (packet) =>
-    (packet.pid === 0 && packet.processName === "") ||
-    (packet.effectivePid === 0 && packet.effectiveProcessName === ""),
+const explicitKernelAttributedPackets = parsedPackets.filter(isExplicitKernelAttribution);
+const flowCorrelatedKernelControlPackets = correlateKernelControlPackets(
+  parsedPackets,
+  observedProcessIds,
 );
+const flowCorrelatedPacketIndexes = new Set(
+  flowCorrelatedKernelControlPackets.map((packet) => packet.packetIndex),
+);
+const kernelAttributedPackets = [
+  ...explicitKernelAttributedPackets,
+  ...flowCorrelatedKernelControlPackets,
+];
 const packetsWithoutProcessMetadata = parsedPackets.filter(
   (packet) => {
-    const primaryAttributed =
-      Number.isInteger(packet.pid) &&
-      typeof packet.processName === "string" &&
-      (packet.processName.length > 0 || packet.pid === 0);
-    const effectiveAttributed =
-      Number.isInteger(packet.effectivePid) &&
-      typeof packet.effectiveProcessName === "string" &&
-      (packet.effectiveProcessName.length > 0 || packet.effectivePid === 0);
-    return packet.direction !== "out" || (!primaryAttributed && !effectiveAttributed);
+    return (
+      packet.direction !== "out" ||
+      (!hasPrimaryAttribution(packet) &&
+        !hasEffectiveAttribution(packet) &&
+        !flowCorrelatedPacketIndexes.has(packet.packetIndex))
+    );
   },
 );
 const processIdentityMismatches = observedProcessList.filter(
@@ -683,7 +949,8 @@ const packetAttribution = {
     stderr: captureParseStderr.trim(),
     rawCaptureRemoved: captureFileRemoved,
   },
-  metadataSource: "macOS PKTAP process name, PID, and direction",
+  metadataSource:
+    "macOS PKTAP process name, PID, direction, flow identifier, and flags with exact flow correlation for kernel-generated zero-length TCP resets",
   blockedMetadataSource: managedPf
     ? "PF per-rule packet counters scoped to an isolated execution GID"
     : null,
@@ -702,6 +969,12 @@ const packetAttribution = {
     .slice(0, 25),
   kernelAttributedPacketCount: kernelAttributedPackets.length,
   kernelAttributedPacketSamples: kernelAttributedPackets.slice(0, 25),
+  flowCorrelatedKernelControlPacketCount: flowCorrelatedKernelControlPackets.length,
+  flowCorrelationEvidenceLimit: FLOW_CORRELATION_EVIDENCE_LIMIT,
+  flowCorrelatedKernelControlPacketSamples: flowCorrelatedKernelControlPackets.slice(
+    0,
+    FLOW_CORRELATION_EVIDENCE_LIMIT,
+  ),
   packetsWithoutProcessMetadata: packetsWithoutProcessMetadata.slice(0, 25),
   observedProcesses: observedProcessList,
   processIdentityMismatches: processIdentityMismatches.slice(0, 25),
@@ -720,6 +993,7 @@ const packetAttribution = {
     captureStats.kernelDropped === 0 &&
     captureStats.captured === parsedPackets.length &&
     packetOverflowCount === 0 &&
+    flowCorrelatedKernelControlPackets.length <= FLOW_CORRELATION_EVIDENCE_LIMIT &&
     packetsWithoutProcessMetadata.length === 0 &&
     observedProcessList.length > 0 &&
     processIdentityMismatches.length === 0 &&
@@ -772,6 +1046,7 @@ const proof = {
     mode: "temporary-pcapng-file",
     snapshotLengthBytes: 256,
     metadataFilter: captureMetadataFilter,
+    metadataDisplay: "NPDfF",
     rawCaptureRemoved: captureFileRemoved,
   },
   smokeProofPath,
@@ -801,7 +1076,7 @@ if (managedPf && packetAttribution.applicationBaselinePacketCount !== 0) {
   throw new Error(`macOS PF application counters did not reset to zero. Proof written to ${networkProofPath}`);
 }
 if (!packetAttribution.complete) {
-  throw new Error(`macOS PKTAP process attribution was incomplete. Proof written to ${networkProofPath}`);
+  throw new Error(`macOS PKTAP attribution was incomplete. Proof written to ${networkProofPath}`);
 }
 if (smokeExit.code !== 0) {
   throw new Error(`macOS packaged smoke failed under confirmed deny layer. Proof written to ${networkProofPath}`);

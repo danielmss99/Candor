@@ -1,3 +1,4 @@
+import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -12,6 +13,7 @@ const exe = process.platform === "win32" ? "candor-core.exe" : "candor-core";
 const corePath = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.join(repoRoot, "crates", "candor-core", "target", "debug", exe);
+const smokeRpcTimeoutMs = 20_000;
 
 if (!existsSync(corePath)) {
   throw new Error(`candor-core debug binary not found: ${corePath}`);
@@ -47,7 +49,6 @@ function spawnCore(dataDir) {
 
   const lines = createInterface({ input: child.stdout });
   const pending = new Map();
-  let nextId = 1;
 
   child.stderr.on("data", (chunk) => {
     process.stderr.write(`[candor-core stderr] ${chunk}`);
@@ -78,13 +79,14 @@ function spawnCore(dataDir) {
   });
 
   function call(method, params = null) {
-    const id = nextId++;
-    const payload = JSON.stringify({ id, method, params });
+    const request = createVersionedCoreRequest(method, params);
+    const id = request.requestId;
+    const payload = JSON.stringify(request);
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         pending.delete(id);
-        reject(new Error(`timeout waiting for ${method}`));
-      }, 5000);
+        reject(new Error(`timeout waiting for ${method} after ${smokeRpcTimeoutMs} ms`));
+      }, smokeRpcTimeoutMs);
       pending.set(id, {
         timeout,
         resolve: (value) => {

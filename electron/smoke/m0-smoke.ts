@@ -38,8 +38,7 @@ function options(): M0SmokeOptions {
   return activeOptions;
 }
 
-const callCore = (method: string, params: JsonValue = null, timeoutMs = 5000) =>
-  options().core.call(method, params, timeoutMs);
+const callCore = (method: string, params: JsonValue = null) => options().core.call(method, params);
 const ensureCoreHandshake = () => options().core.ensureHandshake();
 const supervisorSnapshot = () => options().core.snapshot();
 const requestCoreShutdown = () => options().core.shutdown();
@@ -119,7 +118,7 @@ function delay(ms: number): Promise<void> {
 
 async function seedDesignSmokeMeeting(): Promise<JsonValue> {
   const started = requireCoreResult(
-    await callCore("recording.durable.start", { label: "Product Strategy Sync" }, 15000),
+    await callCore("recording.durable.start", { label: "Product Strategy Sync" }),
     "recording.durable.start",
   );
   const recordingId = stringField(started, "recordingId");
@@ -144,7 +143,6 @@ async function seedDesignSmokeMeeting(): Promise<JsonValue> {
           durationMs: segment.durationMs,
           confidence: 0.97,
         },
-        15000,
       ),
       "recording.durable.writeTranscriptSegment",
     );
@@ -156,12 +154,11 @@ async function seedDesignSmokeMeeting(): Promise<JsonValue> {
         recordingId,
         markdown: "- Export must remain clean and editable\n- Keep transcript and notes visible together\n- Link marked moments to evidence",
       },
-      15000,
     ),
     "recording.notes.save",
   );
   requireCoreResult(
-    await callCore("recording.durable.finish", { recordingId }, 15000),
+    await callCore("recording.durable.finish", { recordingId }),
     "recording.durable.finish",
   );
   return {
@@ -224,7 +221,7 @@ async function provePackagedDocumentExports(recordingId: string): Promise<JsonVa
 
   for (const format of ["docx", "pdf"] as const) {
     const result = requireCoreResult(
-      await callCore("export.create", { recordingId, format, report, options }, 30_000),
+      await callCore("export.create", { recordingId, format, report, options }),
       `export.create:${format}`,
     );
     const decoded = decodeLocalExportResult(format, result);
@@ -390,7 +387,7 @@ async function captureSmokeView(
             advanced.click();
             await settle();
           }
-          clicked = await clickExact('.settings-layout nav button', 'Privacy and diagnostics');
+          clicked = await clickExact('.settings-layout nav button', 'Diagnostics');
           if (clicked) {
             await clickExact('button', 'Prepare preview');
             for (let index = 0; index < 80; index += 1) {
@@ -506,12 +503,11 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
       (async () => {
         const root = globalThis;
         const candor = root.candor;
-        const core = candor?.core ?? {};
-        const license = candor?.license ?? {};
-        const shell = candor?.shell ?? {};
-        const coreKeys = Object.keys(core).sort();
-        const licenseKeys = Object.keys(license).sort();
-        const shellKeys = Object.keys(shell).sort();
+        const domainNames = ["app", "capture", "meetings", "transcript", "ai", "exports", "settings", "licensing", "events"];
+        const domains = Object.fromEntries(domainNames.map((name) => [name, candor?.[name] ?? {}]));
+        const coreKeys = domainNames.flatMap((name) => Object.keys(domains[name]).map((key) => name + "." + key)).sort();
+        const licenseKeys = Object.keys(domains.licensing).sort();
+        const shellKeys = Object.keys(domains.app).sort();
         const forbiddenCoreKeys = [
           "callCore",
           "modelsImportStart",
@@ -531,22 +527,22 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
         const forbiddenGlobals = ["require", "process", "ipcRenderer", "electron"];
         let invalidInputError = null;
         try {
-          await core.recordingDurableRead("../private-vault");
+          await domains.meetings.get("../private-vault");
         } catch (error) {
           invalidInputError = String(error?.message ?? error);
         }
         return {
           attempted: true,
           candorPresent: Boolean(candor && typeof candor === "object"),
-          coreFrozen: Boolean(candor?.core && Object.isFrozen(candor.core)),
-          licenseFrozen: Boolean(candor?.license && Object.isFrozen(candor.license)),
-          shellFrozen: Boolean(candor?.shell && Object.isFrozen(candor.shell)),
+          coreFrozen: domainNames.every((name) => Object.isFrozen(domains[name])),
+          licenseFrozen: Object.isFrozen(domains.licensing),
+          shellFrozen: Object.isFrozen(domains.app),
           coreKeys,
           licenseKeys,
           shellKeys,
-          forbiddenCoreKeysPresent: forbiddenCoreKeys.filter((key) => key in core),
-          forbiddenLicenseKeysPresent: forbiddenLicenseKeys.filter((key) => key in license),
-          forbiddenShellKeysPresent: forbiddenShellKeys.filter((key) => key in shell),
+          forbiddenCoreKeysPresent: forbiddenCoreKeys.filter((key) => coreKeys.some((candidate) => candidate.endsWith("." + key))),
+          forbiddenLicenseKeysPresent: forbiddenLicenseKeys.filter((key) => key in domains.licensing),
+          forbiddenShellKeysPresent: forbiddenShellKeys.filter((key) => key in domains.app),
           forbiddenGlobalsPresent: forbiddenGlobals.filter((key) => key in root),
           nodeRequireAvailable: typeof root.require === "function",
           nodeProcessAvailable: typeof root.process !== "undefined",
@@ -730,41 +726,41 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
     const rendererBridge = (await windowRef.webContents.executeJavaScript(
       `
         (async () => {
-          if (!window.candor?.core) {
+          if (window.candor?.version !== 2) {
             throw new Error("Candor preload bridge is not present.");
           }
           const [status, capabilities, auditSnapshot, updateStatus, importStatus, consentStatus, aiStatus, instructAssetsStatus, instructStatus, schedulerStatus, transcriptionStatus, vaultStatusBeforeOpen, licenseStatus, licensePortalInfo, diagnosticPreview] = await Promise.all([
-            window.candor.core.status(),
-            window.candor.core.capabilities(),
-            window.candor.core.privacyAuditSnapshot(),
-            window.candor.core.updateStatus(),
-            window.candor.core.v2ImportStatus(),
-            window.candor.core.consentStatus(),
-            window.candor.core.aiStatus(),
-            window.candor.core.aiInstructAssetsStatus(),
-            window.candor.core.aiInstructStatus(),
-            window.candor.core.aiSchedulerStatus(),
-            window.candor.core.transcriptionStatus(),
-            window.candor.core.vaultStatus(),
-            window.candor.license.status(),
-            window.candor.license.portalInfo(),
-            window.candor.shell.diagnosticsPreview()
+            window.candor.app.getStatus(),
+            window.candor.app.getCapabilities(),
+            window.candor.settings.getPrivacyAudit(),
+            window.candor.settings.getUpdateStatus(),
+            window.candor.meetings.getImportStatus(),
+            window.candor.capture.getConsent(),
+            window.candor.ai.getStatus(),
+            window.candor.ai.getEnhancedAssetsStatus(),
+            window.candor.ai.getEnhancedStatus(),
+            window.candor.ai.getWorkloadStatus(),
+            window.candor.transcript.getStatus(),
+            window.candor.settings.getStorageStatus(),
+            window.candor.licensing.getStatus(),
+            window.candor.licensing.getPortalInfo(),
+            window.candor.app.prepareDiagnostics()
           ]);
           const vaultOpenLocal = vaultStatusBeforeOpen.localOpenAvailable
-            ? await window.candor.core.vaultOpenLocal()
+            ? await window.candor.settings.openLocalStorage()
             : {
                 skipped: true,
                 reason: "native-os-key-storage-unavailable",
                 keyMaterialExposedToRenderer: false,
                 rawPathExposed: false
               };
-          const vaultStatus = await window.candor.core.vaultStatus();
-          const supervisorStatus = await window.candor.shell.supervisorStatus();
+          const vaultStatus = await window.candor.settings.getStorageStatus();
+          const supervisorStatus = await window.candor.app.getConnectionStatus();
           return {
             preloadBridgePresent: true,
             shell: {
-              externalNavigationDisabled: window.candor.shell.externalNavigationDisabled,
-              networkPolicy: window.candor.shell.networkPolicy
+              externalNavigationDisabled: true,
+              networkPolicy: "disabled-by-default"
             },
             supervisorStatus,
             status,
@@ -863,7 +859,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
         ["review", "Review report"],
         ["export", "Export report"],
         ["settings", "Settings"],
-        ["advanced", "Privacy and diagnostics"],
+        ["advanced", "Diagnostics"],
       ];
       for (const [view, navLabel] of views) {
         rendererViewScreenshots.push(await captureSmokeView(windowRef, view, navLabel));

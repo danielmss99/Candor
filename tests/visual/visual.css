@@ -1,0 +1,17 @@
+.visual-evidence-root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.visual-evidence-root .transcript-stream {
+  height: 100%;
+}
+
+.visual-evidence-root .library-list {
+  min-height: 0;
+}
+
+.visual-evidence-root[data-visual-scenario="review-compact"] .review-mode {
+  grid-template-columns: 140px minmax(300px, 1fr) minmax(230px, 250px);
+}

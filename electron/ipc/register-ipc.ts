@@ -6,6 +6,7 @@ import { registerLicensingIpc } from "./licensing-ipc.js";
 import { registerModelsIpc } from "./models-ipc.js";
 import { registerDiagnosticsIpc } from "./diagnostics-ipc.js";
 import { registerRecordingsIpc } from "./recordings-ipc.js";
+import { registerJobsIpc } from "./jobs-ipc.js";
 
 export function registerIpcHandlers(dependencies: IpcDependencies): void {
   registerCoreIpc(dependencies);
@@ -15,4 +16,5 @@ export function registerIpcHandlers(dependencies: IpcDependencies): void {
   registerLicensingIpc(dependencies);
   registerDiagnosticsIpc(dependencies);
   registerRecordingsIpc(dependencies);
+  registerJobsIpc(dependencies);
 }

@@ -1,3 +1,4 @@
+import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -35,7 +36,6 @@ const child = spawn(corePath, [], {
 
 const lines = createInterface({ input: child.stdout });
 const pending = new Map();
-let nextId = 1;
 
 child.stderr.on("data", (chunk) => {
   process.stderr.write(`[candor-core stderr] ${chunk}`);
@@ -57,8 +57,9 @@ lines.on("line", (line) => {
 });
 
 function call(method, params = null) {
-  const id = nextId++;
-  const payload = JSON.stringify({ id, method, params });
+  const request = createVersionedCoreRequest(method, params);
+  const id = request.requestId;
+  const payload = JSON.stringify(request);
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pending.delete(id);

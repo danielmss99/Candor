@@ -3,7 +3,7 @@ import { asBool, asObject, asString, type JsonObject, type RecordingSummary } fr
 import type { useCaptureSession } from "./useCaptureSession";
 import type { RunOperation } from "../jobs/useOperationRunner";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 type CaptureSession = ReturnType<typeof useCaptureSession>;
 
 interface UseCaptureActionsOptions {
@@ -93,7 +93,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     captureSession.permissionGranted();
     let started = false;
     await run("record", async () => {
-      const result = await api.captureStartMic({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
+      const result = await api.capture.start({ source: "microphone", label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
       const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
@@ -121,7 +121,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     captureSession.permissionGranted();
     let started = false;
     await run("record", async () => {
-      const result = await api.captureStartSystem({ label: recordingTitle.trim() || "Untitled local system audio", chunkMs: 500 });
+      const result = await api.capture.start({ source: "system-audio", label: recordingTitle.trim() || "Untitled local system audio", chunkMs: 500 });
       const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
@@ -149,7 +149,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     captureSession.permissionGranted();
     let started = false;
     await run("record", async () => {
-      const result = await api.captureStartMicAndSystem({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
+      const result = await api.capture.start({ source: "microphone-and-system-audio", label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
       const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
@@ -165,7 +165,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     let savedRecordingId = "";
     await run("stop", async () => {
       captureSession.finalizing();
-      const result = await api.captureStop();
+      const result = await api.capture.stop();
       const recordingId = asString(asObject(asObject(result).capture).recordingId);
       if (!recordingId) throw new Error("Recording finalization did not return a durable recording ID.");
       savedRecordingId = recordingId;

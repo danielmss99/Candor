@@ -327,16 +327,16 @@ function assertSmokePayload(payload) {
   ) {
     throw new Error("Renderer isolation probe did not receive a pathless structured input error.");
   }
-  if (!payload.rendererIsolationProbe?.coreKeys?.includes("transcriptionRunLocal")) {
+  if (!payload.rendererIsolationProbe?.coreKeys?.includes("transcript.start")) {
     throw new Error("Renderer isolation probe did not find the typed transcription command.");
   }
-  if (!payload.rendererIsolationProbe?.coreKeys?.includes("modelsImportFromFile")) {
+  if (!payload.rendererIsolationProbe?.coreKeys?.includes("ai.chooseSpeechModel")) {
     throw new Error("Renderer isolation probe did not find the pathless model import command.");
   }
-  if (!payload.rendererIsolationProbe?.coreKeys?.includes("exportSaveLocal")) {
+  if (!payload.rendererIsolationProbe?.coreKeys?.includes("exports.saveCompleted")) {
     throw new Error("Renderer isolation probe did not find the pathless local document save command.");
   }
-  for (const key of ["aiInstructAssetsStatus", "aiInstructAssetImportFromFile", "aiInstructStatus", "aiRecapInstruct", "aiAskInstruct"]) {
+  for (const key of ["ai.getEnhancedAssetsStatus", "ai.chooseEnhancedComponent", "ai.getEnhancedStatus", "ai.generateRecap", "ai.ask"]) {
     if (!payload.rendererIsolationProbe?.coreKeys?.includes(key)) {
       throw new Error(`Renderer isolation probe did not find the typed local instruct command: ${key}.`);
     }
@@ -344,12 +344,12 @@ function assertSmokePayload(payload) {
   if (payload.rendererIsolationProbe?.shellKeys?.includes("openExternal")) {
     throw new Error("Renderer isolation probe found an exposed external navigation command.");
   }
-  for (const key of ["diagnosticsPreview", "diagnosticsSaveLocal"]) {
+  for (const key of ["prepareDiagnostics", "saveDiagnostics"]) {
     if (!payload.rendererIsolationProbe?.shellKeys?.includes(key)) {
       throw new Error(`Renderer isolation probe did not find the exact diagnostic command: ${key}.`);
     }
   }
-  for (const key of ["status", "activate", "startTrial", "deactivateDevice", "portalInfo"]) {
+  for (const key of ["getStatus", "activate", "startTrial", "deactivate", "getPortalInfo"]) {
     if (!payload.rendererIsolationProbe?.licenseKeys?.includes(key)) {
       throw new Error(`Renderer isolation probe did not find the typed license command: ${key}.`);
     }
@@ -529,7 +529,7 @@ function assertSmokePayload(payload) {
     payload.rendererVisualState?.bodyTextCharacters < 200 ||
     payload.rendererVisualState?.aiModeVisible !== true ||
     payload.rendererVisualState?.selectedMode !== "Quality" ||
-    payload.rendererVisualState?.statusText !== "Fast fallback, model unavailable" ||
+    payload.rendererVisualState?.statusText !== "Fast local fallback" ||
     payload.rendererVisualState?.aiSuggestionsTabActivated !== true ||
     payload.rendererVisualState?.notesTabRestored !== true ||
     payload.rendererVisualState?.currentView !== "meeting" ||

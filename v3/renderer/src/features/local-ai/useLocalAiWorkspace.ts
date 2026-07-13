@@ -17,8 +17,9 @@ import {
 } from "../../core/contracts";
 import type { useLocalJob } from "../ai/useLocalJob";
 import type { RunOperation } from "../jobs/useOperationRunner";
+import { waitForJob } from "../../core/jobs";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 type LocalJob = ReturnType<typeof useLocalJob>;
 
 interface UseLocalAiWorkspaceOptions {
@@ -79,10 +80,10 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const useInstructModel = aiMode === "quality" && instructReady;
   const models = useMemo(() => parseModels(modelStatus), [modelStatus]);
   const aiModeStatus = aiMode === "fast"
-    ? "Heuristic local"
+    ? "Fast local analysis"
     : instructReady
-      ? "Hash-verified local model"
-      : "Fast fallback, model unavailable";
+      ? "Best local model"
+      : "Fast local fallback";
 
   const resetMeetingAi = useCallback(() => {
     setRecap(null);
@@ -98,8 +99,13 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const importModel = useCallback(async () => {
     if (!api) return;
     await run("import", async () => {
-      const result = asObject(await api.modelsImportFromFile({ modelId: selectedModel, replace: true }));
-      setNotice(asBool(result.canceled) ? "Import canceled" : asBool(result.imported) ? `${selectedModel} verified and installed` : "Model import finished");
+      const accepted = asObject(await api.ai.chooseSpeechModel(selectedModel));
+      if (asBool(accepted.canceled)) {
+        setNotice("Import canceled");
+        return;
+      }
+      const result = asObject(await waitForJob(api, accepted));
+      setNotice(asBool(result.imported) ? `${selectedModel} verified and installed` : "Model import finished");
       await refreshModelsAndAi();
     }, "local-model", "model-import");
   }, [api, refreshModelsAndAi, run, selectedModel, setNotice]);
@@ -122,13 +128,17 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     setNotice("");
     setInstructAssetError("");
     try {
-      const result = asObject(await api.aiInstructAssetImportFromFile({ assetKind: instructAssetKind, expectedSha256, replace: true }));
-      if (asBool(result.canceled)) {
+      const accepted = asObject(await api.ai.chooseEnhancedComponent({
+        component: instructAssetKind === "runner" ? "engine" : "model",
+        expectedSha256,
+      }));
+      if (asBool(accepted.canceled)) {
         localJob.cancel(requestId);
         localJob.reset();
         setNotice("Local AI import canceled");
         return;
       }
+      const result = asObject(await waitForJob(api, accepted));
       if (!asBool(result.imported) || !asBool(result.integrityVerified)) {
         throw new Error("Local AI asset was not verified.");
       }
@@ -150,7 +160,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const verifyModel = useCallback(async () => {
     if (!api) return;
     await run("verify", async () => {
-      const result = asObject(await api.modelsVerifyLocal({ modelId: selectedModel }));
+      const accepted = await api.ai.verifySpeechModel(selectedModel);
+      const result = asObject(await waitForJob(api, accepted));
       setNotice(asBool(result.verified) ? `${selectedModel} verified` : `${selectedModel}: ${asString(result.failureCode, "not ready")}`);
       await refreshModelsAndAi();
     }, "local-model");
@@ -159,7 +170,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const transcribe = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("transcribe", async () => {
-      await api.transcriptionRunLocal({ recordingId: selectedRecordingId, channel: selectedTrack || undefined, modelId: selectedModel, language: "en" });
+      const accepted = await api.transcript.start({ recordingId: selectedRecordingId, channel: selectedTrack || undefined, modelId: selectedModel, language: "en" });
+      await waitForJob(api, accepted);
       setNotice("Transcription updated");
       await Promise.all([
         loadRecording(selectedRecordingId, true),
@@ -172,13 +184,9 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const generateRecap = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("recap", async () => {
-      const nextRecap = client
-        ? await client.recap(() => useInstructModel
-          ? api.aiRecapInstruct(selectedRecordingId, 512)
-          : api.aiRecapHeuristic(selectedRecordingId))
-        : parseRecap(useInstructModel
-          ? await api.aiRecapInstruct(selectedRecordingId, 512)
-          : await api.aiRecapHeuristic(selectedRecordingId));
+      const accepted = await api.ai.generateRecap(selectedRecordingId, useInstructModel ? "best" : "fast");
+      const result = await waitForJob(api, accepted);
+      const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
       setRecap(nextRecap);
       setNotice(useInstructModel ? "Local model recap generated" : aiMode === "quality" ? "Fast local recap generated because the model is unavailable" : "Fast local recap generated");
       await refreshPrivacyReceipt();
@@ -193,13 +201,9 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       return;
     }
     await run("ask", async () => {
-      const answer = client
-        ? await client.answer(() => useInstructModel
-          ? api.aiAskInstruct(selectedRecordingId, question, 256)
-          : api.aiAskHeuristic(selectedRecordingId, question))
-        : parseAnswer(useInstructModel
-          ? await api.aiAskInstruct(selectedRecordingId, question, 256)
-          : await api.aiAskHeuristic(selectedRecordingId, question));
+      const accepted = await api.ai.ask(selectedRecordingId, question, useInstructModel ? "best" : "fast");
+      const result = await waitForJob(api, accepted);
+      const answer = client ? await client.answer(async () => result) : parseAnswer(result);
       setAskAnswer(answer);
       setNotice(useInstructModel ? "Local model answer generated" : "Fast local answer generated");
       await refreshPrivacyReceipt();

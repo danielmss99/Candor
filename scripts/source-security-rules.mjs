@@ -8,6 +8,8 @@ export const requiredSourcePaths = [
   "electron/core/json.ts",
   "electron/core/core-client.ts",
   "electron/core/core-errors.ts",
+  "electron/core/capture-recovery-store.ts",
+  "electron/core/operation-registry.ts",
   "electron/core/protocol.ts",
   "electron/core/renderer-boundary.ts",
   "electron/core/request-registry.ts",
@@ -17,12 +19,14 @@ export const requiredSourcePaths = [
   "electron/ipc/diagnostics-ipc.ts",
   "electron/ipc/export-ipc.ts",
   "electron/ipc/import-ipc.ts",
+  "electron/ipc/jobs-ipc.ts",
   "electron/ipc/ipc-types.ts",
   "electron/ipc/licensing-ipc.ts",
   "electron/ipc/models-ipc.ts",
   "electron/ipc/register-ipc.ts",
   "electron/security/input-limits.ts",
   "electron/security/validate-core-input.ts",
+  "electron/security/validate-private-core-input.ts",
   "electron/security/validate-sender.ts",
   "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
@@ -31,6 +35,7 @@ export const requiredSourcePaths = [
   "electron/window/navigation-policy.ts",
   "electron/license-service.ts",
   "scripts/build-release-core.mjs",
+  "scripts/core-rpc-envelope.mjs",
   "scripts/electron-dev.mjs",
   "v3/renderer/index.html",
   "v3/renderer/src/candor-api.d.ts",
@@ -198,6 +203,36 @@ export function evaluateSourceSecurity(input) {
     "core shutdown is denied while capture is active or changing state",
   );
   includes(
+    "electron-main:operation-registry",
+    "electron/core/operation-registry.ts",
+    "export const CORE_OPERATIONS",
+    "core operations are registered in one runtime-validated allowlist",
+  );
+  includes(
+    "electron-main:private-input-validation",
+    "electron/security/validate-private-core-input.ts",
+    "export function validatePrivateCoreParams",
+    "private core operations have explicit input contracts",
+  );
+  includes(
+    "electron-main:capture-recovery-allowlist",
+    "electron/core/capture-recovery-store.ts",
+    "SAFE_METHOD.test",
+    "capture recovery metadata is reduced to safe allowlisted fields",
+  );
+  includes(
+    "electron-main:jobs-ipc-sender-validation",
+    "electron/ipc/jobs-ipc.ts",
+    "validateIpcSender",
+    "job IPC validates the sender before calling the core",
+  );
+  includes(
+    "proof-clients:versioned-core-envelope",
+    "scripts/core-rpc-envelope.mjs",
+    "createVersionedCoreRequest",
+    "proof clients use the same versioned request envelope as Electron",
+  );
+  includes(
     "diagnostics:allowlisted-report",
     "electron/diagnostics/diagnostic-report.ts",
     'contentPolicy: "metadata-only-no-user-content"',
@@ -219,13 +254,20 @@ export function evaluateSourceSecurity(input) {
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [
     ["context-bridge", 'contextBridge.exposeInMainWorld("candor"'],
-    ["core-frozen", "core: Object.freeze("],
-    ["license-frozen", "license: Object.freeze("],
-    ["shell-frozen", "shell: Object.freeze("],
-    ["named-core-channel", 'ipcRenderer.invoke("candor-core:core-status")'],
-    ["durable-status", 'ipcRenderer.invoke("candor-core:recording-durable-status")'],
-    ["diagnostics-preview", 'ipcRenderer.invoke("candor-diagnostics:preview")'],
-    ["diagnostics-save", 'ipcRenderer.invoke("candor-diagnostics:saveLocal")'],
+    ["api-version", "version: 2 as const"],
+    ["app-frozen", "app: Object.freeze("],
+    ["capture-frozen", "capture: Object.freeze("],
+    ["meetings-frozen", "meetings: Object.freeze("],
+    ["transcript-frozen", "transcript: Object.freeze("],
+    ["ai-frozen", "ai: Object.freeze("],
+    ["exports-frozen", "exports: Object.freeze("],
+    ["settings-frozen", "settings: Object.freeze("],
+    ["licensing-frozen", "licensing: Object.freeze("],
+    ["events-frozen", "events: Object.freeze("],
+    ["named-status-channel", 'invoke("candor-app:getStatus")'],
+    ["durable-status", 'invoke("candor-core:recording-durable-status")'],
+    ["diagnostics-preview", 'invoke("candor-diagnostics:preview")'],
+    ["diagnostics-save", 'invoke("candor-diagnostics:saveLocal")'],
   ]) {
     includes(`preload:${id}`, preload, pattern, `preload requires ${id}`);
   }
@@ -238,6 +280,7 @@ export function evaluateSourceSecurity(input) {
   );
   excludes("preload:no-selected-path", preload, /selectedPath|destinationPath/, "renderer never receives selected paths");
   excludes("preload:no-generic-core-channel", preload, /candor-core:call|\bcallCore\b|\ballowedMethods\b/, "preload uses fixed product channels only");
+  excludes("preload:no-infrastructure-groups", preload, /\b(?:core|shell|license):\s*Object\.freeze/, "preload exposes product domains instead of infrastructure groups");
   add(
     "electron-main:no-generic-core-channel",
     !/candor-core:call/.test(electronRuntimeSource),
@@ -265,10 +308,16 @@ export function evaluateSourceSecurity(input) {
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";
   includes(
-    "renderer-api:durable-status",
+    "renderer-api:v2",
     rendererDeclaration,
-    "recordingDurableStatus(): Promise<JsonValue>",
-    "renderer declaration matches durable status preload operation",
+    "interface CandorApiV2",
+    "renderer declaration matches the domain preload API version",
+  );
+  includes(
+    "renderer-api:meetings-storage-status",
+    rendererDeclaration,
+    "getStorageStatus(): Promise<JsonValue>",
+    "renderer declaration includes the meeting storage status operation",
   );
   excludes(
     "renderer-api:no-generic-capabilities",

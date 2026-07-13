@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CandorClient } from "../../core/candor-client";
 import {
+  asArray,
+  asObject,
+  asString,
   type JsonObject,
   type LocalJsonValue,
   type NetworkCapabilities,
 } from "../../core/contracts";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 
 interface DiagnosticTask {
   label: string;
@@ -28,6 +31,7 @@ export async function runBackgroundDiagnostics(tasks: DiagnosticTask[]): Promise
 
 export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient | null) {
   const [coreStatus, setCoreStatus] = useState<JsonObject>({});
+  const [connectionStatus, setConnectionStatus] = useState<JsonObject>({});
   const [capabilities, setCapabilities] = useState<JsonObject>({});
   const [privacyAudit, setPrivacyAudit] = useState<JsonObject>({});
   const [networkCapabilities, setNetworkCapabilities] = useState<NetworkCapabilities>({
@@ -49,38 +53,83 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const [retentionStatus, setRetentionStatus] = useState<JsonObject>({});
   const [recordingStatus, setRecordingStatus] = useState<JsonObject>({});
   const [diagnosticFailures, setDiagnosticFailures] = useState<string[]>([]);
+  const [jobs, setJobs] = useState<JsonObject[]>([]);
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
 
   const loadCritical = useCallback(async () => {
     if (!api || !client) throw new Error("Candor preload API is unavailable");
-    const [nextCore, nextConsent, nextVault, nextCapture, nextRecording] = await Promise.all([
-      client.object("core.status", () => api.status()),
-      client.object("consent.status", () => api.consentStatus()),
-      client.object("vault.status", () => api.vaultStatus()),
-      client.object("capture.status", () => api.captureStatus()),
-      client.object("recording.durable.status", () => api.recordingDurableStatus()),
+    const [nextCore, nextConsent, nextVault, nextCapture, nextRecording, nextJobs] = await Promise.all([
+      client.object("core.status", () => api.app.getStatus()),
+      client.object("consent.status", () => api.capture.getConsent()),
+      client.object("vault.status", () => api.settings.getStorageStatus()),
+      client.object("capture.status", () => api.capture.getStatus()),
+      client.object("recording.durable.status", () => api.meetings.getStorageStatus()),
+      client.object("jobs.list", () => api.app.listJobs()),
     ]);
     setCoreStatus(nextCore);
+    setConnectionStatus(asObject(nextCore.connection));
     setConsentStatus(nextConsent);
     setVaultStatus(nextVault);
     setCaptureStatus(nextCapture);
     setRecordingStatus(nextRecording);
+    setJobs(asArray(nextJobs.jobs).map(asObject));
   }, [api, client]);
+
+  useEffect(() => {
+    if (!api) return;
+    return api.events.subscribe("jobs.changed", (payload) => {
+      const next = asObject(payload as LocalJsonValue);
+      const jobId = asString(next.jobId);
+      if (!jobId) return;
+      setJobs((current) => [next, ...current.filter((job) => asString(job.jobId) !== jobId)]);
+    });
+  }, [api]);
+
+  useEffect(() => {
+    if (!api) return;
+    let cancelled = false;
+    let timer = 0;
+    const poll = async () => {
+      try {
+        const next = asObject(await api.app.getConnectionStatus());
+        if (!cancelled) setConnectionStatus(next);
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => void poll(), 1_000);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [api]);
+
+  const recoverCapture = useCallback(async () => {
+    if (!api) return;
+    setRecoveryBusy(true);
+    try {
+      await api.capture.recover();
+      await loadCritical();
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [api, loadCritical]);
 
   const loadDiagnostics = useCallback(async () => {
     if (!api || !client) return { failed: ["preload"], completed: 0 };
     const tasks: DiagnosticTask[] = [
-      { label: "capabilities", run: async () => setCapabilities(await client.object("core.capabilities", () => api.capabilities())) },
-      { label: "privacy audit", run: async () => setPrivacyAudit(await client.object("privacy.auditSnapshot", () => api.privacyAuditSnapshot())) },
+      { label: "capabilities", run: async () => setCapabilities(await client.object("core.capabilities", () => api.app.getCapabilities())) },
+      { label: "privacy audit", run: async () => setPrivacyAudit(await client.object("privacy.auditSnapshot", () => api.settings.getPrivacyAudit())) },
       { label: "network policy", run: async () => setNetworkCapabilities(await client.networkCapabilities()) },
-      { label: "updates", run: async () => setUpdateStatus(await client.object("updates.status", () => api.updateStatus())) },
-      { label: "v2 import", run: async () => setV2ImportStatus(await client.object("import.v2.status", () => api.v2ImportStatus())) },
-      { label: "local AI", run: async () => setAiStatus(await client.object("ai.status", () => api.aiStatus())) },
-      { label: "local AI assets", run: async () => setInstructAssetsStatus(await client.object("ai.instructAssetsStatus", () => api.aiInstructAssetsStatus())) },
-      { label: "local AI readiness", run: async () => setInstructStatus(await client.object("ai.instructStatus", () => api.aiInstructStatus())) },
-      { label: "model scheduler", run: async () => setSchedulerStatus(await client.object("ai.schedulerStatus", () => api.aiSchedulerStatus())) },
+      { label: "updates", run: async () => setUpdateStatus(await client.object("updates.status", () => api.settings.getUpdateStatus())) },
+      { label: "legacy import", run: async () => setV2ImportStatus(await client.object("import.v2.status", () => api.meetings.getImportStatus())) },
+      { label: "local AI", run: async () => setAiStatus(await client.object("ai.status", () => api.ai.getStatus())) },
+      { label: "local AI assets", run: async () => setInstructAssetsStatus(await client.object("ai.instructAssetsStatus", () => api.ai.getEnhancedAssetsStatus())) },
+      { label: "local AI readiness", run: async () => setInstructStatus(await client.object("ai.instructStatus", () => api.ai.getEnhancedStatus())) },
+      { label: "model scheduler", run: async () => setSchedulerStatus(await client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus())) },
       { label: "speech models", run: async () => setModelStatus({ models: await client.models() as unknown as LocalJsonValue }) },
-      { label: "transcription", run: async () => setTranscriptionStatus(await client.object("transcription.status", () => api.transcriptionStatus())) },
-      { label: "retention", run: async () => setRetentionStatus(await client.object("retention.status", () => api.retentionStatus())) },
+      { label: "transcription", run: async () => setTranscriptionStatus(await client.object("transcription.status", () => api.transcript.getStatus())) },
+      { label: "retention", run: async () => setRetentionStatus(await client.object("retention.status", () => api.settings.getRetentionStatus())) },
     ];
     const result = await runBackgroundDiagnostics(tasks);
     setDiagnosticFailures(result.failed);
@@ -90,20 +139,31 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const refreshCapture = useCallback(async () => {
     if (!api || !client) return;
     const [nextCapture, nextConsent, nextRecording] = await Promise.all([
-      client.object("capture.status", () => api.captureStatus()),
-      client.object("consent.status", () => api.consentStatus()),
-      client.object("recording.durable.status", () => api.recordingDurableStatus()),
+      client.object("capture.status", () => api.capture.getStatus()),
+      client.object("consent.status", () => api.capture.getConsent()),
+      client.object("recording.durable.status", () => api.meetings.getStorageStatus()),
     ]);
     setCaptureStatus(nextCapture);
     setConsentStatus(nextConsent);
     setRecordingStatus(nextRecording);
   }, [api, client]);
 
+  const retryConnection = useCallback(async () => {
+    if (!api) return;
+    setRecoveryBusy(true);
+    try {
+      setConnectionStatus(asObject(await api.app.retryCore()));
+      await refreshCapture();
+    } finally {
+      setRecoveryBusy(false);
+    }
+  }, [api, refreshCapture]);
+
   const refreshRecordingStatus = useCallback(async () => {
     if (!api || !client) return;
     setRecordingStatus(await client.object(
       "recording.durable.status",
-      () => api.recordingDurableStatus(),
+      () => api.meetings.getStorageStatus(),
     ));
   }, [api, client]);
 
@@ -136,11 +196,11 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     if (!api || !client) return;
     const [nextModels, nextAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription] = await Promise.all([
       client.models(),
-      client.object("ai.status", () => api.aiStatus()),
-      client.object("ai.instructAssetsStatus", () => api.aiInstructAssetsStatus()),
-      client.object("ai.instructStatus", () => api.aiInstructStatus()),
-      client.object("ai.schedulerStatus", () => api.aiSchedulerStatus()),
-      client.object("transcription.status", () => api.transcriptionStatus()),
+      client.object("ai.status", () => api.ai.getStatus()),
+      client.object("ai.instructAssetsStatus", () => api.ai.getEnhancedAssetsStatus()),
+      client.object("ai.instructStatus", () => api.ai.getEnhancedStatus()),
+      client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus()),
+      client.object("transcription.status", () => api.transcript.getStatus()),
     ]);
     setModelStatus({ models: nextModels as unknown as LocalJsonValue });
     setAiStatus(nextAi);
@@ -153,7 +213,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const refreshPrivacyFacts = useCallback(async () => {
     if (!api || !client) return;
     const [nextPrivacy, nextCapabilities] = await Promise.all([
-      client.object("privacy.auditSnapshot", () => api.privacyAuditSnapshot()),
+      client.object("privacy.auditSnapshot", () => api.settings.getPrivacyAudit()),
       client.networkCapabilities(),
     ]);
     setPrivacyAudit(nextPrivacy);
@@ -163,9 +223,9 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const refreshVaultAndRetention = useCallback(async () => {
     if (!api || !client) return;
     const [nextVault, nextRetention, nextRecording] = await Promise.all([
-      client.object("vault.status", () => api.vaultStatus()),
-      client.object("retention.status", () => api.retentionStatus()),
-      client.object("recording.durable.status", () => api.recordingDurableStatus()),
+      client.object("vault.status", () => api.settings.getStorageStatus()),
+      client.object("retention.status", () => api.settings.getRetentionStatus()),
+      client.object("recording.durable.status", () => api.meetings.getStorageStatus()),
     ]);
     setVaultStatus(nextVault);
     setRetentionStatus(nextRetention);
@@ -174,6 +234,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
 
   return {
     coreStatus,
+    connectionStatus,
     capabilities,
     privacyAudit,
     networkCapabilities,
@@ -191,6 +252,8 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     retentionStatus,
     recordingStatus,
     diagnosticFailures,
+    jobs,
+    recoveryBusy,
     setConsentStatus,
     loadCritical,
     loadDiagnostics,
@@ -199,5 +262,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     refreshModelsAndAi,
     refreshPrivacyFacts,
     refreshVaultAndRetention,
+    recoverCapture,
+    retryConnection,
   };
 }

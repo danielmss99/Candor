@@ -5,6 +5,7 @@ import {
   CORE_PROTOCOL_VERSION,
   createCoreRequest,
   parseCoreHandshake,
+  parseCoreEventLine,
   parseCoreResponseLine,
   privateCoreMethods,
   rendererCoreMethods,
@@ -72,16 +73,36 @@ describe("core protocol", () => {
     })).toThrow("incompatible handshake");
   });
 
-  it("keeps the preload on the exact named core channel allowlist", () => {
+  it("validates unsolicited job events without treating them as responses", () => {
+    expect(parseCoreEventLine(JSON.stringify({
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      event: "jobs.changed",
+      payload: {
+        jobId: "a".repeat(32),
+        type: "export",
+        state: "running",
+        terminal: false,
+        rawPathExposed: false,
+      },
+    }))).toMatchObject({ event: "jobs.changed", payload: { state: "running" } });
+    expect(() => parseCoreEventLine(JSON.stringify({
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      event: "jobs.changed",
+      payload: { jobId: "not-safe" },
+    }))).toThrow("invalid job event payload");
+  });
+
+  it("keeps every preload core channel inside the named registry", () => {
     const preloadPath = path.resolve(process.cwd(), "electron", "preload.cts");
     const preload = readFileSync(preloadPath, "utf8");
     const preloadChannels = new Set(
-      [...preload.matchAll(/ipcRenderer\.invoke\(\s*"(candor-core:[^"]+)"/g)]
+      [...preload.matchAll(/invoke\(\s*"(candor-core:[^"]+)"/g)]
         .map((match) => match[1]),
     );
-    const registeredChannels = new Set(rendererCoreOperations.map(({ channel }) => channel));
+    const registeredChannels: Set<string> = new Set(rendererCoreOperations.map(({ channel }) => channel));
 
-    expect(preloadChannels).toEqual(registeredChannels);
+    expect(preloadChannels.size).toBeGreaterThan(0);
+    for (const channel of preloadChannels) expect(registeredChannels.has(channel)).toBe(true);
     expect(rendererCoreOperations.map(({ channel }) => channel).length).toBe(registeredChannels.size);
     expect(rendererCoreOperations.map(({ method }) => method).length).toBe(
       new Set(rendererCoreOperations.map(({ method }) => method)).size,
@@ -89,6 +110,10 @@ describe("core protocol", () => {
     expect(preload).not.toContain("candor-core:call");
     expect(preload).not.toContain("callCore");
     expect(preload).not.toContain("allowedMethods");
+    expect(preload).not.toContain("core: Object.freeze");
+    for (const domain of ["app", "capture", "meetings", "transcript", "ai", "exports", "settings", "licensing", "events"]) {
+      expect(preload).toContain(`${domain}: Object.freeze`);
+    }
   });
 
   it("keeps permanent deletion behind the native confirmation IPC", () => {

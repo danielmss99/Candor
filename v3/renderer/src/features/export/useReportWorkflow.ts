@@ -14,8 +14,9 @@ import {
 } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
 import type { NotesSaveDisposition, NotesSnapshot } from "../notes/notes-draft";
+import { waitForJob } from "../../core/jobs";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 
 export interface ExportSections {
   summary: boolean;
@@ -127,10 +128,12 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
       if (notesDirty) {
         commitNotesSave(
           notesSnapshot,
-          asObject(await api.recordingNotesSave(selectedRecordingId, notesSnapshot.markdown)),
+          asObject(await api.meetings.updateNotes(selectedRecordingId, notesSnapshot.markdown)),
         );
       }
-      const result = asObject(await api.exportSaveLocal(buildParams(format)));
+      const accepted = await api.exports.create(buildParams(format));
+      await waitForJob(api, accepted, { acknowledge: false });
+      const result = asObject(await api.exports.saveCompleted(accepted.jobId));
       if (asBool(result.canceled)) {
         setNotice("Export canceled. No file was written.");
         return;

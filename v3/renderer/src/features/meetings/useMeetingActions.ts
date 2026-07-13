@@ -14,8 +14,9 @@ import {
 } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
 import type { NotesSaveDisposition, NotesSnapshot, NotesUpdate } from "../notes/notes-draft";
+import { waitForJob } from "../../core/jobs";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 
 interface UseMeetingActionsOptions {
   api: CoreApi | undefined;
@@ -94,11 +95,12 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
   const importV2Folder = useCallback(async () => {
     if (!api) return;
     await run("import", async () => {
-      const result = asObject(await api.v2ImportFromFolder());
-      if (asBool(result.canceled)) {
+      const accepted = asObject(await api.meetings.importLegacy());
+      if (asBool(accepted.canceled)) {
         setNotice("Import canceled");
         return;
       }
+      const result = asObject(await waitForJob(api, accepted));
       setNotice(`Imported ${asNumber(result.importedCount)} v2 meetings, ${asNumber(result.audioImportedCount)} with audio`);
       await refreshLibrary(0);
       setView("library");
@@ -125,7 +127,7 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
     if (!api || !selectedRecordingId) return;
     const snapshot = captureNotesSnapshot();
     await run("notes", async () => {
-      const status = asObject(await api.recordingNotesSave(selectedRecordingId, snapshot.markdown));
+      const status = asObject(await api.meetings.updateNotes(selectedRecordingId, snapshot.markdown));
       const disposition = commitNotesSave(snapshot, status);
       setNotice(disposition === "current"
         ? "Meeting notes saved locally"
@@ -159,7 +161,12 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
   const loadAudio = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("audio", async () => {
-      const result = asObject(await api.exportCreate({ recordingId: selectedRecordingId, format: "wav", channel: selectedTrack || undefined }));
+      const accepted = await api.exports.create({
+        recordingId: selectedRecordingId,
+        format: "wav",
+        ...(selectedTrack ? { channel: selectedTrack } : {}),
+      });
+      const result = asObject(await waitForJob(api, accepted));
       const data = asString(result.dataBase64);
       if (!data) throw new Error("No WAV payload returned");
       const bytes = Uint8Array.from(atob(data), (character) => character.charCodeAt(0));
@@ -175,7 +182,7 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
     if (!api || !selectedRecordingId) return;
     const recordingId = selectedRecordingId;
     await run("delete meeting", async () => {
-      const result = asObject(await api.recordingDelete(recordingId));
+      const result = asObject(await api.meetings.delete(recordingId));
       if (asBool(result.canceled)) {
         setNotice("Deletion canceled");
         return;

@@ -23,7 +23,7 @@ import {
   type NotesUpdate,
 } from "../notes/notes-draft";
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CoreApi = NonNullable<Window["candor"]>;
 
 interface UseMeetingWorkspaceOptions {
   api: CoreApi | undefined;
@@ -93,8 +93,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     const token = requests.current.begin("selected-recording");
     const [nextTranscript, replayObject, notesObject] = await Promise.all([
       client.transcriptPage(recordingId, 0, TRANSCRIPT_PAGE_SIZE),
-      client.object("recording.durable.replayManifest", () => api.recordingDurableReplayManifest(recordingId)),
-      client.object("recording.notes.read", () => api.recordingNotesRead(recordingId)),
+      client.object("recording.durable.replayManifest", () => api.meetings.getReplayManifest(recordingId)),
+      client.object("recording.notes.read", () => api.meetings.getNotes(recordingId)),
     ]);
     if (!requests.current.isCurrent(token)) return;
     setTranscript(nextTranscript.segments);
@@ -153,7 +153,7 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
 
   const search = useCallback(async () => {
     if (!api || !searchQuery.trim()) return;
-    const result = await api.recordingDurableSearch(searchQuery.trim());
+    const result = await api.meetings.search(searchQuery.trim());
     setSearchMatches(asArray(asObject(result).matches));
   }, [api, searchQuery]);
 

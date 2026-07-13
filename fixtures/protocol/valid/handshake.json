@@ -1,0 +1,14 @@
+{
+  "kind": "handshake",
+  "value": {
+    "version": "0.3.0",
+    "protocolVersion": "m0-jsonrpc-stdio-1",
+    "schemaVersion": 1,
+    "capabilities": ["stdio-json-lines", "durable-recording"],
+    "build": {
+      "commit": null,
+      "target": "windows-x64",
+      "features": ["sqlcipher-vault"]
+    }
+  }
+}

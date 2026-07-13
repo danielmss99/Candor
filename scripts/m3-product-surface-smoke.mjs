@@ -1,3 +1,4 @@
+import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -103,26 +104,26 @@ function contrastRatio(foreground, background) {
 requireSource(rendererSource, 'aria-label="Meeting notes"', "M3 renderer");
 requireSource(rendererSource, "<textarea", "M3 renderer");
 requireSource(rendererSource, "saveMeetingNotes", "M3 renderer");
-requireSource(rendererSource, "recordingNotesSave", "M3 renderer");
+requireSource(rendererSource, "api.meetings.updateNotes", "M3 renderer");
 requireSource(rendererSource, "retentionStatus", "M3 renderer");
-requireSource(rendererSource, 'aria-label="Local custody"', "M3 renderer");
+requireSource(rendererSource, 'aria-label="Meeting privacy receipt"', "M3 renderer");
 requireSource(rendererSource, 'aria-label="Candor navigation"', "M3 renderer");
 requireSource(rendererSource, 'aria-label="Primary"', "M3 renderer");
 requireSource(rendererSource, "onKeyDown", "M3 renderer");
-requireSource(rendererSource, "consentAcknowledge", "M3 renderer");
+requireSource(rendererSource, "api.capture.acknowledgeConsent", "M3 renderer");
 requireSource(rendererSource, 'aria-label="Local AI mode"', "M3 renderer");
 requireSource(rendererSource, 'aria-pressed={aiMode === "quality"}', "M3 renderer");
-requireSource(rendererSource, "Fast fallback, model unavailable", "M3 renderer");
+requireSource(rendererSource, "Fast local fallback", "M3 renderer");
 requireSource(rendererSource, "document-preview", "M3 renderer");
 requireSource(rendererSource, "saveLocalReport", "M3 renderer");
-requireSource(rendererSource, "exportSaveLocal", "M3 renderer");
+requireSource(rendererSource, "api.exports.saveCompleted", "M3 renderer");
 requireSource(rendererSource, "Word (.docx)", "M3 renderer");
 requireSource(rendererSource, "Editable, local", "M3 renderer");
 requireSource(rendererSource, "Searchable, local", "M3 renderer");
 requireSource(rendererSource, "data-export-save", "M3 renderer");
 requireSource(rendererSource, 'aria-label="Paper size"', "M3 renderer");
-requireSource(rendererSource, "aiInstructAssetsStatus", "M3 renderer");
-requireSource(rendererSource, "aiInstructAssetImportFromFile", "M3 renderer");
+requireSource(rendererSource, "api.ai.getEnhancedAssetsStatus", "M3 renderer");
+requireSource(rendererSource, "api.ai.chooseEnhancedComponent", "M3 renderer");
 requireSource(rendererSource, 'data-view="home"', "M3 renderer");
 requireSource(rendererSource, 'data-view="meeting"', "M3 renderer");
 requireSource(rendererSource, 'data-view="library"', "M3 renderer");
@@ -140,7 +141,7 @@ requireSource(rendererSource, "useCaptureSession", "M3 renderer");
 requireSource(rendererSource, "useLocalJob", "M3 renderer");
 requireSource(rendererSource, "compact-pane-switcher", "M3 renderer");
 requireSource(rendererSource, "privacy-receipt", "M3 renderer");
-requireSource(rendererSource, "Privacy and diagnostics", "M3 renderer");
+requireSource(rendererSource, "Privacy and network", "M3 renderer");
 requireSource(rendererSource, 'data-state={active ? "recording" : "idle"}', "M3 renderer");
 requireSource(rendererSource, "Stop recording and save local audio", "M3 renderer");
 requireSource(rendererSource, "Dismiss notification", "M3 renderer");
@@ -152,7 +153,7 @@ requireSource(rendererSource, "License Portal", "M3 renderer");
 requireSource(rendererSource, "persistent account", "M3 renderer");
 requireSource(rendererSource, "licenseApi.activate", "M3 renderer");
 requireSource(rendererSource, "licenseApi.startTrial", "M3 renderer");
-requireSource(rendererSource, "licenseApi.deactivateDevice", "M3 renderer");
+requireSource(rendererSource, "licenseApi.deactivate", "M3 renderer");
 requireSource(rendererSource, "aria-live=\"polite\"", "M3 renderer");
 requireSource(rendererSource, "AnimatedTranscript", "M3 renderer");
 requireSource(rendererSource, "EvidenceTimeline", "M3 renderer");
@@ -172,19 +173,19 @@ requireSource(preloadSource, "candor-license:activate", "M3 preload");
 requireSource(preloadSource, "candor-license:startTrial", "M3 preload");
 requireSource(preloadSource, "candor-license:deactivateDevice", "M3 preload");
 requireSource(preloadSource, "candor-license:portalInfo", "M3 preload");
-requireSource(preloadSource, "aiInstructStatus", "M3 preload");
-requireSource(preloadSource, "aiRecapInstruct", "M3 preload");
-requireSource(preloadSource, "aiAskInstruct", "M3 preload");
-requireSource(preloadSource, "aiInstructAssetsStatus", "M3 preload");
-requireSource(preloadSource, "aiInstructAssetImportFromFile", "M3 preload");
+requireSource(preloadSource, "getEnhancedStatus", "M3 preload");
+requireSource(preloadSource, "generateRecap", "M3 preload");
+requireSource(preloadSource, "ask", "M3 preload");
+requireSource(preloadSource, "getEnhancedAssetsStatus", "M3 preload");
+requireSource(preloadSource, "chooseEnhancedComponent", "M3 preload");
 requireSource(preloadSource, "candor-instruct-assets:importFromFile", "M3 preload");
-requireSource(preloadSource, "exportSaveLocal", "M3 preload");
-requireSource(preloadSource, "candor-export:saveLocal", "M3 preload");
+requireSource(preloadSource, "saveCompleted", "M3 preload");
+requireSource(preloadSource, "candor-export:saveCompleted", "M3 preload");
 requireSource(mainSource, "LicenseService", "M3 main");
 requireSource(mainSource, "candor-license:activate", "M3 main");
 requireSource(mainSource, "candor-license:startTrial", "M3 main");
 requireSource(mainSource, "candor-license:deactivateDevice", "M3 main");
-requireSource(mainSource, "candor-export:saveLocal", "M3 main");
+rejectSource(mainSource, /candor-export:saveLocal/, "M3 main");
 requireSource(mainSource, "dialog.showSaveDialog", "M3 main");
 requireSource(mainSource, "decodeLocalExportResult", "M3 main");
 requireSource(licenseServiceSource, "safeStorage", "M3 license service");
@@ -289,7 +290,6 @@ const child = spawn(corePath, [], {
 
 const lines = createInterface({ input: child.stdout });
 const pending = new Map();
-let nextId = 1;
 
 child.stderr.on("data", (chunk) => {
   process.stderr.write(`[candor-core stderr] ${chunk}`);
@@ -311,8 +311,9 @@ lines.on("line", (line) => {
 });
 
 function call(method, params = null) {
-  const id = nextId++;
-  const payload = JSON.stringify({ id, method, params });
+  const request = createVersionedCoreRequest(method, params);
+  const id = request.requestId;
+  const payload = JSON.stringify(request);
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pending.delete(id);

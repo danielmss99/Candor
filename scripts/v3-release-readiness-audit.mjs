@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateManualReleaseProof } from "./manual-release-matrix-validation.mjs";
 import { validateReleaseChecksums } from "./release-checksum-validation.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -215,6 +216,47 @@ function summarizePayload(payload) {
       inferenceAttempted: payload?.inferenceAttempted === true,
       failures: payload?.failures ?? [],
       steps: Array.isArray(payload?.steps) ? payload.steps.map((step) => step?.name) : [],
+    };
+  }
+  if (payload?.proofKind === "candor-product-identity") {
+    return {
+      ok: payload?.ok === true,
+      version: payload?.identity?.version ?? null,
+      appIdMigration: payload?.identity?.appIdMigration ?? null,
+      failures: payload?.failures ?? [],
+    };
+  }
+  if (payload?.proofKind === "candor-main-architecture") {
+    return {
+      ok: payload?.ok === true,
+      remoteMainVerified: payload?.remoteMain?.electronArchitectureVerified === true,
+      releaseReachable: payload?.release?.reachableFromOriginMain === true,
+      failures: payload?.failures ?? [],
+    };
+  }
+  if (payload?.proofKind === "candor-gui-state-matrix") {
+    return {
+      ok: payload?.ok === true,
+      scenarioCount: Array.isArray(payload?.scenarios) ? payload.scenarios.length : null,
+      viewportCount: Array.isArray(payload?.viewports) ? payload.viewports.length : null,
+      screenshotCount: payload?.screenshotCount ?? null,
+    };
+  }
+  if (payload?.proofKind === "v3-release-sbom") {
+    return {
+      ok: payload?.ok === true,
+      mode: payload?.mode ?? null,
+      packageCount: payload?.packageCount ?? null,
+      sha256: payload?.sha256 ?? null,
+      failures: payload?.failures ?? [],
+    };
+  }
+  if (payload?.proofKind === "v3-manual-release-matrix") {
+    return {
+      ok: payload?.ok === true,
+      releaseReady: payload?.releaseReady === true,
+      completed: payload?.completed ?? null,
+      failures: payload?.failures ?? [],
     };
   }
   return {
@@ -640,6 +682,72 @@ function validateRealWhisperOrchestrator(payload) {
   return failures;
 }
 
+function validateProductIdentity(payload) {
+  const failures = [];
+  if (payload?.proofKind !== "candor-product-identity") failures.push("product identity proofKind is invalid");
+  if (payload?.ok !== true) failures.push("product identity proof did not pass");
+  if (payload?.identity?.packageName !== "candor") failures.push("product package name must be candor");
+  if (payload?.identity?.productName !== "Candor") failures.push("product name must be Candor");
+  if (!/^0\.\d+\.\d+$/.test(payload?.identity?.version ?? "")) failures.push("product version must use 0.x.y before beta");
+  if (payload?.identity?.windowTitle !== "Candor") failures.push("window title must be Candor");
+  if (payload?.localOnly !== true || payload?.networkAttempted !== false) failures.push("product identity proof must run locally without network access");
+  if (Array.isArray(payload?.failures) && payload.failures.length > 0) failures.push("product identity proof contains failures");
+  return failures;
+}
+
+function validateMainArchitecture(payload) {
+  const failures = [];
+  if (payload?.proofKind !== "candor-main-architecture") failures.push("main architecture proofKind is invalid");
+  if (payload?.ok !== true) failures.push("main architecture verification did not pass");
+  if (payload?.remoteMain?.electronArchitectureVerified !== true) failures.push("origin/main Electron architecture is not verified");
+  if (!payload?.release?.requested) failures.push("release architecture proof did not request a release commit");
+  if (payload?.release?.reachableFromOriginMain !== true) failures.push("release commit is not reachable from origin/main");
+  if (payload?.networkAttempted !== false) failures.push("architecture proof generation must not use application network access");
+  if (Array.isArray(payload?.failures) && payload.failures.length > 0) failures.push("main architecture proof contains failures");
+  return failures;
+}
+
+function validateGuiStateMatrix(payload) {
+  const failures = [];
+  const expectedScenarios = [
+    "home-empty", "home-populated", "live-recording", "live-finalizing", "live-low-disk",
+    "live-degraded-core", "meetings-1000", "meeting-no-transcript", "meeting-long-transcript",
+    "review-desktop", "review-compact", "export-default", "export-failed", "settings-normal",
+    "settings-advanced", "core-unavailable", "core-incompatible", "permission-denied",
+    "model-unavailable", "license-expired-existing-data",
+  ];
+  const expectedViewports = ["1440x900-100", "1366x768-100", "1366x768-125", "1280x720-150", "960x600-minimum"];
+  if (payload?.proofKind !== "candor-gui-state-matrix") failures.push("GUI matrix proofKind is invalid");
+  if (payload?.ok !== true) failures.push("GUI state matrix did not pass");
+  for (const scenario of expectedScenarios) {
+    if (!payload?.scenarios?.includes(scenario)) failures.push(`GUI state matrix is missing ${scenario}`);
+  }
+  const viewportIds = Array.isArray(payload?.viewports) ? payload.viewports.map((entry) => entry?.id) : [];
+  for (const viewport of expectedViewports) {
+    if (!viewportIds.includes(viewport)) failures.push(`GUI state matrix is missing viewport ${viewport}`);
+  }
+  const expectedCount = expectedScenarios.length * expectedViewports.length;
+  if (payload?.screenshotCount !== expectedCount || payload?.evidence?.length !== expectedCount) failures.push(`GUI state matrix must contain ${expectedCount} screenshots`);
+  for (const entry of Array.isArray(payload?.evidence) ? payload.evidence : []) {
+    if (!/^[a-f0-9]{64}$/i.test(entry?.sha256 ?? "") || !(entry?.bytes > 10_000)) failures.push("GUI state matrix contains invalid screenshot evidence");
+    if (typeof entry?.file !== "string" || !entry.file.startsWith("release-v3/proofs/gui-state-matrix/") || entry.file.includes("..")) failures.push("GUI state matrix contains an unsafe screenshot reference");
+  }
+  if (payload?.localOnly !== true || payload?.cloudAi !== false || payload?.networkAttempted !== false) failures.push("GUI state evidence must be generated locally without cloud AI or network access");
+  return [...new Set(failures)];
+}
+
+function validateReleaseSbom(payload) {
+  const failures = [];
+  if (payload?.proofKind !== "v3-release-sbom") failures.push("release SBOM proofKind is invalid");
+  if (payload?.ok !== true || payload?.mode !== "verify") failures.push("release SBOM must pass in verify mode");
+  if (!/^Candor-0\.\d+\.\d+-SBOM\.spdx\.json$/.test(payload?.file ?? "")) failures.push("release SBOM filename is invalid");
+  if (!/^[a-f0-9]{64}$/i.test(payload?.sha256 ?? "") || !(payload?.bytes > 0)) failures.push("release SBOM digest is invalid");
+  if (!(payload?.packageCount > 1) || !(payload?.npmPackageCount > 0) || !(payload?.rustPackageCount > 0)) failures.push("release SBOM dependency inventory is incomplete");
+  if (payload?.networkAttempted !== false || payload?.rawPathExposed !== false) failures.push("release SBOM proof must be path-safe and offline");
+  if (Array.isArray(payload?.failures) && payload.failures.length > 0) failures.push("release SBOM proof contains failures");
+  return failures;
+}
+
 const strict = hasArg("--strict");
 const proofDir = asPath(argValue("--proof-dir", "release-v3/proofs"));
 const outputPath = asPath(
@@ -657,14 +765,19 @@ const outputPath = asPath(
 const files = proofFiles(proofDir);
 
 const gates = [
+  fromProof(files, /^product-identity-.+\.json$/, "Candor product identity", validateProductIdentity),
+  fromProof(files, /^main-architecture-.+\.json$/, "origin/main release architecture", validateMainArchitecture),
+  fromProof(files, /^gui-state-matrix\.json$/, "critical GUI screenshot matrix", validateGuiStateMatrix),
   fromProof(files, /^m0-proof-audit-summary\.json$/, "M0 cross-OS packaged network exit", validateM0Exit),
   fromProof(files, /^v3-local-verification-.+\.json$/, "local staged verification", validateLocalVerification),
   fromProof(files, /^v3-source-security-proof-.+\.json$/, "V3 source security proof", validateSourceSecurity),
   fromProof(files, /^v3-updater-policy-proof-.+\.json$/, "V3 updater policy proof", validateUpdaterPolicy),
   fromProof(files, /^v3-release-artifact-smoke-.+\.json$/, "V3 release artifact smoke", validateReleaseArtifactSmoke),
   fromProof(files, /^v3-release-checksums-.+\.json$/, "V3 release package checksums", validateReleaseChecksums),
+  fromProof(files, /^v3-release-sbom-.+\.json$/, "V3 release SPDX SBOM", validateReleaseSbom),
   fromProof(files, /^v3-icon-proof-.+\.json$/, "V3 packaged application icon proof", validateIconProof),
   fromProof(files, /^v3-release-signing-proof-.+\.json$/, "V3 signed release and installer proof", validateReleaseSigning),
+  fromProof(files, /^v3-manual-release-matrix-.+\.json$/, "Windows clean-install, upgrade, hardware, and duration matrix", validateManualReleaseProof),
   fromProof(files, /^m1-real-capture-readiness-.+\.json$/, "M1 real capture readiness", validateRealCaptureReadiness),
   fromProof(files, /^m1-real-capture-proof-.+\.json$/, "M1 consented real capture orchestrator", validateRealCaptureOrchestrator),
   fromProof(files, /^m1-capture-proof-audit-real-.+\.json$/, "M1 real mic plus system capture", validateRealCapture),

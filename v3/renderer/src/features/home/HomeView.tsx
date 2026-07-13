@@ -12,7 +12,6 @@ interface HomeViewProps {
   storageHealth: JsonObject;
   importAvailable: boolean;
   recordingTitle: string;
-  vaultBackend: unknown;
   instructReady: boolean;
   verifiedModelCount: unknown;
   aiModeStatus: string;
@@ -32,7 +31,6 @@ export function HomeView({
   storageHealth,
   importAvailable,
   recordingTitle,
-  vaultBackend,
   instructReady,
   verifiedModelCount,
   aiModeStatus,
@@ -55,7 +53,7 @@ export function HomeView({
       <section className="dashboard-actions" aria-label="Quick actions">
         <RecordAction variant="dashboard" active={activeCapture} captureLabel={combinedCaptureAvailable ? "Microphone and system audio" : "Microphone audio"} onClick={onStartRecording} disabled={busy || (recordingBlocked && !activeCapture)} />
         <button className="surface-action" type="button" onClick={onOpenLibrary}>Open meetings</button>
-        <button className="surface-action" type="button" onClick={onImport} disabled={busy || !importAvailable}>Import v2 folder</button>
+        <button className="surface-action" type="button" onClick={onImport} disabled={busy || !importAvailable}>Import previous Candor folder</button>
         <label className="quick-title-field"><span>Next recording title</span><input value={recordingTitle} onChange={(event) => onRecordingTitleChange(event.target.value)} /></label>
       </section>
       <section className="dashboard-section">
@@ -72,7 +70,7 @@ export function HomeView({
       <section className="dashboard-section">
         <h2>Storage and privacy</h2>
         <div className="status-grid">
-          <div className={`status-panel ${storageLevel === "ok" ? "verified" : storageLevel}`}><strong>Encrypted local storage</strong><p>{recordings.length} meetings stored</p><span>{metric(vaultBackend, "SQLCipher")} | {availableLabel}</span></div>
+          <div className={`status-panel ${storageLevel === "ok" ? "verified" : storageLevel}`}><strong>Encrypted local storage</strong><p>{recordings.length} meetings stored</p><span>Protected on this device | {availableLabel}</span></div>
           <div className={`status-panel ${instructReady ? "verified" : ""}`}><VerificationText value={instructReady ? "Local AI ready" : "Fast local analysis ready"} /><p>{metric(verifiedModelCount, "0")} verified speech models</p><span>{aiModeStatus}</span></div>
         </div>
       </section>

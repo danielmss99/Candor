@@ -20,8 +20,8 @@ import { AppRouteOutlet } from "./AppRouteOutlet";
 import { useAppNavigation } from "./navigation";
 
 export function CandorWorkspace() {
-  const api = window.candor?.core;
-  const licenseApi = window.candor?.license;
+  const api = window.candor;
+  const licenseApi = window.candor?.licensing;
   const client = useMemo(() => (api ? new CandorClient(api) : null), [api]);
   const meeting = useMeetingWorkspace({ api, client });
   const navigation = useAppNavigation(meeting.selectedRecordingId);
@@ -31,7 +31,7 @@ export function CandorWorkspace() {
   const captureSession = useCaptureSession(activeCapture, activeRecordingId);
   const operations = useOperationRunner(captureSession.failed);
   const diagnostics = useDiagnosticExport({
-    api: window.candor?.shell,
+    api: window.candor?.app,
     run: operations.run,
     setNotice: operations.setNotice,
   });

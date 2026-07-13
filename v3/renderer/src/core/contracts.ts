@@ -11,7 +11,7 @@ export type AiMode = "quality" | "fast";
 export type InstructAssetKind = "runner" | "model";
 export type AppView = "home" | "meeting" | "library" | "detail" | "review" | "settings" | "export";
 export type DetailSection = "summary" | "transcript" | "notes";
-export type SettingsSection = "general" | "recording" | "models" | "privacy" | "export" | "license";
+export type SettingsSection = "general" | "recording" | "models" | "storage" | "privacy" | "diagnostics" | "export" | "license";
 export type ReviewSection = "summary" | "decisions" | "actions" | "questions" | "risks" | "notes" | "transcript" | "preview";
 export type LibraryFilter = "all" | "transcribed" | "audio";
 export type OnboardingStep = "activate" | "yours" | "microphone" | "system-audio" | "storage" | "local-ai" | "app";
@@ -56,6 +56,7 @@ export interface PersistentAlert {
   severity: "info" | "warning" | "error";
   title: string;
   message: string;
+  actions?: Array<{ label: string; primary?: boolean; onActivate: () => void }>;
 }
 
 export interface TranscriptSegment {

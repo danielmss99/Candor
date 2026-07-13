@@ -30,7 +30,7 @@ export interface RpcEnvelope<T> {
   };
 }
 
-type CoreApi = NonNullable<Window["candor"]>["core"];
+type CandorApi = NonNullable<Window["candor"]>;
 
 function bridgeErrorCode(error: unknown): string {
   if (!(error instanceof Error)) return "CORE_REQUEST_FAILED";
@@ -53,17 +53,17 @@ export class CandorClientError extends Error {
 }
 
 export class CandorClient {
-  private readonly api: CoreApi;
+  private readonly api: CandorApi;
   private requestSequence = 0;
   private protocolPromise: Promise<void> | null = null;
 
-  constructor(api: CoreApi) {
+  constructor(api: CandorApi) {
     this.api = api;
   }
 
   verifyProtocol(): Promise<void> {
     if (!this.protocolPromise) {
-      this.protocolPromise = this.api.version().then((value) => {
+      this.protocolPromise = this.api.app.getVersion().then((value) => {
         parseProtocolVersion(value);
       }).catch((error) => {
         this.protocolPromise = null;
@@ -80,7 +80,7 @@ export class CandorClient {
   async recordingPage(offset: number, limit: number): Promise<RecordingPage> {
     return this.request(
       "recording.durable.listPage",
-      () => this.api.recordingDurableListPage(offset, limit),
+      () => this.api.meetings.list(offset, limit),
       parseRecordingPage,
     );
   }
@@ -88,13 +88,13 @@ export class CandorClient {
   async transcriptPage(recordingId: string, offset: number, limit: number): Promise<TranscriptPage> {
     return this.request(
       "recording.durable.transcriptPage",
-      () => this.api.recordingDurableTranscriptPage(recordingId, offset, limit),
+      () => this.api.meetings.getTranscript(recordingId, offset, limit),
       parseTranscriptPage,
     );
   }
 
   async models(): Promise<ModelRow[]> {
-    return this.request("models.status", () => this.api.modelsStatus(), parseModels);
+    return this.request("models.status", () => this.api.ai.listSpeechModels(), parseModels);
   }
 
   async recap(invoke: () => Promise<unknown>): Promise<LocalAiRecap> {
@@ -108,7 +108,7 @@ export class CandorClient {
   async privacyReceipt(recordingId: string): Promise<MeetingPrivacyReceipt> {
     return this.request(
       "recording.privacyReceipt",
-      () => this.api.recordingPrivacyReceipt(recordingId),
+      () => this.api.meetings.getPrivacyReceipt(recordingId),
       parseMeetingPrivacyReceipt,
     );
   }
@@ -116,7 +116,7 @@ export class CandorClient {
   async networkCapabilities(): Promise<NetworkCapabilities> {
     return this.request(
       "privacy.capabilities",
-      () => this.api.privacyCapabilities(),
+      () => this.api.settings.getNetworkPolicy(),
       parseNetworkCapabilities,
     );
   }

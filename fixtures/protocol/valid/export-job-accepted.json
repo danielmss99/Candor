@@ -1,0 +1,15 @@
+{
+  "kind": "operation-contract",
+  "method": "export.start",
+  "params": {
+    "recordingId": "missing-fixture-recording",
+    "format": "markdown"
+  },
+  "result": {
+    "jobId": "00000000000000000000000000000000",
+    "type": "export",
+    "state": "queued",
+    "createdAt": "2026-07-13T00:00:00Z",
+    "rawPathExposed": false
+  }
+}
