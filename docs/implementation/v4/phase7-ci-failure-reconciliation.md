@@ -77,3 +77,20 @@ macOS retains its sandbox, workflow, accessibility, packaged-smoke, and native
 network checks without claiming a scale condition the runner did not apply.
 
 A fourth matrix run is required to close the macOS gate.
+
+## Fourth Matrix Run
+
+GitHub Actions run `29246022940` confirmed both test-harness corrections:
+
+- the compact Notes pane opened and the notes editor became visible;
+- the unsupported macOS forced-scale cases were reported as two explicit skips;
+- package, artifact, provenance, checksum, and packaged runtime checks passed.
+
+The now-visible compact layout allowed axe-core's Safari checks to expose a real
+WCAG keyboard defect: `.transcript-stream` could scroll but was not focusable.
+The product component now exposes that scroller as a labeled `region` with
+`tabIndex={0}`. This is a renderer accessibility fix, not a rule suppression,
+and a component regression test protects the focus contract.
+
+A fifth matrix run is required to verify the macOS accessibility and network
+receipts together and close the combined M0 audit.
