@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo } from "react";
 import {
   AnimatedTranscript,
   type EvidenceMarker,
@@ -10,6 +10,7 @@ import { HomeView } from "../features/home/HomeView";
 import { LibraryView } from "../features/library/LibraryView";
 import { LiveMeetingView } from "../features/meeting/LiveMeetingView";
 import { ActivationGate, OnboardingSetup } from "../features/onboarding/ActivationFlow";
+import { useOnboardingSettings } from "../features/onboarding/useOnboardingSettings";
 import { MeetingDetailView } from "../features/detail/MeetingDetailView";
 import { ReviewView } from "../features/review/ReviewView";
 import { SettingsView } from "../features/settings/SettingsView";
@@ -22,8 +23,8 @@ import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
   StartupLoading,
   StartupRecovery,
-  type StartupPhase,
 } from "../features/startup/StartupState";
+import { useWorkspaceStartup } from "../features/startup/useWorkspaceStartup";
 import {
   chooseInitialSelection,
   useMeetingWorkspace,
@@ -34,24 +35,17 @@ import { useLicenseState } from "../features/licensing/useLicenseState";
 import { useAppNavigation } from "./navigation";
 import {
   DEFAULT_MODEL,
-  asArray,
   asBool,
   asNumber,
   asObject,
   asString,
   metric,
-  type OnboardingStep,
 } from "../core/contracts";
 
 export function CandorWorkspace() {
   const api = window.candor?.core;
   const licenseApi = window.candor?.license;
   const client = useMemo(() => (api ? new CandorClient(api) : null), [api]);
-  const startupLoaded = useRef(false);
-  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>("activate");
-  const [startupPhase, setStartupPhase] = useState<StartupPhase>("loading");
-  const [startupError, setStartupError] = useState("");
-  const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
   const meetingWorkspace = useMeetingWorkspace({ api, client });
   const {
     recordings,
@@ -306,6 +300,48 @@ export function CandorWorkspace() {
     startCombined: startMicAndSystemRecording,
     startPreferred: startPreferredRecording,
   } = captureActions;
+  const onboarding = useOnboardingSettings({
+    api,
+    licenseAvailable: Boolean(licenseApi),
+    licenseLoaded,
+    licenseStatus,
+    licensePromptDismissed,
+    recordingCount: recordings.length,
+    captureStatus,
+    consentStatus,
+    vaultStatus,
+    run,
+    activateLicense: license.activate,
+    startTrial: license.startTrial,
+    deactivateLicense: license.deactivate,
+    dismissLicensePrompt: () => setLicensePromptDismissed(true),
+    importModel,
+    refreshCapture,
+    refreshModelsAndAi,
+    refreshPrivacyFacts,
+    refreshVaultAndRetention,
+    setConsentStatus,
+    setView,
+    setNotice,
+    setError,
+  });
+  const {
+    step: onboardingStep,
+    advancedSettingsOpen,
+    setStep: setOnboardingStep,
+    activate: activateLicense,
+    trial: startTrial,
+    deactivate: deactivateLicense,
+    continueWithoutActivation,
+    completeMic: completeMicOnboarding,
+    completeSystemAudio: completeSystemAudioOnboarding,
+    completeStorage: completeStorageOnboarding,
+    finish: finishOnboarding,
+    acknowledgeMic: acknowledgeMicConsent,
+    acknowledgeSystem: acknowledgeSystemConsent,
+    refreshLocalSettings,
+    toggleAdvancedSettings,
+  } = onboarding;
 
   const refresh = useCallback(async () => {
     if (!api || !client) {
@@ -320,167 +356,7 @@ export function CandorWorkspace() {
     if (nextSelected) await loadSelectedRecording(nextSelected);
     void loadDiagnostics();
   }, [api, client, loadCritical, loadDiagnostics, loadSelectedRecording, refreshLibrary, selectedRecordingId, setSelectedRecordingId]);
-  const retryWorkspaceLoad = refresh;
-
-  useEffect(() => {
-    if (startupLoaded.current) return;
-    startupLoaded.current = true;
-    void refresh().then(() => {
-      setStartupPhase("ready");
-      setStartupError("");
-    }).catch((reason) => {
-      const message = reason instanceof Error ? reason.message : String(reason);
-      setStartupError(message);
-      setStartupPhase("failed");
-    });
-  }, [refresh]);
-
-  useEffect(() => {
-    if (!licenseLoaded) return;
-    if (!licenseApi) {
-      setOnboardingStep("app");
-      return;
-    }
-    const currentState = asString(licenseStatus.state, "inactive");
-    if (currentState === "inactive") {
-      setOnboardingStep(recordings.length > 0 || licensePromptDismissed ? "app" : "activate");
-    } else if (onboardingStep === "activate") {
-      setOnboardingStep("app");
-    }
-  }, [licenseApi, licenseLoaded, licensePromptDismissed, licenseStatus, onboardingStep, recordings.length]);
-
-  async function activateLicense() {
-    await run("license", async () => {
-      await license.activate();
-      setOnboardingStep("yours");
-      setNotice("Candor activated locally");
-    });
-  }
-
-  async function startTrial() {
-    await run("license", async () => {
-      await license.startTrial();
-      setOnboardingStep("yours");
-      setNotice("Local trial started");
-    });
-  }
-
-  async function deactivateLicense() {
-    await run("license", async () => {
-      await license.deactivate();
-      setOnboardingStep("app");
-      setView(recordings.length ? "library" : "home");
-      setNotice("Local activation removed from this device");
-    });
-  }
-
-  function continueWithoutActivation() {
-    setLicensePromptDismissed(true);
-    setOnboardingStep("app");
-    setView(recordings.length ? "library" : "home");
-    setNotice("Local workspace opened. Existing data remains available.");
-  }
-
-  function retryStartup() {
-    setStartupPhase("loading");
-    setStartupError("");
-    void retryWorkspaceLoad().then(() => {
-      setStartupPhase("ready");
-    }).catch((reason) => {
-      setStartupError(reason instanceof Error ? reason.message : String(reason));
-      setStartupPhase("failed");
-    });
-  }
-
-  async function completeMicOnboarding() {
-    if (!api) return;
-    if (asBool(consentStatus.readyForMicRecording)) {
-      setOnboardingStep("system-audio");
-      return;
-    }
-    await run("consent", async () => {
-      const result = await api.consentAcknowledge({ items: ["localOnlyStorage", "micRecording"] });
-      setConsentStatus(asObject(result));
-      await refreshCapture();
-      setOnboardingStep("system-audio");
-      setNotice("Microphone recording consent saved locally");
-    });
-  }
-
-  async function completeSystemAudioOnboarding() {
-    if (!api) return;
-    const systemImplemented = asBool(asObject(asObject(captureStatus.sources).system).implemented);
-    if (!systemImplemented || asBool(consentStatus.readyForSystemAudioRecording)) {
-      setOnboardingStep("storage");
-      return;
-    }
-    const required = asArray(consentStatus.requiredForSystemAudio).map((item) => asString(item)).filter(Boolean);
-    await run("consent", async () => {
-      const result = await api.consentAcknowledge({ items: required.length ? required : ["localOnlyStorage", "systemAudioRecording"] });
-      setConsentStatus(asObject(result));
-      await refreshCapture();
-      setOnboardingStep("storage");
-      setNotice("System audio consent saved locally");
-    });
-  }
-
-  async function completeStorageOnboarding() {
-    if (!api) return;
-    await run("storage", async () => {
-      if (asBool(vaultStatus.localOpenAvailable)) {
-        await api.vaultOpenLocal();
-      }
-      await refreshVaultAndRetention();
-      setOnboardingStep("local-ai");
-      setNotice("Local storage is ready");
-    });
-  }
-
-  function finishOnboarding() {
-    setOnboardingStep("app");
-    setView("home");
-    setNotice("Candor is ready");
-  }
-
-  async function acknowledgeMicConsent() {
-    if (!api) return;
-    await run("consent", async () => {
-      const result = await api.consentAcknowledge({ items: ["localOnlyStorage", "micRecording"] });
-      setConsentStatus(asObject(result));
-      setNotice("Microphone recording consent saved locally");
-      await refreshCapture();
-    });
-  }
-
-  async function acknowledgeSystemConsent() {
-    if (!api) return;
-    const required = asArray(consentStatus.requiredForSystemAudio).map((item) => asString(item)).filter(Boolean);
-    await run("consent", async () => {
-      const result = await api.consentAcknowledge({ items: required.length ? required : ["localOnlyStorage", "systemAudioRecording"] });
-      setConsentStatus(asObject(result));
-      setNotice("System audio consent saved locally");
-      await refreshCapture();
-    });
-  }
-
-  async function refreshLocalSettings() {
-    await run("refresh settings", async () => {
-      await Promise.all([
-        refreshCapture(),
-        refreshModelsAndAi(),
-        refreshPrivacyFacts(),
-        refreshVaultAndRetention(),
-      ]);
-      setNotice("Local settings refreshed");
-    }, "settings-refresh");
-  }
-
-  function toggleAdvancedSettings() {
-    setAdvancedSettingsOpen((current) => {
-      if (!current) void refreshPrivacyFacts().catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-      return !current;
-    });
-  }
+  const { phase: startupPhase, error: startupError, retry: retryStartup } = useWorkspaceStartup(refresh);
 
   const captureStatusLabel = captureMachine.phase === "idle"
     ? "Ready"
