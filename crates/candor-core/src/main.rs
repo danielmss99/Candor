@@ -1772,9 +1772,6 @@ fn validate_request_envelope(request: &RpcRequest) -> Result<(), RpcResponse> {
     .into_iter()
     .filter(|present| *present)
     .count();
-    if metadata_count == 0 {
-        return Ok(());
-    }
     if metadata_count != 3 {
         return Err(make_error(
             request.id.clone(),
@@ -2227,6 +2224,24 @@ mod tests {
         assert_eq!(
             response.error.as_ref().map(|error| error.code),
             Some("PROTOCOL_VERSION_MISMATCH")
+        );
+    }
+
+    #[test]
+    fn bare_request_envelopes_are_rejected() {
+        let mut state = core_state();
+        let bare = json!({
+            "id": "bare-request",
+            "method": "core.version",
+            "params": null
+        })
+        .to_string();
+
+        let response = handle_line(&bare, &mut state).expect("bare response");
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("INVALID_RPC_ENVELOPE")
         );
     }
 

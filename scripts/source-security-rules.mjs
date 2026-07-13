@@ -8,6 +8,8 @@ export const requiredSourcePaths = [
   "electron/core/json.ts",
   "electron/core/core-client.ts",
   "electron/core/core-errors.ts",
+  "electron/core/capture-recovery-store.ts",
+  "electron/core/operation-registry.ts",
   "electron/core/protocol.ts",
   "electron/core/renderer-boundary.ts",
   "electron/core/request-registry.ts",
@@ -17,12 +19,14 @@ export const requiredSourcePaths = [
   "electron/ipc/diagnostics-ipc.ts",
   "electron/ipc/export-ipc.ts",
   "electron/ipc/import-ipc.ts",
+  "electron/ipc/jobs-ipc.ts",
   "electron/ipc/ipc-types.ts",
   "electron/ipc/licensing-ipc.ts",
   "electron/ipc/models-ipc.ts",
   "electron/ipc/register-ipc.ts",
   "electron/security/input-limits.ts",
   "electron/security/validate-core-input.ts",
+  "electron/security/validate-private-core-input.ts",
   "electron/security/validate-sender.ts",
   "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
@@ -31,6 +35,7 @@ export const requiredSourcePaths = [
   "electron/window/navigation-policy.ts",
   "electron/license-service.ts",
   "scripts/build-release-core.mjs",
+  "scripts/core-rpc-envelope.mjs",
   "scripts/electron-dev.mjs",
   "v3/renderer/index.html",
   "v3/renderer/src/candor-api.d.ts",
@@ -196,6 +201,36 @@ export function evaluateSourceSecurity(input) {
     "electron/core/core-client.ts",
     'if (this.captureGuardPhase() !== "idle")',
     "core shutdown is denied while capture is active or changing state",
+  );
+  includes(
+    "electron-main:operation-registry",
+    "electron/core/operation-registry.ts",
+    "export const CORE_OPERATIONS",
+    "core operations are registered in one runtime-validated allowlist",
+  );
+  includes(
+    "electron-main:private-input-validation",
+    "electron/security/validate-private-core-input.ts",
+    "export function validatePrivateCoreParams",
+    "private core operations have explicit input contracts",
+  );
+  includes(
+    "electron-main:capture-recovery-allowlist",
+    "electron/core/capture-recovery-store.ts",
+    "SAFE_METHOD.test",
+    "capture recovery metadata is reduced to safe allowlisted fields",
+  );
+  includes(
+    "electron-main:jobs-ipc-sender-validation",
+    "electron/ipc/jobs-ipc.ts",
+    "validateIpcSender",
+    "job IPC validates the sender before calling the core",
+  );
+  includes(
+    "proof-clients:versioned-core-envelope",
+    "scripts/core-rpc-envelope.mjs",
+    "createVersionedCoreRequest",
+    "proof clients use the same versioned request envelope as Electron",
   );
   includes(
     "diagnostics:allowlisted-report",

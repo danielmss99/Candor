@@ -125,10 +125,43 @@ describe("controllable core fault harness", () => {
     }
   });
 
+  it("keeps the core and Stop path available when capture start times out", async () => {
+    const child = spawnHarness("hang-during-capture-start");
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => child,
+      timeoutMsForTesting: (method) => method === "capture.startMic" ? 200 : 2_000,
+    });
+
+    await expect(client.call("capture.startMic", { label: "Slow recording" })).rejects.toThrow("timed out");
+    expect(child.killed).toBe(false);
+    expect(client.rendererSnapshot()).toMatchObject({
+      state: "capture-connection-degraded",
+      captureActive: true,
+      captureRecoveryRequired: true,
+    });
+
+    await expect(client.call("capture.stop")).resolves.toMatchObject({ ok: true });
+    expect(client.rendererSnapshot()).toMatchObject({
+      state: "running",
+      captureActive: false,
+      captureRecoveryRequired: false,
+    });
+  });
+
   it("marks recovery required when the core exits during capture", async () => {
     const client = clientFor("exit-during-capture", 500);
     await client.call("capture.startMic", { label: "Test recording" });
     await expect(client.call("capture.status")).rejects.toThrow("exited");
     expect(client.rendererSnapshot()).toMatchObject({ captureRecoveryRequired: true });
+
+    await client.retryConnection();
+    expect(client.rendererSnapshot()).toMatchObject({
+      state: "running",
+      captureActive: false,
+      captureRecoveryRequired: true,
+    });
   });
 });

@@ -85,6 +85,10 @@ if (mode === "startup-timeout") {
     responseCount += 1;
 
     if (mode === "hang-before-response" && request.method !== "core.version") return;
+    if (mode === "hang-during-capture-start" && request.method === "capture.startMic") {
+      captureActive = true;
+      return;
+    }
     if (mode === "hang-during-capture" && captureActive && request.method !== "core.version") return;
     if (mode === "exit-during-capture" && captureActive && request.method !== "core.version") {
       process.exit(17);
@@ -111,4 +115,3 @@ if (mode === "startup-timeout") {
     if (request.method === "core.shutdown") setTimeout(() => process.exit(0), 5);
   });
 }
-

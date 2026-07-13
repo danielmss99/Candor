@@ -581,7 +581,8 @@ export class CoreClient {
   }
 
   private handleTimeout(method: string): void {
-    if (this.captureActive) {
+    if (this.captureActive || CAPTURE_START_METHODS.has(method)) {
+      if (CAPTURE_START_METHODS.has(method)) this.captureActive = true;
       this.enterCaptureRecovery(method);
       return;
     }

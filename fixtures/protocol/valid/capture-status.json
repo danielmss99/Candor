@@ -5,6 +5,7 @@
   "result": {
     "implemented": true,
     "active": false,
+    "activeSession": null,
     "sources": {
       "mic": { "implemented": true },
       "system": { "implemented": true }

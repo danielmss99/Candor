@@ -47,7 +47,7 @@ function responsiveCore(active = false): string {
         build: { target: "test-target", features: [] }
       };
       if (request.method === "core.version") handshakeCount += 1;
-      if (request.method === "capture.status") result = { implemented: true, active: captureActive, sources: {}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1" } : null, sources: {}, rawPathExposed: false };
       if (request.method === "capture.startMic") {
         captureActive = true;
         result = {
@@ -86,7 +86,7 @@ function capturingThenSilentCore(): string {
         capabilities: ["stdio-json-lines"],
         build: { target: "test-target", features: [] }
       };
-      if (request.method === "capture.status") result = { implemented: true, active: true, sources: {}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: true, activeSession: { recordingId: "recording-1" }, sources: {}, rawPathExposed: false };
       if (result !== null) {
         process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       }
@@ -219,7 +219,7 @@ describe("core client process boundary", () => {
       captureRecoveryRequired: true,
     });
     expect(degraded).toHaveLength(1);
-    expect(degraded[0]).toMatchObject({ method: "core.status", recordingId: null });
+    expect(degraded[0]).toMatchObject({ method: "core.status", recordingId: "recording-1" });
     expect(child.killed).toBe(false);
     child.kill();
   });
@@ -339,7 +339,7 @@ describe("core client process boundary", () => {
 
   it("rejects a malformed successful result before delivery", async () => {
     const script = responsiveCore().replace(
-      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, sources: {}, rawPathExposed: false };',
+      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1" } : null, sources: {}, rawPathExposed: false };',
       'if (request.method === "capture.status") result = { active: "yes" };',
     );
     const client = new CoreClient({

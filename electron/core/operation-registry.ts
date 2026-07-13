@@ -45,7 +45,7 @@ const rendererConfigs: readonly OperationConfig[] = [
   { method: "import.v2.status", channel: "candor-core:v2-import-status", result: { implemented: "boolean", localOnly: "boolean", originalsUntouched: "boolean", rawPathExposed: "boolean" } },
   { method: "consent.status", channel: "candor-core:consent-status", result: { schemaVersion: "integer", items: "array", readyForMicRecording: "boolean", readyForSystemAudioRecording: "boolean", rawPathExposed: "boolean" } },
   { method: "consent.acknowledge", channel: "candor-core:consent-acknowledge", result: { schemaVersion: "integer", items: "array", readyForMicRecording: "boolean", readyForSystemAudioRecording: "boolean", rawPathExposed: "boolean" } },
-  { method: "capture.status", channel: "candor-core:capture-status", result: { implemented: "boolean", active: "boolean", sources: "object", rawPathExposed: "boolean" } },
+  { method: "capture.status", channel: "candor-core:capture-status", result: { implemented: "boolean", active: "boolean", activeSession: "capture-session-or-null", sources: "object", rawPathExposed: "boolean" } },
   { method: "capture.devices", channel: "candor-core:capture-devices", result: { defaultInputAvailable: "boolean", defaultOutputAvailable: "boolean", inputs: "array", outputs: "array", rawPathExposed: "boolean" } },
   { method: "capture.startMic", channel: "candor-core:capture-start-mic", timeoutMs: 15_000, result: { recording: "object", capture: "object", rawPathExposed: "boolean" } },
   { method: "capture.startSystem", channel: "candor-core:capture-start-system", timeoutMs: 15_000, result: { recording: "object", capture: "object", rawPathExposed: "boolean" } },

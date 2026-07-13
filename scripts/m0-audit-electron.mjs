@@ -113,7 +113,6 @@ const requiredMainPatterns = [
   "candor-models:importFromFile",
   "candor-instruct-assets:importFromFile",
   "candor-import:v2FromFolder",
-  "candor-export:saveLocal",
   "dialog.showOpenDialog",
   "dialog.showSaveDialog",
   "createReadStream",
@@ -176,6 +175,7 @@ const bannedPatterns = [
   /enableRemoteModule:\s*true/,
   /http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions/,
   /candor-core:call/,
+  /candor-export:saveLocal/,
 ];
 
 const bannedPreloadPatterns = [

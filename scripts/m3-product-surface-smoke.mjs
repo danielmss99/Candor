@@ -1,3 +1,4 @@
+import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
@@ -184,7 +185,7 @@ requireSource(mainSource, "LicenseService", "M3 main");
 requireSource(mainSource, "candor-license:activate", "M3 main");
 requireSource(mainSource, "candor-license:startTrial", "M3 main");
 requireSource(mainSource, "candor-license:deactivateDevice", "M3 main");
-requireSource(mainSource, "candor-export:saveLocal", "M3 main");
+rejectSource(mainSource, /candor-export:saveLocal/, "M3 main");
 requireSource(mainSource, "dialog.showSaveDialog", "M3 main");
 requireSource(mainSource, "decodeLocalExportResult", "M3 main");
 requireSource(licenseServiceSource, "safeStorage", "M3 license service");
@@ -289,7 +290,6 @@ const child = spawn(corePath, [], {
 
 const lines = createInterface({ input: child.stdout });
 const pending = new Map();
-let nextId = 1;
 
 child.stderr.on("data", (chunk) => {
   process.stderr.write(`[candor-core stderr] ${chunk}`);
@@ -311,8 +311,9 @@ lines.on("line", (line) => {
 });
 
 function call(method, params = null) {
-  const id = nextId++;
-  const payload = JSON.stringify({ id, method, params });
+  const request = createVersionedCoreRequest(method, params);
+  const id = request.requestId;
+  const payload = JSON.stringify(request);
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pending.delete(id);

@@ -11,6 +11,7 @@ export type JsonRuntimeSchema = RuntimeSchema<JsonValue>;
 export type FieldRule =
   | "array"
   | "boolean"
+  | "capture-session-or-null"
   | "integer"
   | "number"
   | "object"
@@ -32,6 +33,13 @@ function fieldMatches(value: JsonValue, rule: FieldRule): boolean {
       return Array.isArray(value);
     case "boolean":
       return typeof value === "boolean";
+    case "capture-session-or-null":
+      return value === null || (
+        typeof value === "object" &&
+        !Array.isArray(value) &&
+        typeof value.recordingId === "string" &&
+        value.recordingId.length > 0
+      );
     case "integer":
       return typeof value === "number" && Number.isSafeInteger(value);
     case "number":
