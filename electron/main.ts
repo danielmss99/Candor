@@ -53,7 +53,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDev = !app.isPackaged;
 const expectedCoreProtocolVersion = "m0-jsonrpc-stdio-1";
-const rendererDevUrl = process.env.CANDOR_V3_RENDERER_URL ?? "http://127.0.0.1:5173";
+const configuredRendererDevUrl = process.env.CANDOR_V3_RENDERER_URL?.trim() ?? "";
+if (configuredRendererDevUrl && !isLoopbackHttpUrl(configuredRendererDevUrl)) {
+  throw new Error("CANDOR_V3_RENDERER_URL must use loopback HTTP without credentials.");
+}
+const useDevRenderer = isDev && configuredRendererDevUrl.length > 0;
+const rendererDevUrl = configuredRendererDevUrl || "http://127.0.0.1:5173";
+const rendererDevEndpoint = new URL(rendererDevUrl);
 const smokeOutputPath = process.env.CANDOR_M0_SMOKE_OUT ?? "";
 const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
 const isSmokeMode = smokeOutputPath.length > 0;
@@ -114,6 +120,44 @@ const rendererCoreMethods = new Set([
   "retention.status",
   "export.create",
 ]);
+
+function isLoopbackHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "http:" &&
+      !url.username &&
+      !url.password &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isRendererDevRequest(value: string): boolean {
+  if (!useDevRenderer) return false;
+  try {
+    const url = new URL(value);
+    return (
+      (url.protocol === "http:" || url.protocol === "ws:") &&
+      url.hostname === rendererDevEndpoint.hostname &&
+      url.port === rendererDevEndpoint.port
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isRendererDevNavigation(value: string): boolean {
+  if (!useDevRenderer) return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" && url.origin === rendererDevEndpoint.origin;
+  } catch {
+    return false;
+  }
+}
 const privateCoreMethods = new Set([
   ...rendererCoreMethods,
   "core.shutdown",
@@ -185,7 +229,8 @@ function coreExecutableName(): string {
 
 function corePath(): string {
   if (isDev) {
-    return path.resolve(__dirname, "..", "..", "crates", "candor-core", "target", "debug", coreExecutableName());
+    const profile = useDevRenderer ? "debug" : "release";
+    return path.resolve(__dirname, "..", "..", "crates", "candor-core", "target", profile, coreExecutableName());
   }
   return path.join(process.resourcesPath, "bin", coreExecutableName());
 }
@@ -493,12 +538,7 @@ function installSessionHardening(): void {
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     networkGuard.totalRequests += 1;
     const url = new URL(details.url);
-    const isLocalDev =
-      isDev &&
-      (url.origin === rendererDevUrl ||
-        url.origin === "ws://127.0.0.1:5173" ||
-        url.hostname === "127.0.0.1" ||
-        url.hostname === "localhost");
+    const isLocalDev = isRendererDevRequest(details.url);
     const allowed =
       url.protocol === "file:" ||
       url.protocol === "devtools:" ||
@@ -549,7 +589,7 @@ function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
       nodeIntegration: false,
       webSecurity: true,
       allowRunningInsecureContent: false,
-      devTools: isDev,
+      devTools: useDevRenderer,
     },
   });
 
@@ -561,7 +601,7 @@ function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
-    const allowed = isDev ? targetUrl.startsWith(rendererDevUrl) : targetUrl.startsWith("file:");
+    const allowed = useDevRenderer ? isRendererDevNavigation(targetUrl) : targetUrl.startsWith("file:");
     if (!allowed) {
       networkGuard.deniedNavigationRequests += 1;
       if (networkGuard.deniedNavigationSamples.length < 5) {
@@ -571,12 +611,12 @@ function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
     }
   });
   mainWindow.webContents.on("before-input-event", (event, input) => {
-    if (!isDev && input.control && input.shift && input.key.toLowerCase() === "i") {
+    if (!useDevRenderer && input.control && input.shift && input.key.toLowerCase() === "i") {
       event.preventDefault();
     }
   });
 
-  if (isDev) {
+  if (useDevRenderer) {
     void mainWindow.loadURL(rendererDevUrl);
   } else {
     void mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));

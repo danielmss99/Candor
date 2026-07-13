@@ -31,6 +31,26 @@ product surface, v2 import, updater policy, and source-security proof checks.
 - All three observed defects were validated against current source before being
   accepted.
 
+## Phase 1a: Electron Root Commands
+
+Date: 2026-07-12
+
+| Command | Result |
+|---|---|
+| `npm install --package-lock-only --ignore-scripts` | passed; Tauri packages removed from the lockfile |
+| `npm ci` | passed; 435 packages; 0 known npm vulnerabilities |
+| `npm test` | passed; 6 test files; 29 tests |
+| `npm run build` | passed; Rust release core, Electron main, and renderer built |
+| `npm run start` with the isolated M0 smoke harness | passed; built renderer, release core handshake, exact preload, and disabled network policy |
+| `npm run dev` with the isolated M0 smoke harness | passed; Vite selected free loopback port `5175`, debug core handshake, exact preload, and disabled network policy |
+| `npm run v3:verify` | passed; full staged V3 proof chain |
+
+Root `dev`, `build`, `start`, `preview`, and `dist` now target Electron. The
+launcher distinguishes an explicitly configured loopback development renderer
+from an unpackaged built renderer, uses the matching debug or release Rust core,
+and rejects non-loopback renderer URLs. No `@tauri-apps` package remains in
+`package.json` or `package-lock.json`.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
