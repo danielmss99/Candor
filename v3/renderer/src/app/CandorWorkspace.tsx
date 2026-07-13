@@ -18,9 +18,11 @@ import { useCaptureSession } from "../features/capture/useCaptureSession";
 import { useLocalJob } from "../features/ai/useLocalJob";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
+  chooseInitialSelection,
+  useMeetingWorkspace,
+} from "../features/meetings/useMeetingWorkspace";
+import {
   DEFAULT_MODEL,
-  LIBRARY_PAGE_SIZE,
-  TRANSCRIPT_PAGE_SIZE,
   asArray,
   asBool,
   asNumber,
@@ -31,7 +33,6 @@ import {
   formatDuration,
   metric,
   parseAnswer,
-  parseMarkedMoments,
   parseRecap,
   parseModels,
   recapItemKey,
@@ -46,24 +47,19 @@ import {
   type LibraryFilter,
   type LocalAiAnswer,
   type LocalAiRecap,
-  type LocalJsonValue,
   type MarkedMoment,
-  type MeetingPrivacyReceipt,
   type OnboardingStep,
   type RecapItem,
-  type RecordingSummary,
   type ReviewSection,
   type SettingsSection,
-  type TranscriptSegment,
 } from "../core/contracts";
 import type { JobKind } from "../state/operation-machines";
-import { ExclusiveActionRegistry, RequestCoordinator } from "../state/request-coordinator";
+import { ExclusiveActionRegistry } from "../state/request-coordinator";
 
 export function CandorWorkspace() {
   const api = window.candor?.core;
   const licenseApi = window.candor?.license;
   const client = useMemo(() => (api ? new CandorClient(api) : null), [api]);
-  const requestCoordinator = useRef(new RequestCoordinator());
   const exclusiveActions = useRef(new ExclusiveActionRegistry());
   const startupLoaded = useRef(false);
   const [view, setView] = useState<AppView>("meeting");
@@ -97,24 +93,7 @@ export function CandorWorkspace() {
     timestamps: false,
   });
 
-  const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
-  const [recordingTotalCount, setRecordingTotalCount] = useState(0);
-  const [recordingsHaveMore, setRecordingsHaveMore] = useState(false);
-  const [selectedRecordingId, setSelectedRecordingId] = useState("");
-  const [transcript, setTranscript] = useState<TranscriptSegment[]>([]);
-  const [transcriptTotalCount, setTranscriptTotalCount] = useState(0);
-  const [transcriptHasMore, setTranscriptHasMore] = useState(false);
-  const [privacyReceipt, setPrivacyReceipt] = useState<MeetingPrivacyReceipt | null>(null);
-  const [replay, setReplay] = useState<JsonObject>({});
-  const [notesMarkdown, setNotesMarkdown] = useState("");
-  const [notesStatus, setNotesStatus] = useState<JsonObject>({});
-  const [notesDirty, setNotesDirty] = useState(false);
-  const [markedMoments, setMarkedMoments] = useState<MarkedMoment[]>([]);
-  const [selectedTrack, setSelectedTrack] = useState("mic");
-  const [recordingTitle, setRecordingTitle] = useState("Untitled local meeting");
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchMatches, setSearchMatches] = useState<LocalJsonValue[]>([]);
   const [askQuestion, setAskQuestion] = useState("What are the action items?");
   const [askAnswer, setAskAnswer] = useState<LocalAiAnswer | null>(null);
   const [recap, setRecap] = useState<LocalAiRecap | null>(null);
@@ -128,6 +107,46 @@ export function CandorWorkspace() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+
+  const resetMeetingAi = useCallback(() => {
+    setRecap(null);
+    setAskAnswer(null);
+  }, []);
+
+  const meetingWorkspace = useMeetingWorkspace({ api, client, onContentChanged: resetMeetingAi });
+  const {
+    recordings,
+    recordingTotalCount,
+    recordingsHaveMore,
+    selectedRecordingId,
+    transcript,
+    transcriptTotalCount,
+    transcriptHasMore,
+    privacyReceipt,
+    replay,
+    notesMarkdown,
+    notesStatus,
+    notesDirty,
+    markedMoments,
+    selectedTrack,
+    recordingTitle,
+    searchQuery,
+    searchMatches,
+    setSelectedRecordingId,
+    setNotesMarkdown,
+    setNotesStatus,
+    setNotesDirty,
+    setMarkedMoments,
+    setSelectedTrack,
+    setRecordingTitle,
+    setSearchQuery,
+    loadSelectedRecording,
+    refreshLibrary,
+    refreshPrivacyReceipt,
+    loadMoreTranscript: loadMoreTranscriptPage,
+    search: searchMeetingLibrary,
+    updateNotes,
+  } = meetingWorkspace;
 
   const {
     coreStatus,
@@ -222,96 +241,20 @@ export function CandorWorkspace() {
     setLicenseLoaded(true);
   }, [licenseApi]);
 
-  const loadSelectedRecording = useCallback(
-    async (recordingId: string, preserveAi = false) => {
-      requestCoordinator.current.invalidate("transcript-page");
-      requestCoordinator.current.invalidate("privacy-receipt");
-      if (!api || !client || !recordingId) {
-        setTranscript([]);
-        setTranscriptTotalCount(0);
-        setTranscriptHasMore(false);
-        setReplay({});
-        setNotesMarkdown("");
-        setNotesStatus({});
-        setNotesDirty(false);
-        setMarkedMoments([]);
-        setPrivacyReceipt(null);
-        setRecap(null);
-        setAskAnswer(null);
-        return;
-      }
-      const token = requestCoordinator.current.begin("selected-recording");
-      const [nextTranscript, replayObject, notesObject, nextReceipt] = await Promise.all([
-        client.transcriptPage(recordingId, 0, TRANSCRIPT_PAGE_SIZE),
-        client.object("recording.durable.replayManifest", () => api.recordingDurableReplayManifest(recordingId)),
-        client.object("recording.notes.read", () => api.recordingNotesRead(recordingId)),
-        client.privacyReceipt(recordingId),
-      ]);
-      if (!requestCoordinator.current.isCurrent(token)) return;
-      setTranscript(nextTranscript.segments);
-      setTranscriptTotalCount(nextTranscript.segmentCount);
-      setTranscriptHasMore(nextTranscript.hasMore);
-      setReplay(replayObject);
-      const nextMarkdown = asString(notesObject.markdown);
-      setNotesMarkdown(nextMarkdown);
-      setNotesStatus(notesObject);
-      setNotesDirty(false);
-      setMarkedMoments(parseMarkedMoments(nextMarkdown));
-      setPrivacyReceipt(nextReceipt);
-      if (!preserveAi) {
-        setRecap(null);
-        setAskAnswer(null);
-      }
-      const nextTracks = asArray(replayObject.tracks).map((track) => asString(track)).filter(Boolean);
-      setSelectedTrack((current) => nextTracks.length > 0 && !nextTracks.includes(current) ? nextTracks[0] : current);
-    },
-    [api, client],
-  );
-
-  const refreshLibrary = useCallback(async (offset = 0) => {
-    if (!client) return [] as RecordingSummary[];
-    const token = requestCoordinator.current.begin("library-page");
-    const page = await client.recordingPage(offset, LIBRARY_PAGE_SIZE);
-    if (!requestCoordinator.current.isCurrent(token)) return [] as RecordingSummary[];
-    setRecordings((current) => offset === 0
-      ? page.recordings
-      : [...current, ...page.recordings.filter((item) => !current.some((existing) => existing.recordingId === item.recordingId))]);
-    setRecordingTotalCount(page.totalCount);
-    setRecordingsHaveMore(page.hasMore);
-    return page.recordings;
-  }, [client]);
-
-  const refreshPrivacyReceipt = useCallback(async (recordingId = selectedRecordingId) => {
-    if (!client || !recordingId) {
-      setPrivacyReceipt(null);
-      return;
-    }
-    const token = requestCoordinator.current.begin("privacy-receipt");
-    const nextReceipt = await client.privacyReceipt(recordingId);
-    if (requestCoordinator.current.isCurrent(token)) setPrivacyReceipt(nextReceipt);
-  }, [client, selectedRecordingId]);
-
   const refresh = useCallback(async () => {
     if (!api || !client) {
       setError("Candor preload API is unavailable");
       return;
     }
-    const [, nextLibraryPage] = await Promise.all([
+    const [, nextRecordings] = await Promise.all([
       loadCritical(),
-      client.recordingPage(0, LIBRARY_PAGE_SIZE),
+      refreshLibrary(0),
     ]);
-    const nextRecordings = nextLibraryPage.recordings;
-    setRecordings(nextRecordings);
-    setRecordingTotalCount(nextLibraryPage.totalCount);
-    setRecordingsHaveMore(nextLibraryPage.hasMore);
-    const nextSelected =
-      selectedRecordingId && nextRecordings.some((item) => item.recordingId === selectedRecordingId)
-        ? selectedRecordingId
-        : nextRecordings[0]?.recordingId ?? "";
+    const nextSelected = chooseInitialSelection(selectedRecordingId, nextRecordings);
     setSelectedRecordingId(nextSelected);
     if (nextSelected) await loadSelectedRecording(nextSelected);
     void loadDiagnostics();
-  }, [api, client, loadCritical, loadDiagnostics, loadSelectedRecording, selectedRecordingId]);
+  }, [api, client, loadCritical, loadDiagnostics, loadSelectedRecording, refreshLibrary, selectedRecordingId, setSelectedRecordingId]);
 
   useEffect(() => {
     if (startupLoaded.current) return;
@@ -562,11 +505,8 @@ export function CandorWorkspace() {
   }
 
   async function searchRecordings() {
-    if (!api || !searchQuery.trim()) return;
-    await run("search", async () => {
-      const result = await api.recordingDurableSearch(searchQuery.trim());
-      setSearchMatches(asArray(asObject(result).matches));
-    });
+    if (!searchQuery.trim()) return;
+    await run("search", searchMeetingLibrary);
   }
 
   async function loadMoreRecordings() {
@@ -576,18 +516,8 @@ export function CandorWorkspace() {
   }
 
   async function loadMoreTranscript() {
-    if (!client || !selectedRecordingId || !transcriptHasMore) return;
-    await run("load transcript", async () => {
-      const token = requestCoordinator.current.begin("transcript-page");
-      const page = await client.transcriptPage(selectedRecordingId, transcript.length, TRANSCRIPT_PAGE_SIZE);
-      if (!requestCoordinator.current.isCurrent(token)) return;
-      setTranscript((current) => [
-        ...current,
-        ...page.segments.filter((segment) => !current.some((existing) => existing.index === segment.index)),
-      ]);
-      setTranscriptTotalCount(page.segmentCount);
-      setTranscriptHasMore(page.hasMore);
-    }, "transcript-page");
+    if (!selectedRecordingId || !transcriptHasMore) return;
+    await run("load transcript", loadMoreTranscriptPage, "transcript-page");
   }
 
   function reviewedItems(items: RecapItem[]): RecapItem[] {
@@ -1058,7 +988,7 @@ export function CandorWorkspace() {
         onCompactPaneChange={setCompactMeetingPane}
         onNotesPanelModeChange={setNotesPanelMode}
         onTranscribe={() => void transcribeRecording()}
-        onNotesChange={(value) => { setNotesMarkdown(value); setNotesDirty(true); }}
+        onNotesChange={updateNotes}
         onSaveNotes={() => void saveMeetingNotes()}
         onGenerateRecap={() => void generateRecap()}
         onAiModeChange={setAiMode}
@@ -1111,7 +1041,7 @@ export function CandorWorkspace() {
         busy={Boolean(busy)}
         onDetailSectionChange={setDetailSection}
         onReview={() => setView("review")}
-        onNotesChange={(value) => { setNotesMarkdown(value); setNotesDirty(true); }}
+        onNotesChange={updateNotes}
         onSaveNotes={() => void saveMeetingNotes()}
         onGenerateRecap={() => void generateRecap()}
         onTrackChange={setSelectedTrack}
@@ -1149,7 +1079,7 @@ export function CandorWorkspace() {
         busy={Boolean(busy)}
         onSectionChange={setReviewSection}
         onSummaryDraftChange={setReviewSummaryDraft}
-        onNotesChange={(value) => { setNotesMarkdown(value); setNotesDirty(true); }}
+        onNotesChange={updateNotes}
         onSaveNotes={() => void saveMeetingNotes()}
         onGenerateRecap={() => void generateRecap()}
         onReviewItem={(key, state) => setReviewStates((current) => ({ ...current, [key]: state }))}
