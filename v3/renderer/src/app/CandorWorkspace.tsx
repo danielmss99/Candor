@@ -28,6 +28,7 @@ import {
   chooseInitialSelection,
   useMeetingWorkspace,
 } from "../features/meetings/useMeetingWorkspace";
+import { useMeetingActions } from "../features/meetings/useMeetingActions";
 import { shouldShowActivationPrompt } from "../features/licensing/access-policy";
 import { useLicenseState } from "../features/licensing/useLicenseState";
 import { useAppNavigation } from "./navigation";
@@ -38,12 +39,7 @@ import {
   asNumber,
   asObject,
   asString,
-  formatDuration,
   metric,
-  type AppView,
-  type CompactMeetingPane,
-  type LibraryFilter,
-  type MarkedMoment,
   type OnboardingStep,
 } from "../core/contracts";
 
@@ -52,15 +48,10 @@ export function CandorWorkspace() {
   const licenseApi = window.candor?.license;
   const client = useMemo(() => (api ? new CandorClient(api) : null), [api]);
   const startupLoaded = useRef(false);
-  const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>("activate");
   const [startupPhase, setStartupPhase] = useState<StartupPhase>("loading");
   const [startupError, setStartupError] = useState("");
-  const [notesPanelMode, setNotesPanelMode] = useState<"notes" | "suggestions">("notes");
-  const [compactMeetingPane, setCompactMeetingPane] = useState<CompactMeetingPane>("transcript");
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
-  const [openMeetingIds, setOpenMeetingIds] = useState<string[]>([]);
-  const [audioUrl, setAudioUrl] = useState("");
   const meetingWorkspace = useMeetingWorkspace({ api, client });
   const {
     recordings,
@@ -216,6 +207,50 @@ export function CandorWorkspace() {
     generateRecap,
     ask: askSelectedRecording,
   } = localAi;
+  const meetingActions = useMeetingActions({
+    api,
+    run,
+    recordings,
+    selectedRecordingId,
+    selectedTrack,
+    notesMarkdown,
+    searchQuery,
+    transcriptHasMore,
+    setSelectedRecordingId,
+    setNotesMarkdown,
+    setNotesStatus,
+    setNotesDirty,
+    setMarkedMoments,
+    refreshLibrary,
+    refreshPrivacyReceipt,
+    loadRecording: loadSelectedRecording,
+    loadMoreTranscriptPage,
+    searchLibrary: searchMeetingLibrary,
+    resetMeetingAi,
+    setView,
+    setNotice,
+    setError,
+  });
+  const {
+    libraryFilter,
+    notesPanelMode,
+    compactMeetingPane,
+    openMeetingIds,
+    audioUrl,
+    setLibraryFilter,
+    setNotesPanelMode,
+    setCompactMeetingPane,
+    importV2Folder,
+    searchRecordings,
+    loadMoreRecordings,
+    loadMoreTranscript,
+    saveMeetingNotes,
+    markMoment,
+    loadAudio,
+    openRecording,
+    closeMeetingTab,
+    pinRecording,
+  } = meetingActions;
   const reportWorkflow = useReportWorkflow({
     api,
     selectedRecordingId,
@@ -262,7 +297,7 @@ export function CandorWorkspace() {
     onOpenRecordingSettings: () => { setSettingsSection("recording"); setView("settings"); },
     onShowLive: () => setView("meeting"),
     onSelectRecording: setSelectedRecordingId,
-    onPinRecording: (recordingId) => setOpenMeetingIds((current) => [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3)),
+    onPinRecording: pinRecording,
     onNotice: setNotice,
     onError: setError,
   });
@@ -313,103 +348,6 @@ export function CandorWorkspace() {
       setOnboardingStep("app");
     }
   }, [licenseApi, licenseLoaded, licensePromptDismissed, licenseStatus, onboardingStep, recordings.length]);
-
-  useEffect(() => {
-    setOpenMeetingIds((current) => {
-      const valid = current.filter((id) => recordings.some((recording) => recording.recordingId === id));
-      const next = [...valid];
-      for (const recording of recordings) {
-        if (next.length >= 3) break;
-        if (!next.includes(recording.recordingId)) next.push(recording.recordingId);
-      }
-      return next.slice(0, 3);
-    });
-  }, [recordings]);
-
-  useEffect(() => {
-    return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
-    };
-  }, [audioUrl]);
-
-  async function importV2Folder() {
-    if (!api) return;
-    await run("import", async () => {
-      const result = await api.v2ImportFromFolder();
-      const object = asObject(result);
-      if (asBool(object.canceled)) {
-        setNotice("Import canceled");
-        return;
-      }
-      setNotice(`Imported ${asNumber(object.importedCount)} v2 meetings, ${asNumber(object.audioImportedCount)} with audio`);
-      await refreshLibrary(0);
-      setView("library");
-    }, "v2-import");
-  }
-
-  async function searchRecordings() {
-    if (!searchQuery.trim()) return;
-    await run("search", searchMeetingLibrary);
-  }
-
-  async function loadMoreRecordings() {
-    await run("load meetings", async () => {
-      await refreshLibrary(recordings.length);
-    }, "library-page");
-  }
-
-  async function loadMoreTranscript() {
-    if (!selectedRecordingId || !transcriptHasMore) return;
-    await run("load transcript", loadMoreTranscriptPage, "transcript-page");
-  }
-
-  async function saveMeetingNotes() {
-    if (!api || !selectedRecordingId) return;
-    await run("notes", async () => {
-      const result = await api.recordingNotesSave(selectedRecordingId, notesMarkdown);
-      setNotesStatus(asObject(result));
-      setNotesDirty(false);
-      setNotice("Meeting notes saved locally");
-      await Promise.all([refreshLibrary(0), refreshPrivacyReceipt()]);
-    }, "document-write", "notes-save");
-  }
-
-  function markMoment(timeMs: number) {
-    if (!selectedRecordingId) {
-      setError("Select or start a local meeting before marking a moment.");
-      return;
-    }
-    const roundedMs = Math.max(0, Math.floor(timeMs / 1000) * 1000);
-    const marker: MarkedMoment = {
-      id: `note-${roundedMs}-${Date.now()}`,
-      timeMs: roundedMs,
-      label: "Moment marked",
-    };
-    setMarkedMoments((current) => [...current, marker]);
-    setNotesMarkdown((current) => {
-      const prefix = current.trimEnd();
-      const line = `- [${formatDuration(roundedMs)}] Moment marked`;
-      return prefix ? `${prefix}\n${line}` : line;
-    });
-    setNotesDirty(true);
-    setError("");
-    setNotice(`Moment linked to notes at ${formatDuration(roundedMs)}`);
-  }
-
-  async function loadAudio() {
-    if (!api || !selectedRecordingId) return;
-    await run("audio", async () => {
-      const result = await api.exportCreate({ recordingId: selectedRecordingId, format: "wav", channel: selectedTrack || undefined });
-      const data = asString(asObject(result).dataBase64);
-      if (!data) throw new Error("No WAV payload returned");
-      const bytes = Uint8Array.from(atob(data), (char) => char.charCodeAt(0));
-      const blob = new Blob([bytes], { type: "audio/wav" });
-      if (audioUrl) URL.revokeObjectURL(audioUrl);
-      setAudioUrl(URL.createObjectURL(blob));
-      setNotice("Audio ready");
-      await refreshPrivacyReceipt();
-    });
-  }
 
   async function activateLicense() {
     await run("license", async () => {
@@ -542,24 +480,6 @@ export function CandorWorkspace() {
       if (!current) void refreshPrivacyFacts().catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
       return !current;
     });
-  }
-
-  async function openRecording(recordingId: string, target: AppView = "meeting") {
-    if (recordingId !== selectedRecordingId) resetMeetingAi();
-    setSelectedRecordingId(recordingId);
-    setOpenMeetingIds((current) => [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3));
-    await loadSelectedRecording(recordingId);
-    setView(target, recordingId);
-  }
-
-  function closeMeetingTab(recordingId: string) {
-    const remaining = openMeetingIds.filter((id) => id !== recordingId);
-    setOpenMeetingIds(remaining);
-    if (selectedRecordingId === recordingId) {
-      const next = remaining[0] ?? "";
-      setSelectedRecordingId(next);
-      if (next) void loadSelectedRecording(next);
-    }
   }
 
   const captureStatusLabel = captureMachine.phase === "idle"
