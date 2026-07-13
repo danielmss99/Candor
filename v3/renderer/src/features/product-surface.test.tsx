@@ -33,10 +33,11 @@ describe("simplified product surface", () => {
     const markup = renderToStaticMarkup(
       <DesktopShell view="library" recordings={[]} openMeetingIds={[]} selectedRecordingId="" activeCapture={false} combinedCaptureAvailable={false} busy={false} notice="" error="" onHome={vi.fn()} onStartRecording={vi.fn()} onNavigate={vi.fn()} onOpenRecording={vi.fn()} onCloseMeeting={vi.fn()} onDismissNotice={vi.fn()} onDismissError={vi.fn()}><div>Content</div></DesktopShell>,
     );
-    expect(markup).toContain("Current meeting");
+    expect(markup).toContain("Home");
     expect(markup).toContain("Meetings");
-    expect(markup).toContain("Exports");
     expect(markup).toContain("Settings");
+    expect(markup).not.toContain("Current meeting");
+    expect(markup).not.toContain("Exports");
     expect(markup).not.toContain("Custody proof");
     expect(markup).not.toContain("AI models");
   });
@@ -91,7 +92,7 @@ describe("simplified product surface", () => {
       privacyReceipt: receipt,
       networkCapabilities: network,
       custodyItems: [] as Array<[string, string]>,
-      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenDiagnostics: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(),
+      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(),
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);

@@ -22,8 +22,7 @@ export type WorkspaceView =
   | "detail"
   | "review"
   | "settings"
-  | "export"
-  | "proof";
+  | "export";
 
 export function routeToWorkspaceView(route: AppRoute): WorkspaceView {
   if (route.name === "meetings") return "library";
@@ -36,9 +35,8 @@ export function meetingTabToDetailSection(tab: MeetingTab): DetailSection {
   return tab;
 }
 
-export function detailSectionToMeetingTab(section: DetailSection): MeetingTab | null {
-  if (section === "summary" || section === "transcript" || section === "notes") return section;
-  return null;
+export function detailSectionToMeetingTab(section: DetailSection): MeetingTab {
+  return section;
 }
 
 export function settingsRouteSection(section: SettingsSection): AppRoute & { name: "settings" } {
@@ -50,4 +48,3 @@ export function settingsRouteSection(section: SettingsSection): AppRoute & { nam
 export function reviewRoute(recordingId: string, _section: ReviewSection): AppRoute {
   return { name: "review", recordingId };
 }
-

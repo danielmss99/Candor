@@ -6,7 +6,6 @@ import {
 import { AppShell } from "./AppShell";
 import { CandorClient } from "../core/candor-client";
 import { ExportView } from "../features/export/ExportView";
-import { PrivacyReceipt } from "../features/privacy/PrivacyReceipt";
 import { HomeView } from "../features/home/HomeView";
 import { LibraryView } from "../features/library/LibraryView";
 import { LiveMeetingView } from "../features/meeting/LiveMeetingView";
@@ -146,7 +145,6 @@ export function CandorWorkspace() {
     setNotesStatus,
     setNotesDirty,
     setMarkedMoments,
-    setSelectedTrack,
     setRecordingTitle,
     setSearchQuery,
     loadSelectedRecording,
@@ -159,7 +157,6 @@ export function CandorWorkspace() {
 
   const {
     coreStatus,
-    capabilities,
     privacyAudit,
     networkCapabilities,
     updateStatus,
@@ -197,10 +194,6 @@ export function CandorWorkspace() {
   const useInstructModel = aiMode === "quality" && instructReady;
   const models = useMemo(() => parseModels(modelStatus), [modelStatus]);
   const selectedRecording = recordings.find((item) => item.recordingId === selectedRecordingId);
-  const tracks = useMemo(
-    () => asArray(replay.tracks).map((track) => asString(track)).filter(Boolean),
-    [replay],
-  );
   const selectedTitle = selectedRecording?.label || recordingTitle || "Untitled local meeting";
   const combinedCaptureAvailable = asBool(asObject(asObject(captureStatus.sources).system).simultaneousMicAndSystem);
   const licenseState = asString(licenseStatus.state, "inactive");
@@ -1066,9 +1059,6 @@ export function CandorWorkspace() {
         notesMarkdown={notesMarkdown}
         notesDirty={notesDirty}
         recap={recap}
-        tracks={tracks}
-        selectedTrack={selectedTrack}
-        audioUrl={audioUrl}
         askQuestion={askQuestion}
         askAnswer={askAnswer}
         aiModeStatus={aiModeStatus}
@@ -1080,8 +1070,6 @@ export function CandorWorkspace() {
         onNotesChange={updateNotes}
         onSaveNotes={() => void saveMeetingNotes()}
         onGenerateRecap={() => void generateRecap()}
-        onTrackChange={setSelectedTrack}
-        onLoadAudio={() => void loadAudio()}
         onAskQuestionChange={setAskQuestion}
         onAsk={() => void askSelectedRecording()}
       />
@@ -1175,7 +1163,6 @@ export function CandorWorkspace() {
         onAcknowledgeSystem={() => void acknowledgeSystemConsent()}
         onRecordSystem={() => void startSystemRecording()}
         onRecordBoth={() => void startMicAndSystemRecording()}
-        onOpenDiagnostics={() => setView("proof")}
         onOpenExport={() => setView("export")}
         onRefreshLocalSettings={() => void refreshLocalSettings()}
       />
@@ -1194,10 +1181,6 @@ export function CandorWorkspace() {
     return <ExportView title={selectedTitle} summary={reviewSummaryDraft || recap?.summary || ""} format={exportFormat} paperSize={exportPaperSize} sections={exportSections} decisions={previewDecisions} actions={previewActions} risks={previewRisks} questions={previewQuestions} markdownExport={markdownExport} canExport={Boolean(selectedRecordingId)} saving={busy === "export"} onFormatChange={setExportFormat} onPaperSizeChange={setExportPaperSize} onToggleSection={toggleExportSection} onBack={() => setView("review")} onSave={() => void saveLocalReport()} />;
   }
 
-  function renderProof() {
-    return <section className="page-view" data-view="proof" aria-label="Local custody"><header className="screen-heading"><div><h1>Local Custody</h1><p>Queryable facts from the Candor core</p></div><button type="button" className="secondary-button" onClick={() => { setSettingsSection("privacy"); setView("settings"); }}>Back to settings</button></header><PrivacyReceipt receipt={privacyReceipt} network={networkCapabilities} /><div className="proof-grid"><section><h2>Custody facts</h2><dl className="settings-facts privacy-facts">{custodyItems.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></section><section><h2>Boundary</h2><dl className="settings-facts"><div><dt>Allowed commands</dt><dd>{asArray(capabilities.allowedMethods).length}</dd></div><div><dt>Blocked capabilities</dt><dd>{asArray(capabilities.deniedCapabilities).length}</dd></div><div><dt>External attempts</dt><dd>{metric(privacyAudit.externalCallsAttempted, "0")}</dd></div><div><dt>Background downloads</dt><dd>{asBool(instructAssetsStatus.backgroundDownloads) ? "On" : "Off"}</dd></div><div><dt>Managed paths exposed</dt><dd>{asBool(instructAssetsStatus.managedPathExposed) ? "Yes" : "No"}</dd></div></dl></section></div></section>;
-  }
-
   function renderCurrentView() {
     if (view === "home") return renderHome();
     if (view === "meeting") return renderMeeting();
@@ -1206,7 +1189,7 @@ export function CandorWorkspace() {
     if (view === "review") return renderReview();
     if (view === "settings") return renderSettings();
     if (view === "export") return renderExport();
-    return renderProof();
+    return renderExport();
   }
 
   if (!licenseLoaded || startupPhase === "loading") return <StartupLoading />;

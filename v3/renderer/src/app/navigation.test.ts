@@ -19,8 +19,7 @@ describe("typed navigation", () => {
   it("keeps meeting tabs restricted to the three normal sections", () => {
     expect(meetingTabToDetailSection("transcript")).toBe("transcript");
     expect(detailSectionToMeetingTab("summary")).toBe("summary");
-    expect(detailSectionToMeetingTab("actions")).toBeNull();
-    expect(detailSectionToMeetingTab("privacy")).toBeNull();
+    expect(detailSectionToMeetingTab("notes")).toBe("notes");
   });
 
   it("routes technical settings to advanced disclosure", () => {
@@ -29,4 +28,3 @@ describe("typed navigation", () => {
     expect(settingsRouteSection("privacy")).toEqual({ name: "settings", section: "advanced" });
   });
 });
-

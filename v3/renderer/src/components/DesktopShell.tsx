@@ -41,7 +41,7 @@ export function DesktopShell({
   onDismissNotice,
   onDismissError,
 }: DesktopShellProps) {
-  const navigation: Array<[AppView, string]> = [["meeting", "Current meeting"], ["library", "Meetings"], ["export", "Exports"], ["settings", "Settings"]];
+  const navigation: Array<[AppView, string]> = [["home", "Home"], ["library", "Meetings"], ["settings", "Settings"]];
   const openTabs = openMeetingIds.map((id) => recordings.find((recording) => recording.recordingId === id)).filter((recording): recording is RecordingSummary => Boolean(recording));
   const overflowMeetings = recordings.filter((recording) => !openMeetingIds.includes(recording.recordingId));
 
@@ -58,7 +58,7 @@ export function DesktopShell({
       <div className="desktop-body">
         <aside className="desktop-sidebar" aria-label="Candor navigation">
           <RecordAction variant="sidebar" active={activeCapture} captureLabel={combinedCaptureAvailable ? "Mic + system audio" : "Microphone audio"} onClick={onStartRecording} disabled={busy} />
-          <nav className="desktop-nav" aria-label="Primary"><span>WORKSPACE</span>{navigation.map(([id, label]) => <button type="button" aria-current={view === id ? "page" : undefined} key={id} onClick={() => onNavigate(id)} disabled={id === "export" && !selectedRecordingId}>{label}</button>)}</nav>
+          <nav className="desktop-nav" aria-label="Primary"><span>WORKSPACE</span>{navigation.map(([id, label]) => <button type="button" aria-current={view === id ? "page" : undefined} key={id} onClick={() => onNavigate(id)}>{label}</button>)}</nav>
           <footer><strong><span className="status-dot ok" />Local processing active</strong><span>No meeting data leaves this device</span></footer>
         </aside>
         <section className="desktop-content">
