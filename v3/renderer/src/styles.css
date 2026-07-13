@@ -1239,7 +1239,7 @@ p {
   min-height: 34px;
   border: 1px solid var(--warning);
   background: transparent;
-  color: var(--warning);
+  color: var(--text-primary);
   font-size: 11px;
   padding: 0 12px;
 }
@@ -3310,7 +3310,7 @@ p {
 
 .settings-layout > nav > span {
   margin: 10px 8px 0;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 9px;
   font-weight: 700;
 }

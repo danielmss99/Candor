@@ -18,6 +18,8 @@
     "dist": "npm run electron:v3:dist",
     "preview": "npm run build && npm run start",
     "test": "vitest run",
+    "test:electron": "playwright test -c playwright.electron.config.ts",
+    "test:electron:build": "npm run electron:v3:build && npm run test:electron",
     "core:v3:build": "node scripts/cargo-with-local-perl.mjs build --manifest-path crates/candor-core/Cargo.toml",
     "core:v3:release": "node scripts/build-release-core.mjs",
     "electron:v3:build-main": "node scripts/m0-build-electron.mjs",
@@ -119,6 +121,8 @@
     "three": "^0.185.0"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
+    "@playwright/test": "^1.61.1",
     "@types/node": "^26.1.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",

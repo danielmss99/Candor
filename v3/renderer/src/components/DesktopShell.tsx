@@ -51,10 +51,10 @@ export function DesktopShell({
     <main className="candor-desktop">
       <header className="session-rail">
         <button className="wordmark" type="button" onClick={onHome}><img src="./candor-mark.png" width="28" height="28" alt="" aria-hidden="true" /><span>Candor</span></button>
-        <div className="session-tabs" role="tablist" aria-label="Open meetings">
-          {openTabs.length ? openTabs.map((recording) => <div className="session-tab" key={recording.recordingId} data-active={selectedRecordingId === recording.recordingId}><button type="button" role="tab" aria-selected={selectedRecordingId === recording.recordingId} onClick={() => onOpenRecording(recording.recordingId)}><span className="tab-dot" />{recording.label}</button><button className="tab-close" type="button" aria-label={`Close ${recording.label}`} title="Close meeting tab" onClick={() => onCloseMeeting(recording.recordingId)}>x</button></div>) : <div className="session-tab placeholder" data-active="true"><button type="button" role="tab" aria-selected="true" onClick={() => onNavigate("meeting")}><span className="tab-dot" />New local meeting</button></div>}
+        <nav className="session-tabs" aria-label="Open meetings">
+          {openTabs.length ? openTabs.map((recording) => <div className="session-tab" key={recording.recordingId} data-active={selectedRecordingId === recording.recordingId}><button type="button" aria-current={selectedRecordingId === recording.recordingId ? "page" : undefined} onClick={() => onOpenRecording(recording.recordingId)}><span className="tab-dot" />{recording.label}</button><button className="tab-close" type="button" aria-label={`Close ${recording.label}`} title="Close meeting tab" onClick={() => onCloseMeeting(recording.recordingId)}>x</button></div>) : <div className="session-tab placeholder" data-active="true"><button type="button" aria-current="page" onClick={() => onNavigate("meeting")}><span className="tab-dot" />New local meeting</button></div>}
           {overflowMeetings.length ? <details className="session-overflow"><summary aria-label="Open another meeting" title="More meetings">+{overflowMeetings.length}</summary><div>{overflowMeetings.slice(0, 12).map((recording) => <button type="button" key={recording.recordingId} onClick={() => onOpenRecording(recording.recordingId)}>{recording.label}</button>)}</div></details> : null}
-        </div>
+        </nav>
         <span className="local-only-status"><span className="status-dot ok" />Local only</span>
       </header>
       <div className="desktop-body">

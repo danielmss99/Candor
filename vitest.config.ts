@@ -8,6 +8,7 @@ export default defineConfig({
       "dist-v3/**",
       "release-v3/**",
       "crates/**/target/**",
+      "tests/e2e/**",
     ],
   },
 });

@@ -120,6 +120,14 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run m0:packaged-smoke
 
+      - name: Run Electron integration and accessibility tests
+        if: runner.os != 'Linux'
+        run: npm run test:electron
+
+      - name: Run Electron integration and accessibility tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:electron
+
       - name: Validate Windows network proof runner
         if: runner.os == 'Windows'
         shell: pwsh

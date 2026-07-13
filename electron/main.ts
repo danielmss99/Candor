@@ -18,18 +18,27 @@ const isDev = !app.isPackaged;
 const smokeOutputPath = process.env.CANDOR_M0_SMOKE_OUT ?? "";
 const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
 const isSmokeMode = smokeOutputPath.length > 0;
+const isE2EMode = isDev && process.env.CANDOR_E2E === "1";
 const smokeWindowWidth = Math.max(960, Number.parseInt(process.env.CANDOR_M0_SMOKE_WIDTH ?? "1440", 10) || 1440);
 const smokeWindowHeight = Math.max(700, Number.parseInt(process.env.CANDOR_M0_SMOKE_HEIGHT ?? "900", 10) || 900);
 const requestedSmokeScaleFactor = Number.parseFloat(process.env.CANDOR_M0_SMOKE_SCALE_FACTOR ?? "1");
 const smokeScaleFactor = Number.isFinite(requestedSmokeScaleFactor)
   ? Math.min(2, Math.max(1, requestedSmokeScaleFactor))
   : 1;
+const requestedE2EScaleFactor = Number.parseFloat(process.env.CANDOR_E2E_SCALE_FACTOR ?? "1");
+const e2eScaleFactor = Number.isFinite(requestedE2EScaleFactor)
+  ? Math.min(2, Math.max(1, requestedE2EScaleFactor))
+  : 1;
+const testScaleFactor = isSmokeMode ? smokeScaleFactor : isE2EMode ? e2eScaleFactor : 1;
 
-if (isSmokeMode && smokeScaleFactor !== 1) {
-  app.commandLine.appendSwitch("force-device-scale-factor", smokeScaleFactor.toString());
+if ((isSmokeMode || isE2EMode) && testScaleFactor !== 1) {
+  app.commandLine.appendSwitch("force-device-scale-factor", testScaleFactor.toString());
 }
-if (isSmokeMode && process.env.CANDOR_V3_DATA_DIR) {
-  app.setPath("userData", path.join(process.env.CANDOR_V3_DATA_DIR, "electron-smoke"));
+if ((isSmokeMode || isE2EMode) && process.env.CANDOR_V3_DATA_DIR) {
+  app.setPath(
+    "userData",
+    path.join(process.env.CANDOR_V3_DATA_DIR, isSmokeMode ? "electron-smoke" : "electron-e2e"),
+  );
 }
 
 const rendererNavigation = createRendererNavigationPolicy({
