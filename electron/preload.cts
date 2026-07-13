@@ -90,6 +90,8 @@ contextBridge.exposeInMainWorld("candor", {
       ipcRenderer.invoke("candor-core:recording-durable-read-audio-chunk", { recordingId, index }) as Promise<JsonValue>,
     recordingDurableSearch: (query: string) =>
       ipcRenderer.invoke("candor-core:recording-durable-search", { query }) as Promise<JsonValue>,
+    recordingDelete: (recordingId: string) =>
+      ipcRenderer.invoke("candor-recording:delete", { recordingId }) as Promise<JsonValue>,
     recordingNotesRead: (recordingId: string) =>
       ipcRenderer.invoke("candor-core:recording-notes-read", { recordingId }) as Promise<JsonValue>,
     recordingNotesSave: (recordingId: string, markdown: string) =>

@@ -414,6 +414,62 @@ impl VaultStore {
         }
     }
 
+    pub fn delete_recording_index(&self, recording_id: &str) -> Result<Value, VaultStoreError> {
+        if recording_id.is_empty()
+            || recording_id.len() > 96
+            || !recording_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(VaultStoreError::new(
+                "VAULT_RECORDING_ID_INVALID",
+                "recording id was invalid for encrypted index cleanup",
+            ));
+        }
+
+        #[cfg(not(feature = "sqlcipher-vault"))]
+        {
+            Ok(json!({
+                "cleanupComplete": true,
+                "state": "sqlcipher-feature-disabled",
+                "recordingId": recording_id,
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }))
+        }
+
+        #[cfg(feature = "sqlcipher-vault")]
+        {
+            if !self.vault_path().exists() {
+                return Ok(json!({
+                    "cleanupComplete": true,
+                    "state": "vault-not-created",
+                    "recordingId": recording_id,
+                    "rawPathExposed": false,
+                    "keyMaterialExposedToRenderer": false
+                }));
+            }
+            let opened = self.open_os_key_connection()?;
+            let removed = opened
+                .connection
+                .execute(
+                    "DELETE FROM candor_recordings WHERE recording_id = ?1",
+                    [recording_id],
+                )
+                .map_err(|err| {
+                    VaultStoreError::new("VAULT_RECORDING_INDEX_DELETE_FAILED", err.to_string())
+                })?;
+            Ok(json!({
+                "cleanupComplete": true,
+                "state": "deleted",
+                "recordingId": recording_id,
+                "removedRows": removed,
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }))
+        }
+    }
+
     #[cfg(feature = "sqlcipher-vault")]
     fn passphrase_proof_vault_path(&self) -> PathBuf {
         self.root.join(PASSPHRASE_PROOF_VAULT_FILE)
@@ -1671,6 +1727,52 @@ mod tests {
         assert_eq!(opened["stableAfterReopen"], true);
         assert_eq!(opened["keyMaterialExposedToRenderer"], false);
         assert_eq!(opened["rawPathExposed"], false);
+    }
+
+    #[cfg(all(windows, feature = "sqlcipher-vault"))]
+    #[test]
+    fn recording_index_delete_is_pathless_and_idempotent() {
+        let store = temp_store();
+        let summary = json!({
+            "recordingId": "delete-index-recording",
+            "state": "finished",
+            "chunkCount": 1,
+            "totalBytes": 10,
+            "storedBytes": 20,
+            "encryptedAtRest": true,
+            "encryptedChunkCount": 1,
+            "createdAtMs": 1,
+            "updatedAtMs": 2
+        });
+        let indexed = store
+            .index_recording_summary_sqlcipher(&summary)
+            .expect("index recording");
+        assert_eq!(indexed["recordingCount"], 1);
+
+        let removed = store
+            .delete_recording_index("delete-index-recording")
+            .expect("delete recording index");
+        let repeated = store
+            .delete_recording_index("delete-index-recording")
+            .expect("repeat recording index delete");
+
+        assert_eq!(removed["cleanupComplete"], true);
+        assert_eq!(removed["removedRows"], 1);
+        assert_eq!(removed["rawPathExposed"], false);
+        assert_eq!(repeated["cleanupComplete"], true);
+        assert_eq!(repeated["removedRows"], 0);
+    }
+
+    #[cfg(not(feature = "sqlcipher-vault"))]
+    #[test]
+    fn recording_index_delete_is_complete_when_sqlcipher_is_not_built() {
+        let store = temp_store();
+        let removed = store
+            .delete_recording_index("delete-index-recording")
+            .expect("no SQLCipher index requires no cleanup");
+        assert_eq!(removed["cleanupComplete"], true);
+        assert_eq!(removed["state"], "sqlcipher-feature-disabled");
+        assert_eq!(removed["rawPathExposed"], false);
     }
 
     #[cfg(feature = "sqlcipher-vault")]

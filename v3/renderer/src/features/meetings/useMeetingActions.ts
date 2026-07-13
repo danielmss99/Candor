@@ -171,6 +171,41 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
     });
   }, [api, audioUrl, refreshPrivacyReceipt, run, selectedRecordingId, selectedTrack, setNotice]);
 
+  const deleteRecording = useCallback(async () => {
+    if (!api || !selectedRecordingId) return;
+    const recordingId = selectedRecordingId;
+    await run("delete meeting", async () => {
+      const result = asObject(await api.recordingDelete(recordingId));
+      if (asBool(result.canceled)) {
+        setNotice("Deletion canceled");
+        return;
+      }
+      const dataRemoved = asBool(result.recordingDataRemoved);
+      if (!dataRemoved) {
+        setOpenMeetingIds((current) => current.filter((id) => id !== recordingId));
+        setSelectedRecordingId("");
+        resetMeetingAi();
+        await loadRecording("");
+        await refreshLibrary(0);
+        setView("library");
+        throw new Error("Deletion is incomplete. Candor will retry the local tombstone during recovery.");
+      }
+      if (audioUrl) {
+        URL.revokeObjectURL(audioUrl);
+        setAudioUrl("");
+      }
+      setOpenMeetingIds((current) => current.filter((id) => id !== recordingId));
+      setSelectedRecordingId("");
+      resetMeetingAi();
+      await loadRecording("");
+      await refreshLibrary(0);
+      setView("library");
+      setNotice(asBool(result.deleted)
+        ? "Meeting permanently deleted from this device"
+        : "Meeting data removed; encrypted index cleanup will retry locally");
+    }, "recording-delete");
+  }, [api, audioUrl, loadRecording, refreshLibrary, resetMeetingAi, run, selectedRecordingId, setNotice, setSelectedRecordingId, setView]);
+
   const openRecording = useCallback(async (recordingId: string, target: AppView = "meeting") => {
     if (recordingId !== selectedRecordingId) resetMeetingAi();
     setSelectedRecordingId(recordingId);
@@ -209,6 +244,7 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
     saveMeetingNotes,
     markMoment,
     loadAudio,
+    deleteRecording,
     openRecording,
     closeMeetingTab,
     pinRecording,

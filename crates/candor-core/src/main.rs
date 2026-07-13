@@ -113,6 +113,8 @@ struct StartupRecoveryStatus {
     attempted: bool,
     ok: bool,
     recovered_count: u64,
+    completed_deletion_count: u64,
+    pending_deletion_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_code: Option<&'static str>,
     raw_path_exposed: bool,
@@ -162,7 +164,12 @@ struct CoreState {
 impl CoreState {
     fn new(started_at_ms: u128) -> Self {
         let recording_store = RecordingStore::from_env();
-        let startup_recovery = startup_recovery_status(recording_store.recover());
+        let vault_store = VaultStore::from_env();
+        let startup_recovery = startup_recovery_status(
+            recording_store
+                .recover()
+                .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
+        );
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
         Self {
             started_at_ms,
@@ -182,7 +189,7 @@ impl CoreState {
             transcription_service: TranscriptionService,
             update_policy: UpdatePolicy,
             v2_importer: V2Importer,
-            vault_store: VaultStore::from_env(),
+            vault_store,
         }
     }
 
@@ -195,7 +202,11 @@ impl CoreState {
         let consent_root = recording_store
             .local_data_root_for_core()
             .join("consent-state");
-        let startup_recovery = startup_recovery_status(recording_store.recover());
+        let startup_recovery = startup_recovery_status(
+            recording_store
+                .recover()
+                .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
+        );
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
         Self {
             started_at_ms,
@@ -229,6 +240,14 @@ fn startup_recovery_status(result: Result<Value, RecordingStoreError>) -> Startu
                 .get("recoveredCount")
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
+            completed_deletion_count: value
+                .get("completedDeletionCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+            pending_deletion_count: value
+                .get("pendingDeletionCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
             error_code: None,
             raw_path_exposed: false,
         },
@@ -236,6 +255,8 @@ fn startup_recovery_status(result: Result<Value, RecordingStoreError>) -> Startu
             attempted: true,
             ok: false,
             recovered_count: 0,
+            completed_deletion_count: 0,
+            pending_deletion_count: 0,
             error_code: Some(error.code),
             raw_path_exposed: false,
         },
@@ -461,6 +482,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "recording.durable.writeTranscriptSegment",
                 "recording.durable.writeAudioChunk",
                 "recording.durable.finish",
+                "recording.durable.delete",
                 "recording.durable.recover",
                 "recording.durable.list",
                 "recording.durable.listPage",
@@ -1015,6 +1037,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(error) => return make_recording_error(id, error),
             }
         }
+        "recording.durable.delete" => {
+            let params = match decode_params::<RecordingIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.delete_finished(params) {
+                Ok(value) => finalize_deletion_result(value, state),
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
         "recording.durable.recover" => match state.recording_store.recover() {
             Ok(value) => annotate_recovery_result(value, state),
             Err(error) => return make_recording_error(id, error),
@@ -1167,7 +1199,112 @@ fn annotate_recording_summary(mut value: Value, state: &mut CoreState) -> Value 
     value
 }
 
+fn finalize_deletion_result(mut value: Value, state: &CoreState) -> Value {
+    let recording_id = value
+        .get("recordingId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let recording_data_removed = value
+        .get("recordingDataRemoved")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !recording_data_removed || recording_id.is_empty() {
+        return value;
+    }
+
+    let index_cleanup = match state.vault_store.delete_recording_index(&recording_id) {
+        Ok(cleanup) => cleanup,
+        Err(error) => json!({
+            "cleanupComplete": false,
+            "state": "pending",
+            "errorCode": error.code,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }),
+    };
+    let cleanup_complete = index_cleanup
+        .get("cleanupComplete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if cleanup_complete {
+        match state
+            .recording_store
+            .complete_deletion_metadata(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            }) {
+            Ok(mut completed) => {
+                if let Some(object) = completed.as_object_mut() {
+                    object.insert("vaultIndexCleanup".to_string(), index_cleanup);
+                }
+                return completed;
+            }
+            Err(error) => {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("state".to_string(), json!("metadataCleanupPending"));
+                    object.insert("deleted".to_string(), json!(false));
+                    object.insert("metadataCleanupComplete".to_string(), json!(false));
+                    object.insert("retryRequired".to_string(), json!(true));
+                    object.insert("metadataErrorCode".to_string(), json!(error.code));
+                }
+            }
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("vaultIndexCleanup".to_string(), index_cleanup);
+    }
+    value
+}
+
+fn reconcile_recovered_deletions(
+    mut value: Value,
+    recording_store: &RecordingStore,
+    vault_store: &VaultStore,
+) -> Value {
+    let ids = value
+        .get("completedDeletionIds")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut completed = 0_u64;
+    let mut pending = value
+        .get("pendingDeletionCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    for id in ids.iter().filter_map(Value::as_str) {
+        let cleanup_complete = vault_store
+            .delete_recording_index(id)
+            .ok()
+            .map(|cleanup| {
+                cleanup
+                    .get("cleanupComplete")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if cleanup_complete
+            && recording_store
+                .complete_deletion_metadata(RecordingIdParams {
+                    recording_id: id.to_string(),
+                })
+                .is_ok()
+        {
+            completed = completed.saturating_add(1);
+        } else {
+            pending = pending.saturating_add(1);
+        }
+    }
+    if let Some(object) = value.as_object_mut() {
+        object.insert("completedDeletionCount".to_string(), json!(completed));
+        object.insert("pendingDeletionCount".to_string(), json!(pending));
+        object.remove("completedDeletionIds");
+    }
+    value
+}
+
 fn annotate_recovery_result(mut value: Value, state: &mut CoreState) -> Value {
+    value = reconcile_recovered_deletions(value, &state.recording_store, &state.vault_store);
     let mut indexed = 0_u64;
     let mut available = false;
     if let Some(recordings) = value.get("recoveredRecordings").and_then(Value::as_array) {
@@ -1903,6 +2040,54 @@ mod tests {
             .as_str()
             .expect("markdown")
             .contains("Reliability is our moat."));
+    }
+
+    #[test]
+    fn durable_delete_rpc_permanently_removes_finished_data_without_a_license_state() {
+        let mut state = core_state();
+        let started = handle_request(
+            request_with(
+                json!(20),
+                "recording.durable.start",
+                json!({ "label": "Delete RPC" }),
+            ),
+            &mut state,
+        );
+        let recording_id = started.result.expect("started recording")["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        let finished = handle_request(
+            request_with(
+                json!(21),
+                "recording.durable.finish",
+                json!({ "recordingId": recording_id.clone() }),
+            ),
+            &mut state,
+        );
+        assert!(finished.ok);
+
+        let deleted = handle_request(
+            request_with(
+                json!(22),
+                "recording.durable.delete",
+                json!({ "recordingId": recording_id }),
+            ),
+            &mut state,
+        );
+
+        assert!(deleted.ok);
+        let result = deleted.result.expect("delete result");
+        assert_eq!(result["state"], "deleted");
+        assert_eq!(result["deleted"], true);
+        assert_eq!(result["permanent"], true);
+        assert_eq!(result["rawPathExposed"], false);
+        assert_eq!(
+            handle_request(request("recording.durable.list"), &mut state)
+                .result
+                .expect("list after delete")["recordingCount"],
+            0
+        );
     }
 
     #[test]

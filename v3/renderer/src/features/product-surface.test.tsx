@@ -4,6 +4,7 @@ import { DesktopShell } from "../components/DesktopShell";
 import { PrivacyReceipt } from "./privacy/PrivacyReceipt";
 import { SettingsView } from "./settings/SettingsView";
 import { LiveMeetingView } from "./meeting/LiveMeetingView";
+import { MeetingDetailView } from "./detail/MeetingDetailView";
 import type { MeetingPrivacyReceipt, NetworkCapabilities } from "../core/contracts";
 
 const network: NetworkCapabilities = {
@@ -114,5 +115,14 @@ describe("simplified product surface", () => {
     expect(markup).toContain("Notes");
     expect(markup).toContain(">AI<");
     expect(markup).toContain("Review meeting");
+  });
+
+  it("offers permanent deletion only for a finished local meeting", () => {
+    const markup = renderToStaticMarkup(
+      <MeetingDetailView title="Finished meeting" selectedRecording={{ recordingId: "rec-1", label: "Finished meeting", state: "finished", audioDurationMs: 10, audioChunkCount: 1, transcriptSegmentCount: 1, updatedAtMs: 2 }} selectedRecordingId="rec-1" detailSection="summary" transcriptContent={<div />} transcriptTotalCount={1} notesMarkdown="" notesDirty={false} recap={null} askQuestion="" askAnswer={null} aiModeStatus="Fast local" privacyReceipt={receipt} networkCapabilities={network} busy={false} onDetailSectionChange={vi.fn()} onReview={vi.fn()} onDelete={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAskQuestionChange={vi.fn()} onAsk={vi.fn()} />,
+    );
+    expect(markup).toContain("Delete meeting");
+    expect(markup).toContain("Review report");
+    expect(markup).not.toMatch(/class="destructive-button"[^>]*disabled/);
   });
 });

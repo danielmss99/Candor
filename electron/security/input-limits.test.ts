@@ -9,6 +9,8 @@ describe("IPC input limits", () => {
 
   it("allows only opaque recording and model identifiers", () => {
     expect(validRecordingId("rec_123-abc")).toBe(true);
+    expect(validRecordingId("r".repeat(96))).toBe(true);
+    expect(validRecordingId("r".repeat(97))).toBe(false);
     expect(validRecordingId("../recording")).toBe(false);
     expect(validModelId("small.en-tdrz")).toBe(true);
     expect(validModelId("model/path")).toBe(false);

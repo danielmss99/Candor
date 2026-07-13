@@ -112,6 +112,7 @@ export const privateCoreMethods = new Set([
   "recording.durable.start",
   "recording.durable.writeTranscriptSegment",
   "recording.durable.finish",
+  "recording.durable.delete",
   "import.v2.fromFolder",
   "import.v2.proofSynthetic",
 ]);

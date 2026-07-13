@@ -6,6 +6,8 @@ import {
   createCoreRequest,
   parseCoreHandshake,
   parseCoreResponseLine,
+  privateCoreMethods,
+  rendererCoreMethods,
   rendererCoreOperations,
 } from "./protocol.js";
 
@@ -87,5 +89,10 @@ describe("core protocol", () => {
     expect(preload).not.toContain("candor-core:call");
     expect(preload).not.toContain("callCore");
     expect(preload).not.toContain("allowedMethods");
+  });
+
+  it("keeps permanent deletion behind the native confirmation IPC", () => {
+    expect(privateCoreMethods.has("recording.durable.delete")).toBe(true);
+    expect(rendererCoreMethods.has("recording.durable.delete")).toBe(false);
   });
 });

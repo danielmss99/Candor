@@ -20,6 +20,7 @@ interface MeetingDetailViewProps {
   busy: boolean;
   onDetailSectionChange: (section: DetailSection) => void;
   onReview: () => void;
+  onDelete: () => void;
   onNotesChange: (value: string) => void;
   onSaveNotes: () => void;
   onGenerateRecap: () => void;
@@ -36,7 +37,7 @@ export function MeetingDetailView(props: MeetingDetailViewProps) {
   const detailTabs: Array<[DetailSection, string]> = [["summary", "Summary"], ["transcript", "Transcript"], ["notes", "Notes"]];
   return (
     <section className="page-view" data-view="detail">
-      <header className="screen-heading meeting-heading"><div><h1>{props.title}</h1><p>{props.selectedRecording ? `${formatDuration(props.selectedRecording.audioDurationMs)} local meeting` : "Select a meeting from the local library"}</p></div><button type="button" className="primary-button" onClick={props.onReview} disabled={!props.selectedRecordingId}>Review report</button></header>
+      <header className="screen-heading meeting-heading"><div><h1>{props.title}</h1><p>{props.selectedRecording ? `${formatDuration(props.selectedRecording.audioDurationMs)} local meeting` : "Select a meeting from the local library"}</p></div><div className="screen-heading-actions"><button type="button" className="destructive-button" onClick={props.onDelete} disabled={!props.selectedRecordingId || props.selectedRecording?.state !== "finished" || props.busy}>Delete meeting</button><button type="button" className="primary-button" onClick={props.onReview} disabled={!props.selectedRecordingId}>Review report</button></div></header>
       <div className="content-tabs" role="tablist" aria-label="Meeting detail sections">{detailTabs.map(([id, label]) => <button type="button" role="tab" aria-selected={props.detailSection === id} key={id} onClick={() => props.onDetailSectionChange(id)}>{label}</button>)}</div>
       <div className="detail-grid"><section className="detail-main">{renderContent()}</section><aside className="meeting-intelligence"><h2>Ask Candor</h2><div className="ask-control"><input value={props.askQuestion} onChange={(event) => props.onAskQuestionChange(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") props.onAsk(); }} placeholder="Ask about this meeting" /><button type="button" onClick={props.onAsk} disabled={!props.selectedRecordingId || props.busy}>Ask</button></div>{props.askAnswer ? <div className="answer-panel"><strong>{props.askAnswer.engine}</strong><p>{props.askAnswer.answer}</p>{props.askAnswer.citations.map((citation) => <button type="button" key={`${citation.segmentIndex}-${citation.startMs}`}>{formatDuration(citation.startMs)} {citation.quote || citation.text}</button>)}</div> : null}<h3>Meeting facts</h3><dl className="compact-facts"><div><dt>Audio</dt><dd>{props.selectedRecording ? formatDuration(props.selectedRecording.audioDurationMs) : "None"}</dd></div><div><dt>Transcript</dt><dd>{props.transcriptTotalCount} segments</dd></div><div><dt>Notes</dt><dd>{props.notesDirty ? "Unsaved" : "Local"}</dd></div><div><dt>AI</dt><dd>{props.aiModeStatus}</dd></div></dl><PrivacyReceipt receipt={props.privacyReceipt} network={props.networkCapabilities} compact /></aside></div>
     </section>

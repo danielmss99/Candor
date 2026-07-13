@@ -22,6 +22,8 @@ use serde_json::{json, Value};
 const MANIFEST_FILE: &str = "manifest.json";
 const RECORDINGS_DIR: &str = "recordings";
 const QUARANTINE_RECEIPTS_DIR: &str = "recovery/quarantine";
+const DELETION_DATA_DIR: &str = "deletions/data";
+const DELETION_PENDING_DIR: &str = "deletions/pending";
 const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 2;
 const ENCRYPTED_CHUNK_MAGIC: &[u8] = b"CANDORCHUNK1\n";
 const ENCRYPTED_CHUNK_EXT: &str = ".cchunk";
@@ -61,6 +63,8 @@ pub struct RecordingStore {
     available_space_override: Option<u64>,
     #[cfg(test)]
     fail_space_probe: bool,
+    #[cfg(test)]
+    fail_tombstone_removal: bool,
 }
 
 #[cfg_attr(not(feature = "local-whisper"), allow(dead_code))]
@@ -273,6 +277,8 @@ impl RecordingStore {
                     available_space_override: None,
                     #[cfg(test)]
                     fail_space_probe: false,
+                    #[cfg(test)]
+                    fail_tombstone_removal: false,
                 };
             }
         }
@@ -284,6 +290,8 @@ impl RecordingStore {
             available_space_override: None,
             #[cfg(test)]
             fail_space_probe: false,
+            #[cfg(test)]
+            fail_tombstone_removal: false,
         }
     }
 
@@ -294,6 +302,7 @@ impl RecordingStore {
             root_kind: "test-root",
             available_space_override: Some(u64::MAX),
             fail_space_probe: false,
+            fail_tombstone_removal: false,
         }
     }
 
@@ -306,6 +315,12 @@ impl RecordingStore {
     #[cfg(test)]
     fn with_failed_space_probe(mut self) -> Self {
         self.fail_space_probe = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_failed_tombstone_removal(mut self) -> Self {
+        self.fail_tombstone_removal = true;
         self
     }
 
@@ -776,7 +791,236 @@ impl RecordingStore {
         Ok(recording_summary(&manifest, self.root_kind))
     }
 
+    pub fn delete_finished(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let recording_id = params.recording_id;
+        let active_dir = self.recording_dir(&recording_id)?;
+        let tombstone_dir = self.deletion_tombstone_dir(&recording_id)?;
+        let pending_marker = self.deletion_pending_marker(&recording_id)?;
+
+        if active_dir.exists() {
+            if tombstone_dir.exists() {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_TOMBSTONE_CONFLICT",
+                    "active recording and deletion tombstone both exist",
+                ));
+            }
+            let manifest = read_manifest(&active_dir)?;
+            if manifest.state != RecordingState::Finished {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_NOT_FINALIZED",
+                    "only a durably finished recording can be permanently deleted",
+                ));
+            }
+            self.write_deletion_intent(&recording_id, &pending_marker)?;
+            let tombstone_root = self.root.join(DELETION_DATA_DIR);
+            fs::create_dir_all(&tombstone_root)
+                .map_err(io_error("RECORDING_DELETE_TOMBSTONE_CREATE_FAILED"))?;
+            fs::rename(&active_dir, &tombstone_dir)
+                .map_err(io_error("RECORDING_DELETE_RENAME_FAILED"))?;
+        } else if tombstone_dir.exists() {
+            let manifest = read_manifest(&tombstone_dir)?;
+            if manifest.state != RecordingState::Finished {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_NOT_FINALIZED",
+                    "deletion tombstone did not contain a finished recording",
+                ));
+            }
+            if !pending_marker.exists() {
+                self.write_deletion_intent(&recording_id, &pending_marker)?;
+            }
+        } else if !pending_marker.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NOT_FOUND",
+                "recording was not found in the local store",
+            ));
+        }
+
+        self.remove_deletion_tombstone(&recording_id, &tombstone_dir)
+    }
+
+    pub fn complete_deletion_metadata(
+        &self,
+        params: RecordingIdParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let recording_id = params.recording_id;
+        let active_dir = self.recording_dir(&recording_id)?;
+        let tombstone_dir = self.deletion_tombstone_dir(&recording_id)?;
+        if active_dir.exists() || tombstone_dir.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_DELETE_DATA_REMAINS",
+                "deletion metadata cannot be cleared while recording data remains",
+            ));
+        }
+
+        let quarantine_receipt = self
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{recording_id}.json"));
+        if quarantine_receipt.exists() {
+            fs::remove_file(&quarantine_receipt)
+                .map_err(io_error("RECORDING_DELETE_METADATA_CLEANUP_FAILED"))?;
+        }
+        let pending_marker = self.deletion_pending_marker(&recording_id)?;
+        if pending_marker.exists() {
+            fs::remove_file(&pending_marker)
+                .map_err(io_error("RECORDING_DELETE_METADATA_CLEANUP_FAILED"))?;
+        }
+
+        Ok(json!({
+            "recordingId": recording_id,
+            "state": "deleted",
+            "deleted": true,
+            "recordingDataRemoved": true,
+            "metadataCleanupComplete": true,
+            "permanent": true,
+            "rawPathExposed": false
+        }))
+    }
+
+    fn deletion_tombstone_dir(&self, recording_id: &str) -> Result<PathBuf, RecordingStoreError> {
+        validate_id(recording_id)?;
+        Ok(self.root.join(DELETION_DATA_DIR).join(recording_id))
+    }
+
+    fn deletion_pending_marker(&self, recording_id: &str) -> Result<PathBuf, RecordingStoreError> {
+        validate_id(recording_id)?;
+        Ok(self
+            .root
+            .join(DELETION_PENDING_DIR)
+            .join(format!("{recording_id}.json")))
+    }
+
+    fn write_deletion_intent(
+        &self,
+        recording_id: &str,
+        marker_path: &Path,
+    ) -> Result<(), RecordingStoreError> {
+        if marker_path.exists() {
+            return Ok(());
+        }
+        let pending_root = self.root.join(DELETION_PENDING_DIR);
+        fs::create_dir_all(&pending_root)
+            .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+        let temporary_path = pending_root.join(format!("{recording_id}.json.tmp"));
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "intentVersion": 1,
+            "recordingId": recording_id,
+            "confirmedAtMs": now_ms(),
+            "permanent": true,
+            "contentIncluded": false,
+            "rawPathExposed": false
+        }))
+        .map_err(|err| {
+            RecordingStoreError::new("RECORDING_DELETE_INTENT_WRITE_FAILED", err.to_string())
+        })?;
+        {
+            let mut file = File::create(&temporary_path)
+                .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+            file.write_all(&bytes)
+                .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+            file.sync_all()
+                .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+        }
+        fs::rename(&temporary_path, marker_path)
+            .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))
+    }
+
+    fn remove_deletion_tombstone(
+        &self,
+        recording_id: &str,
+        tombstone_dir: &Path,
+    ) -> Result<Value, RecordingStoreError> {
+        #[cfg(test)]
+        if self.fail_tombstone_removal && tombstone_dir.exists() {
+            return Ok(deletion_incomplete_result(
+                recording_id,
+                "RECORDING_DELETE_REMOVE_FAILED",
+            ));
+        }
+
+        if tombstone_dir.exists() && fs::remove_dir_all(tombstone_dir).is_err() {
+            return Ok(deletion_incomplete_result(
+                recording_id,
+                "RECORDING_DELETE_REMOVE_FAILED",
+            ));
+        }
+        Ok(json!({
+            "recordingId": recording_id,
+            "state": "metadataCleanupPending",
+            "deleted": false,
+            "recordingDataRemoved": true,
+            "activeLibraryRemoved": true,
+            "tombstoneRemoved": true,
+            "metadataCleanupComplete": false,
+            "retryRequired": true,
+            "permanent": true,
+            "rawPathExposed": false
+        }))
+    }
+
+    fn recover_pending_deletions(&self) -> Result<Value, RecordingStoreError> {
+        let pending_root = self.root.join(DELETION_PENDING_DIR);
+        if !pending_root.exists() {
+            return Ok(json!({
+                "completedDeletionIds": [],
+                "completedDeletionCount": 0,
+                "pendingDeletionCount": 0,
+                "rawPathExposed": false
+            }));
+        }
+
+        let mut completed = Vec::new();
+        let mut pending = 0_u64;
+        for entry in fs::read_dir(&pending_root)
+            .map_err(io_error("RECORDING_DELETE_RECOVERY_READ_FAILED"))?
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    pending = pending.saturating_add(1);
+                    continue;
+                }
+            };
+            let Some(recording_id) = entry
+                .path()
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            else {
+                pending = pending.saturating_add(1);
+                continue;
+            };
+            if validate_id(&recording_id).is_err() {
+                pending = pending.saturating_add(1);
+                continue;
+            }
+            match self.delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            }) {
+                Ok(result)
+                    if result
+                        .get("recordingDataRemoved")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    completed.push(recording_id);
+                }
+                _ => pending = pending.saturating_add(1),
+            }
+        }
+
+        Ok(json!({
+            "completedDeletionCount": completed.len(),
+            "completedDeletionIds": completed,
+            "pendingDeletionCount": pending,
+            "rawPathExposed": false
+        }))
+    }
+
     pub fn recover(&self) -> Result<Value, RecordingStoreError> {
+        let deletion_recovery = self.recover_pending_deletions()?;
         let recordings_root = self.recordings_root();
         fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
 
@@ -823,7 +1067,10 @@ impl RecordingStore {
             "recoveredRecordings": recovered,
             "recoveredCount": recovered.len(),
             "quarantinedRecordings": quarantined,
-            "quarantinedCount": quarantined.len()
+            "quarantinedCount": quarantined.len(),
+            "completedDeletionIds": deletion_recovery["completedDeletionIds"],
+            "completedDeletionCount": deletion_recovery["completedDeletionCount"],
+            "pendingDeletionCount": deletion_recovery["pendingDeletionCount"]
         }))
     }
 
@@ -2379,6 +2626,22 @@ fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> V
     })
 }
 
+fn deletion_incomplete_result(recording_id: &str, error_code: &'static str) -> Value {
+    json!({
+        "recordingId": recording_id,
+        "state": "deletionIncomplete",
+        "deleted": false,
+        "recordingDataRemoved": false,
+        "activeLibraryRemoved": true,
+        "tombstoneRemoved": false,
+        "metadataCleanupComplete": false,
+        "retryRequired": true,
+        "errorCode": error_code,
+        "permanent": true,
+        "rawPathExposed": false
+    })
+}
+
 fn audio_replay_chunks(manifest: &RecordingManifest) -> Vec<Value> {
     let mut chunks = manifest
         .chunks
@@ -3284,6 +3547,167 @@ mod tests {
     }
 
     #[test]
+    fn finished_recording_delete_uses_tombstone_and_clears_content_free_metadata() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Delete me".to_string()),
+            })
+            .expect("start recording to delete");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "private meeting content".to_string(),
+            })
+            .expect("write recording to delete");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording to delete");
+        store
+            .write_quarantine_receipt(&recording_id, "TEST_RECEIPT")
+            .expect("seed quarantine metadata");
+        let active_dir = store
+            .recording_dir(&recording_id)
+            .expect("active recording dir");
+        let marker = store
+            .deletion_pending_marker(&recording_id)
+            .expect("pending marker");
+
+        let removed = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("remove recording data");
+
+        assert_eq!(removed["state"], "metadataCleanupPending");
+        assert_eq!(removed["recordingDataRemoved"], true);
+        assert!(!active_dir.exists());
+        assert!(marker.is_file());
+        assert_eq!(
+            store.list().expect("list after delete")["recordingCount"],
+            0
+        );
+
+        let completed = store
+            .complete_deletion_metadata(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("complete delete metadata");
+        assert_eq!(completed["state"], "deleted");
+        assert_eq!(completed["deleted"], true);
+        assert!(!marker.exists());
+        assert!(!store
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{recording_id}.json"))
+            .exists());
+    }
+
+    #[test]
+    fn deletion_rejects_recording_and_recovery_states() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start active recording");
+        let recording_id = recording_id(&started);
+
+        let active_error = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("active recording delete must fail");
+        assert_eq!(active_error.code, "RECORDING_DELETE_NOT_FINALIZED");
+        store
+            .mark_needs_recovery(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("mark recording for recovery");
+        let recovery_error = store
+            .delete_finished(RecordingIdParams { recording_id })
+            .expect_err("recovery recording delete must fail");
+        assert_eq!(recovery_error.code, "RECORDING_DELETE_NOT_FINALIZED");
+    }
+
+    #[test]
+    fn incomplete_tombstone_removal_is_resumed_on_recovery() {
+        let root = temp_store().root;
+        let store = RecordingStore::with_root(root.clone());
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Interrupted delete".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let failing_store = RecordingStore::with_root(root.clone()).with_failed_tombstone_removal();
+
+        let incomplete = failing_store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("return structured incomplete deletion");
+
+        assert_eq!(incomplete["state"], "deletionIncomplete");
+        assert_eq!(incomplete["retryRequired"], true);
+        assert!(failing_store
+            .deletion_tombstone_dir(&recording_id)
+            .expect("tombstone path")
+            .exists());
+        assert_eq!(
+            failing_store.list().expect("list after rename")["recordingCount"],
+            0
+        );
+
+        let recovery_store = RecordingStore::with_root(root);
+        let recovery = recovery_store.recover().expect("resume deletion");
+        assert_eq!(recovery["completedDeletionCount"], 1);
+        assert_eq!(recovery["completedDeletionIds"][0], recording_id);
+        assert_eq!(recovery["pendingDeletionCount"], 0);
+        assert!(!recovery_store
+            .deletion_tombstone_dir(&recording_id)
+            .expect("tombstone path")
+            .exists());
+    }
+
+    #[test]
+    fn synced_delete_intent_resumes_a_crash_before_the_rename() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Pre-rename crash".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let marker = store
+            .deletion_pending_marker(&recording_id)
+            .expect("pending marker");
+        store
+            .write_deletion_intent(&recording_id, &marker)
+            .expect("write confirmed deletion intent");
+
+        let recovery = store.recover().expect("resume pre-rename deletion");
+
+        assert_eq!(recovery["completedDeletionIds"][0], recording_id);
+        assert!(!store
+            .recording_dir(&recording_id)
+            .expect("active dir")
+            .exists());
+    }
+
+    #[test]
     fn local_library_read_search_and_export_stay_pathless() {
         let store = temp_store();
         let started = store
@@ -3938,6 +4362,7 @@ mod tests {
             root_kind: "test-root",
             available_space_override: None,
             fail_space_probe: false,
+            fail_tombstone_removal: false,
         };
 
         let health = store.storage_health();

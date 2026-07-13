@@ -65,6 +65,7 @@ interface CandorApi {
     recordingPrivacyReceipt(recordingId: string): Promise<JsonValue>;
     recordingDurableReadAudioChunk(recordingId: string, index: number): Promise<JsonValue>;
     recordingDurableSearch(query: string): Promise<JsonValue>;
+    recordingDelete(recordingId: string): Promise<JsonValue>;
     recordingNotesRead(recordingId: string): Promise<JsonValue>;
     recordingNotesSave(recordingId: string, markdown: string): Promise<JsonValue>;
     retentionStatus(): Promise<JsonValue>;
