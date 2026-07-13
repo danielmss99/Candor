@@ -139,8 +139,8 @@ function verifyBuilderConfig() {
   const config = readFileSync(join(repoRoot, "electron-builder.v3.yml"), "utf8");
   const expected = [
     "buildResources: build",
-    "icon: build/icon.ico",
-    "icon: build/icon.icns",
+    "icon: assets/platform/candor.ico",
+    "icon: assets/platform/candor.icns",
     "icon: build/icons",
   ];
   const missing = expected.filter((line) => !config.includes(line));
@@ -148,6 +148,53 @@ function verifyBuilderConfig() {
     throw new Error("Electron builder icon configuration is incomplete: " + missing.join(", "));
   }
   return { passed: true, expected };
+}
+
+function verifyBrandMaster() {
+  const master = read("assets/icons/candor-app-icon-master.svg");
+  const source = master.data.toString("utf8");
+  const required = [
+    'viewBox="0 0 512 512"',
+    'fill="#161616"',
+    'stroke="#FFF9EE"',
+    'd="M368 210H414V270L391 294L368 270Z"',
+    'fill="#FF6B5E"',
+  ];
+  const missing = required.filter((value) => !source.includes(value));
+  if (missing.length > 0) {
+    throw new Error("Approved Keep Tab SVG is incomplete: " + missing.join(", "));
+  }
+  if (/(?:linear|radial)Gradient|\bfilter=|<filter|<image/i.test(source)) {
+    throw new Error("Approved Keep Tab SVG contains a forbidden effect or remote asset");
+  }
+  const colors = [...source.matchAll(/#[0-9A-Fa-f]{6}/g)].map((match) => match[0].toUpperCase());
+  const approved = new Set(["#161616", "#FFF9EE", "#FF6B5E"]);
+  if (colors.some((color) => !approved.has(color))) {
+    throw new Error("Approved Keep Tab SVG contains a color outside the Soft Signal palette");
+  }
+  return {
+    passed: true,
+    path: rel(master.path),
+    bytes: master.data.length,
+    sha256: sha256(master.data),
+    colors: [...approved],
+    pointedKeepTab: true,
+  };
+}
+
+function verifyPlatformCopies() {
+  const windows = read("assets/platform/candor.ico");
+  const macos = read("assets/platform/candor.icns");
+  const builderWindows = read("build/icon.ico");
+  const builderMacos = read("build/icon.icns");
+  if (!windows.data.equals(builderWindows.data) || !macos.data.equals(builderMacos.data)) {
+    throw new Error("Builder compatibility icons differ from the approved platform assets");
+  }
+  return {
+    passed: true,
+    windows: { path: rel(windows.path), sha256: sha256(windows.data) },
+    macos: { path: rel(macos.path), sha256: sha256(macos.data) },
+  };
 }
 
 function verifyWindowsExecutable(executablePath, sourcePath, outputPath) {
@@ -218,6 +265,8 @@ const report = {
   arch: process.arch,
   releaseDir: rel(releaseDir),
   generator: null,
+  brandMaster: null,
+  platformCopies: null,
   builderConfig: null,
   ico: null,
   icns: null,
@@ -227,15 +276,17 @@ const report = {
 
 try {
   report.generator = verifyGenerator();
+  report.brandMaster = verifyBrandMaster();
+  report.platformCopies = verifyPlatformCopies();
   report.builderConfig = verifyBuilderConfig();
-  const ico = read("build/icon.ico");
+  const ico = read("assets/platform/candor.ico");
   report.ico = {
     path: rel(ico.path),
     bytes: ico.data.length,
     sha256: sha256(ico.data),
     ...inspectIco(ico.data),
   };
-  const icns = read("build/icon.icns");
+  const icns = read("assets/platform/candor.icns");
   report.icns = {
     path: rel(icns.path),
     bytes: icns.data.length,

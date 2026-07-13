@@ -15,7 +15,16 @@ const repoRoot = resolve(__dirname, "..");
 const checkOnly = process.argv.includes("--check");
 
 const PNG_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256, 512, 1024];
+const BRAND_PNG_SIZES = [16, 24, 32, 48, 64, 128, 256, 512, 1024];
 const ICO_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
+const BRAND_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Candor selected app icon</title>
+  <desc id="desc">The selected Candor Keep Tab mark in the Soft Signal palette.</desc>
+  <rect width="512" height="512" rx="104" fill="#161616"/>
+  <path d="M366 150A158 158 0 1 0 366 362" fill="none" stroke="#FFF9EE" stroke-width="76" stroke-linecap="round"/>
+  <path d="M368 210H414V270L391 294L368 270Z" fill="#FF6B5E"/>
+</svg>
+`;
 const ICNS_TYPES = new Map([
   [16, "icp4"],
   [32, "icp5"],
@@ -35,14 +44,6 @@ for (let index = 0; index < 256; index += 1) {
   CRC_TABLE[index] = value >>> 0;
 }
 
-function clamp(value, min = 0, max = 1) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function mix(start, end, amount) {
-  return start + (end - start) * amount;
-}
-
 function roundedRectDistance(x, y, left, top, right, bottom, radius) {
   const centerX = (left + right) / 2;
   const centerY = (top + bottom) / 2;
@@ -57,59 +58,54 @@ function roundedRectDistance(x, y, left, top, right, bottom, radius) {
   );
 }
 
-function over(base, foreground, opacity = 1) {
-  const amount = clamp(opacity);
-  return [
-    mix(base[0], foreground[0], amount),
-    mix(base[1], foreground[1], amount),
-    mix(base[2], foreground[2], amount),
-    255,
-  ];
+function pointInPolygon(x, y, points) {
+  let inside = false;
+  for (let index = 0, previous = points.length - 1; index < points.length; previous = index, index += 1) {
+    const [currentX, currentY] = points[index];
+    const [previousX, previousY] = points[previous];
+    const intersects =
+      currentY > y !== previousY > y &&
+      x < ((previousX - currentX) * (y - currentY)) / (previousY - currentY) + currentX;
+    if (intersects) inside = !inside;
+  }
+  return inside;
 }
 
 function sampleIcon(x, y) {
-  const shellDistance = roundedRectDistance(x, y, 0.055, 0.055, 0.945, 0.945, 0.205);
+  const shellDistance = roundedRectDistance(x, y, 0, 0, 1, 1, 104 / 512);
   if (shellDistance > 0) return [0, 0, 0, 0];
 
-  const gradient = clamp((x * 0.58 + y * 0.42 - 0.04) / 0.92);
-  const topLeft = [56, 91, 231];
-  const bottomRight = [116, 73, 211];
-  const lift = clamp(1 - Math.hypot(x - 0.24, y - 0.18) / 0.76) * 12;
-  let color = [
-    clamp(mix(topLeft[0], bottomRight[0], gradient) + lift, 0, 255),
-    clamp(mix(topLeft[1], bottomRight[1], gradient) + lift, 0, 255),
-    clamp(mix(topLeft[2], bottomRight[2], gradient) + lift, 0, 255),
-    255,
-  ];
+  let color = [22, 22, 22, 255];
 
-  if (shellDistance > -0.012) {
-    color = over(color, [255, 255, 255, 255], 0.18);
-  }
-
-  const centerX = 0.43;
+  const endpointDeltaY = 106;
+  const centerToEndpointX = Math.sqrt(158 ** 2 - endpointDeltaY ** 2);
+  const centerX = (366 - centerToEndpointX) / 512;
   const centerY = 0.5;
   const deltaX = x - centerX;
   const deltaY = y - centerY;
   const radius = Math.hypot(deltaX, deltaY);
   const angle = Math.atan2(deltaY, deltaX);
-  const ring = Math.abs(radius - 0.245) <= 0.043 && Math.abs(angle) >= 0.64;
-  if (ring) {
-    color = over(color, [255, 255, 255, 255], 0.98);
+  const cRadius = 158 / 512;
+  const cHalfStroke = 38 / 512;
+  const capRadius = cHalfStroke;
+  const openAngle = Math.atan2(endpointDeltaY, centerToEndpointX);
+  const upperCap = Math.hypot(x - 366 / 512, y - 150 / 512) <= capRadius;
+  const lowerCap = Math.hypot(x - 366 / 512, y - 362 / 512) <= capRadius;
+  const openC = Math.abs(radius - cRadius) <= cHalfStroke && Math.abs(angle) >= openAngle;
+
+  if (openC || upperCap || lowerCap) {
+    color = [255, 249, 238, 255];
   }
 
-  if (Math.hypot(deltaX, deltaY) <= 0.072) {
-    color = over(color, [255, 76, 91, 255], 1);
-  }
-
-  const bars = [
-    [0.68, 0.43, 0.714, 0.57, 0.017],
-    [0.742, 0.37, 0.776, 0.63, 0.017],
-    [0.804, 0.445, 0.838, 0.555, 0.017],
+  const tab = [
+    [368 / 512, 210 / 512],
+    [414 / 512, 210 / 512],
+    [414 / 512, 270 / 512],
+    [391 / 512, 294 / 512],
+    [368 / 512, 270 / 512],
   ];
-  for (const [left, top, right, bottom, radiusValue] of bars) {
-    if (roundedRectDistance(x, y, left, top, right, bottom, radiusValue) <= 0) {
-      color = over(color, [255, 255, 255, 255], 0.96);
-    }
+  if (pointInPolygon(x, y, tab)) {
+    color = [255, 107, 94, 255];
   }
 
   return color.map((value) => Math.round(value));
@@ -254,18 +250,52 @@ function emit(relativePath, data) {
   return { relativePath, bytes: data.length, sha256: sha256(data) };
 }
 
+function emitText(relativePath, source) {
+  const path = join(repoRoot, relativePath);
+  const normalized = source.replaceAll("\r\n", "\n");
+  const data = Buffer.from(normalized, "utf8");
+  if (checkOnly) {
+    if (!existsSync(path)) {
+      throw new Error("Generated icon asset is missing: " + relativePath);
+    }
+    const current = readFileSync(path, "utf8").replaceAll("\r\n", "\n");
+    if (current !== normalized) {
+      throw new Error(
+        "Generated icon asset is stale: " +
+          relativePath +
+          "\nexpected " +
+          sha256(data) +
+          "\nactual   " +
+          sha256(Buffer.from(current, "utf8")),
+      );
+    }
+  } else {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, data);
+  }
+  return { relativePath, bytes: data.length, sha256: sha256(data) };
+}
+
 const pngBySize = new Map();
 for (const size of PNG_SIZES) {
   pngBySize.set(size, encodePng(size, renderRgba(size)));
 }
 
 const outputs = [];
+outputs.push(emitText("assets/icons/candor-app-icon-master.svg", BRAND_SVG));
+for (const size of BRAND_PNG_SIZES) {
+  outputs.push(emit("assets/icons/candor-app-icon-" + size + ".png", pngBySize.get(size)));
+}
 for (const size of PNG_SIZES) {
   outputs.push(emit("build/icons/" + size + "x" + size + ".png", pngBySize.get(size)));
 }
 outputs.push(emit("build/icon.png", pngBySize.get(512)));
-outputs.push(emit("build/icon.ico", encodeIco(pngBySize)));
-outputs.push(emit("build/icon.icns", encodeIcns(pngBySize)));
+const windowsIcon = encodeIco(pngBySize);
+const macosIcon = encodeIcns(pngBySize);
+outputs.push(emit("assets/platform/candor.ico", windowsIcon));
+outputs.push(emit("assets/platform/candor.icns", macosIcon));
+outputs.push(emit("build/icon.ico", windowsIcon));
+outputs.push(emit("build/icon.icns", macosIcon));
 outputs.push(emit("v3/renderer/public/candor-mark.png", pngBySize.get(128)));
 
 console.log((checkOnly ? "Verified" : "Generated") + " " + outputs.length + " Candor icon assets.");
