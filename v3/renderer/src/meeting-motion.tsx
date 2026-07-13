@@ -55,7 +55,7 @@ export function AnimatedTranscript({
 }) {
   if (!segments.length) return <p className="empty-state">{emptyMessage}</p>;
   return (
-    <div className="transcript-stream">
+    <div className="transcript-stream" role="region" aria-label="Transcript segments" tabIndex={0}>
       {segments.map((segment, index) => (
         <article
           className="transcript-entry motion-transcript-entry"
