@@ -9,6 +9,7 @@ export const requiredSourcePaths = [
   "electron/core/core-client.ts",
   "electron/core/core-errors.ts",
   "electron/core/protocol.ts",
+  "electron/core/renderer-boundary.ts",
   "electron/core/request-registry.ts",
   "electron/export/local-report.ts",
   "electron/ipc/core-ipc.ts",
@@ -128,8 +129,8 @@ export function evaluateSourceSecurity(input) {
     .join("\n");
   for (const [id, pattern] of [
     ["insecure-content-disabled", "allowRunningInsecureContent: false"],
-    ["permission-request-denied", "setPermissionRequestHandler"],
-    ["permission-check-denied", "setPermissionCheckHandler"],
+    ["permission-request-denied", "denyPermissionRequest(callback)"],
+    ["permission-check-denied", "setPermissionCheckHandler(denyPermissionCheck)"],
     ["popup-blocked", "setWindowOpenHandler"],
     ["navigation-blocked", 'on("will-navigate"'],
     ["webview-blocked", 'on("will-attach-webview"'],
@@ -163,6 +164,18 @@ export function evaluateSourceSecurity(input) {
   add("electron-main:no-crash-upload", !/crashReporter\.start\s*\(/.test(electronRuntimeSource), main, "crash upload is absent");
   add("electron-main:no-shell-open", !/shell\.openExternal\s*\(/.test(electronRuntimeSource), main, "main does not open arbitrary URLs");
   add("electron-main:no-sandbox-flag", !/--no-sandbox|ELECTRON_DISABLE_SANDBOX/.test(electronRuntimeSource), main, "sandbox bypass is absent");
+  includes(
+    "electron-main:permission-request-false",
+    "electron/security/network-policy.ts",
+    "callback(false);",
+    "permission requests are denied unconditionally",
+  );
+  includes(
+    "electron-main:permission-check-false",
+    "electron/security/network-policy.ts",
+    "return false;",
+    "permission checks are denied unconditionally",
+  );
 
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [
@@ -195,6 +208,18 @@ export function evaluateSourceSecurity(input) {
     "electron/ipc/core-ipc.ts",
     "validateRendererCoreParams(operation.method, params ?? null)",
     "each named core channel validates its payload before crossing into Rust",
+  );
+  includes(
+    "electron-main:safe-core-errors",
+    "electron/ipc/core-ipc.ts",
+    "rendererSafeCoreError(response.error?.code)",
+    "renderer receives only bounded core error codes",
+  );
+  excludes(
+    "electron-main:no-raw-core-errors",
+    "electron/ipc/core-ipc.ts",
+    /response\.error\?\.message/,
+    "renderer IPC never forwards raw Rust error text",
   );
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";
@@ -307,6 +332,7 @@ function withSource(input, sourcePath, value) {
 export function runSourceSecuritySelfTest(input) {
   const main = sourceText(input, "electron/main.ts");
   const mainWindow = sourceText(input, "electron/window/create-main-window.ts");
+  const networkPolicy = sourceText(input, "electron/security/network-policy.ts");
   const preload = sourceText(input, "electron/preload.cts");
   const coreIpc = sourceText(input, "electron/ipc/core-ipc.ts");
   const importer = sourceText(input, "crates/candor-core/src/v2_importer.rs");
@@ -327,6 +353,15 @@ export function runSourceSecuritySelfTest(input) {
         mainWindow.replace("sandbox: true", "sandbox: false"),
       ),
       expectedFailure: "electron-main:sandbox",
+    },
+    {
+      name: "permission-request-allowed",
+      input: withSource(
+        input,
+        "electron/security/network-policy.ts",
+        networkPolicy.replace("callback(false);", "callback(true);"),
+      ),
+      expectedFailure: "electron-main:permission-request-false",
     },
     {
       name: "generic-preload-capability",

@@ -34,6 +34,31 @@ function responsiveCore(active = false): string {
   `;
 }
 
+function capturingThenSilentCore(): string {
+  return `
+    const readline = require("node:readline");
+    const protocolVersion = ${JSON.stringify(CORE_PROTOCOL_VERSION)};
+    const input = readline.createInterface({ input: process.stdin });
+    input.on("line", (line) => {
+      const request = JSON.parse(line);
+      let result = null;
+      if (request.method === "core.version") result = {
+        version: "test",
+        protocolVersion,
+        schemaVersion: 1,
+        capabilities: ["stdio-json-lines"],
+        build: { target: "test-target", features: [] }
+      };
+      if (request.method === "capture.status") result = { active: true, rawPathExposed: false };
+      if (result !== null) {
+        process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
+      }
+    });
+  `;
+}
+
+const settle = (milliseconds = 20) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 describe("core client process boundary", () => {
   it("handshakes and correlates UUID requests over JSONL stdio", async () => {
     const client = new CoreClient({
@@ -89,5 +114,53 @@ describe("core client process boundary", () => {
     await expect(client.call("core.status", null, 25)).rejects.toThrow("timed out");
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(client.snapshot()).toMatchObject({ state: "failed" });
+  });
+
+  it("keeps an active capture process alive when a later request times out", async () => {
+    const child = spawnNode(capturingThenSilentCore());
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => child,
+    });
+
+    await client.ensureHandshake();
+    await client.call("capture.status");
+    await expect(client.call("core.status", null, 25)).rejects.toThrow("timed out");
+    await settle();
+    expect(client.snapshot()).toMatchObject({ state: "failed", captureActive: true });
+    expect(child.killed).toBe(false);
+    child.kill();
+  });
+
+  it("clears stale capture state when the core process exits", async () => {
+    const child = spawnNode(responsiveCore(true));
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => child,
+    });
+
+    await client.ensureHandshake();
+    await client.call("capture.status");
+    expect(client.snapshot()).toMatchObject({ captureActive: true });
+    child.kill();
+    await settle();
+    expect(client.snapshot()).toMatchObject({ captureActive: false });
+  });
+
+  it("records a safe failed state when process spawn throws synchronously", async () => {
+    const client = new CoreClient({
+      executablePath: () => "C:\\private\\missing-core.exe",
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => { throw new Error("C:\\private\\missing-core.exe is missing"); },
+    });
+
+    await expect(client.call("core.status")).rejects.toMatchObject({ code: "CORE_UNAVAILABLE" });
+    expect(client.snapshot()).toMatchObject({ state: "failed", restartCount: 0 });
+    expect(JSON.stringify(client.rendererSnapshot())).not.toContain("private");
   });
 });

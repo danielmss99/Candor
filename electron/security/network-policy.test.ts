@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { NetworkGuard } from "./network-policy.js";
+import { denyPermissionCheck, denyPermissionRequest, NetworkGuard } from "./network-policy.js";
 
 describe("network guard", () => {
   it("allows local resources and blocks remote resources", () => {
@@ -26,5 +26,12 @@ describe("network guard", () => {
     expect(snapshot).toContain("navigation-denied:local-file");
     expect(snapshot).not.toContain("example.com/private");
     expect(snapshot).not.toContain("private.txt");
+  });
+
+  it("denies permission requests and checks unconditionally", () => {
+    let granted: boolean | null = null;
+    denyPermissionRequest((value) => { granted = value; });
+    expect(granted).toBe(false);
+    expect(denyPermissionCheck()).toBe(false);
   });
 });

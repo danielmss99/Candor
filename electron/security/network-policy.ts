@@ -71,14 +71,22 @@ export function applyChromiumNetworkPolicy(commandLine: CommandLine, smokeMode: 
   if (smokeMode) commandLine.appendSwitch("disable-gpu");
 }
 
+export function denyPermissionRequest(callback: (permissionGranted: boolean) => void): void {
+  callback(false);
+}
+
+export function denyPermissionCheck(): boolean {
+  return false;
+}
+
 export function installSessionHardening(
   guard: NetworkGuard,
   isDevRequest: (value: string) => boolean,
 ): void {
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(false);
+    denyPermissionRequest(callback);
   });
-  session.defaultSession.setPermissionCheckHandler(() => false);
+  session.defaultSession.setPermissionCheckHandler(denyPermissionCheck);
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     callback({ cancel: !guard.recordRequest(details.url, isDevRequest(details.url)) });
   });

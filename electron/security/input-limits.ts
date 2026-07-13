@@ -1,6 +1,7 @@
 export const INPUT_LIMITS = Object.freeze({
   meetingTitle: 200,
   notesCharacters: 2_000_000,
+  notesUtf8Bytes: 3_900_000,
   searchQuery: 500,
   exportFilename: 150,
   pageSize: 100,

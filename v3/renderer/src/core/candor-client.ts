@@ -32,6 +32,12 @@ export interface RpcEnvelope<T> {
 
 type CoreApi = NonNullable<Window["candor"]>["core"];
 
+function bridgeErrorCode(error: unknown): string {
+  if (!(error instanceof Error)) return "CORE_REQUEST_FAILED";
+  return error.message.match(/CANDOR_CORE_ERROR:([A-Z][A-Z0-9_]{1,63})/)?.[1]
+    ?? "CORE_REQUEST_FAILED";
+}
+
 export class CandorClientError extends Error {
   readonly code: string;
   readonly requestId: string;
@@ -137,7 +143,7 @@ export class CandorClient {
         error: {
           code: error instanceof Error && error.name === "ProtocolValidationError"
             ? "PROTOCOL_RESPONSE_INVALID"
-            : "CORE_REQUEST_FAILED",
+            : bridgeErrorCode(error),
           message: error instanceof Error ? error.message : String(error),
           retryable: false,
         },

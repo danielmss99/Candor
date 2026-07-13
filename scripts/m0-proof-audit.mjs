@@ -377,6 +377,12 @@ function validateSmokeProof(payload) {
     "renderer isolation probe must not expose raw paths or key material",
     failures,
   );
+  requireField(
+    payload?.rendererIsolationProbe?.invalidInputErrorSafe === true &&
+      payload?.rendererIsolationProbe?.invalidInputErrorCode === "INVALID_RENDERER_INPUT",
+    "renderer isolation probe must receive pathless structured input errors",
+    failures,
+  );
   const measuredRendererPathFindings = rendererFacingPathFindings(payload);
   requireField(
     payload?.rendererPathAudit?.ok === true &&
@@ -489,8 +495,9 @@ function validateSmokeProof(payload) {
     failures,
   );
   requireField(
-    payload?.rendererBridge?.supervisorStatus?.pid === payload?.rendererBridge?.status?.pid,
-    "renderer supervisor PID must match renderer status PID",
+    payload?.rendererBridge?.supervisorStatus?.pid === undefined &&
+      payload?.rendererBridge?.status?.pid === undefined,
+    "renderer status must omit process identifiers",
     failures,
   );
   requireField(
@@ -836,8 +843,8 @@ function minimalValidSmokeProof() {
     sidecarTransport: "stdio-json-lines",
     protocolVersion: expectedProtocolVersion,
     networkPolicy: "disabled-by-default",
-    pid: 200,
   };
+  const mainStatus = { ...status, pid: 200 };
   return {
     ok: true,
     proofKind: "m0-packaged-runtime-smoke",
@@ -868,6 +875,8 @@ function minimalValidSmokeProof() {
       nodeProcessAvailable: false,
       ipcRendererAvailable: false,
       electronGlobalAvailable: false,
+      invalidInputErrorSafe: true,
+      invalidInputErrorCode: "INVALID_RENDERER_INPUT",
       rawPathExposed: false,
       keyMaterialExposedToRenderer: false,
     },
@@ -881,7 +890,6 @@ function minimalValidSmokeProof() {
       supervisorStatus: {
         state: "running",
         restartCount: 1,
-        pid: 200,
         lastHandshake: handshake,
         rawPathExposed: false,
       },
@@ -926,7 +934,7 @@ function minimalValidSmokeProof() {
       },
     },
     mainRpc: {
-      status,
+      status: mainStatus,
     },
     sidecarSupervisor: {
       state: "running",

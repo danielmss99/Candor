@@ -104,11 +104,37 @@ export class CoreClient {
     };
   }
 
+  rendererSnapshot(): JsonValue {
+    const snapshot = objectValue(this.snapshot());
+    const lastExit = objectValue(snapshot.lastExit ?? null);
+    return {
+      state: snapshot.state ?? "failed",
+      restartCount: snapshot.restartCount ?? 0,
+      startedAt: snapshot.startedAt ?? null,
+      executableName: snapshot.executableName ?? null,
+      rawPathExposed: false,
+      lastExit: snapshot.lastExit === null
+        ? null
+        : {
+            code: lastExit.code ?? null,
+            signal: lastExit.signal ?? null,
+            at: lastExit.at ?? null,
+            hadError: typeof lastExit.error === "string",
+          },
+      lastHandshake: snapshot.lastHandshake ?? null,
+      captureActive: snapshot.captureActive === true,
+    };
+  }
+
   call(method: string, params: JsonValue = null, timeoutMs = 5000): Promise<CoreResponse> {
     if (!this.options.allowedMethods.has(method)) {
       return Promise.reject(new CoreClientError("CORE_METHOD_DENIED", `IPC method is not allowed: ${method}`, false));
     }
-    this.start();
+    try {
+      this.start();
+    } catch (error) {
+      return Promise.reject(error);
+    }
     const child = this.child;
     if (!child || child.killed || !child.stdin.writable) {
       return Promise.reject(new CoreClientError("CORE_UNAVAILABLE", "candor-core is not available", true));
@@ -193,8 +219,7 @@ export class CoreClient {
   private start(): void {
     if (this.child) return;
     const executable = this.options.executablePath();
-    if (this.hasStarted) this.supervisor.restartCount += 1;
-    this.hasStarted = true;
+    const isRestart = this.hasStarted;
     this.supervisor.state = "starting";
     this.supervisor.startedAt = new Date().toISOString();
     this.supervisor.executable = executable;
@@ -204,7 +229,21 @@ export class CoreClient {
     this.stdoutBuffer = Buffer.alloc(0);
     this.protocolFault = null;
 
-    const child = (this.options.spawnCore ?? defaultSpawnCore)(executable);
+    let child: ChildProcessWithoutNullStreams;
+    try {
+      child = (this.options.spawnCore ?? defaultSpawnCore)(executable);
+    } catch {
+      this.supervisor.state = "failed";
+      this.supervisor.lastExit = {
+        code: null,
+        signal: null,
+        at: new Date().toISOString(),
+        error: "candor-core could not be started",
+      };
+      throw new CoreClientError("CORE_UNAVAILABLE", "candor-core could not be started", true);
+    }
+    if (isRestart) this.supervisor.restartCount += 1;
+    this.hasStarted = true;
     this.child = child;
     this.supervisor.pid = child.pid ?? null;
     child.stdout.on("data", (chunk: Buffer) => this.handleStdout(chunk, child));
@@ -277,6 +316,7 @@ export class CoreClient {
     const wasStopping = this.supervisor.state === "stopping";
     this.child = null;
     this.handshakePromise = null;
+    this.captureActive = false;
     this.supervisor.pid = null;
     this.supervisor.state = this.protocolFault ? "failed" : wasStopping ? "stopped" : "exited";
     this.supervisor.lastExit = {

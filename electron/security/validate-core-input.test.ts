@@ -38,7 +38,11 @@ describe("renderer core input validation", () => {
     expect(() => validateRendererCoreParams("recording.notes.save", {
       recordingId: "recording_1",
       markdown: "x".repeat(2_000_001),
-    })).toThrow("markdown must be at most 2000000 characters");
+    })).toThrow("markdown must be at most 2000000 characters and 3900000 UTF-8 bytes");
+    expect(() => validateRendererCoreParams("recording.notes.save", {
+      recordingId: "recording_1",
+      markdown: "\u{1F642}".repeat(1_000_000),
+    })).toThrow("3900000 UTF-8 bytes");
   });
 
   it("rejects unknown consent identifiers and unsupported exports", () => {
@@ -53,6 +57,8 @@ describe("renderer core input validation", () => {
   it("requires parameterless operations to remain parameterless", () => {
     expect(validateRendererCoreParams("core.status", null)).toBeNull();
     expect(() => validateRendererCoreParams("core.status", { verbose: true }))
+      .toThrow("parameters are not accepted");
+    expect(() => validateRendererCoreParams("core.ping", { transport: "generic" }))
       .toThrow("parameters are not accepted");
   });
 

@@ -8,7 +8,7 @@ type JsonValue =
 
 interface CandorApi {
   core: {
-    ping(echo?: JsonValue): Promise<JsonValue>;
+    ping(): Promise<JsonValue>;
     version(): Promise<JsonValue>;
     capabilities(): Promise<JsonValue>;
     status(): Promise<JsonValue>;

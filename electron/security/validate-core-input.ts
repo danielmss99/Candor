@@ -3,6 +3,7 @@ import { INPUT_LIMITS, validModelId, validRecordingId } from "./input-limits.js"
 
 const noParameterMethods = new Set([
   "core.version",
+  "core.ping",
   "core.capabilities",
   "core.status",
   "vault.openLocal",
@@ -224,7 +225,6 @@ export function validateRendererCoreParams(method: string, input: unknown): Json
     if (input !== null && input !== undefined) fail(method, "parameters are not accepted");
     return null;
   }
-  if (method === "core.ping") return boundedJson(method, input ?? null, "echo");
   if (method === "consent.acknowledge") {
     const value = objectInput(method, input);
     exactFields(method, value, ["items"]);
@@ -271,8 +271,15 @@ export function validateRendererCoreParams(method: string, input: unknown): Json
   if (method === "recording.notes.save") {
     const value = objectInput(method, input);
     exactFields(method, value, ["recordingId", "markdown"]);
-    if (typeof value.markdown !== "string" || value.markdown.length > INPUT_LIMITS.notesCharacters) {
-      return fail(method, `markdown must be at most ${INPUT_LIMITS.notesCharacters} characters`);
+    if (
+      typeof value.markdown !== "string" ||
+      value.markdown.length > INPUT_LIMITS.notesCharacters ||
+      Buffer.byteLength(value.markdown, "utf8") > INPUT_LIMITS.notesUtf8Bytes
+    ) {
+      return fail(
+        method,
+        `markdown must be at most ${INPUT_LIMITS.notesCharacters} characters and ${INPUT_LIMITS.notesUtf8Bytes} UTF-8 bytes`,
+      );
     }
     return { recordingId: requiredRecordingId(method, value.recordingId), markdown: value.markdown };
   }

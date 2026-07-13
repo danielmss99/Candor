@@ -10,7 +10,7 @@ type JsonValue =
 
 contextBridge.exposeInMainWorld("candor", {
   core: Object.freeze({
-    ping: (echo?: JsonValue) => ipcRenderer.invoke("candor-core:core-ping", echo ?? null) as Promise<JsonValue>,
+    ping: () => ipcRenderer.invoke("candor-core:core-ping") as Promise<JsonValue>,
     version: () => ipcRenderer.invoke("candor-core:core-version") as Promise<JsonValue>,
     capabilities: () => ipcRenderer.invoke("candor-core:core-capabilities") as Promise<JsonValue>,
     status: () => ipcRenderer.invoke("candor-core:core-status") as Promise<JsonValue>,

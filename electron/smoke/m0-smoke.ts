@@ -280,7 +280,7 @@ async function captureSettledSmokePage(
 ): Promise<JsonValue> {
   const notificationDismissed = (await windowRef.webContents.executeJavaScript(
     `
-      (() => {
+      (async () => {
         const button = document.querySelector('[aria-label="Dismiss notification"]');
         if (!(button instanceof HTMLButtonElement)) return false;
         button.click();
@@ -505,7 +505,7 @@ function auditRendererFacingPaths(value: JsonValue): JsonValue {
 async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<JsonValue> {
   return (await windowRef.webContents.executeJavaScript(
     `
-      (() => {
+      (async () => {
         const root = globalThis;
         const candor = root.candor;
         const core = candor?.core ?? {};
@@ -531,6 +531,12 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
         const forbiddenShellKeys = ["openExternal", "shellOpenExternal"];
         const forbiddenLicenseKeys = ["readFile", "writeFile", "storagePath", "openExternal"];
         const forbiddenGlobals = ["require", "process", "ipcRenderer", "electron"];
+        let invalidInputError = null;
+        try {
+          await core.recordingDurableRead("../private-vault");
+        } catch (error) {
+          invalidInputError = String(error?.message ?? error);
+        }
         return {
           attempted: true,
           candorPresent: Boolean(candor && typeof candor === "object"),
@@ -548,6 +554,14 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
           nodeProcessAvailable: typeof root.process !== "undefined",
           ipcRendererAvailable: typeof root.ipcRenderer !== "undefined",
           electronGlobalAvailable: typeof root.electron !== "undefined",
+          invalidInputErrorSafe:
+            typeof invalidInputError === "string" &&
+            invalidInputError.includes("CANDOR_CORE_ERROR:INVALID_RENDERER_INPUT") &&
+            !invalidInputError.includes("private-vault"),
+          invalidInputErrorCode: typeof invalidInputError === "string" &&
+            invalidInputError.includes("CANDOR_CORE_ERROR:INVALID_RENDERER_INPUT")
+              ? "INVALID_RENDERER_INPUT"
+              : null,
           keyMaterialExposedToRenderer: false
         };
       })()

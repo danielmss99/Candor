@@ -321,6 +321,12 @@ function assertSmokePayload(payload) {
   if ((payload.rendererIsolationProbe?.forbiddenShellKeysPresent ?? []).length !== 0) {
     throw new Error("Renderer isolation probe found private shell methods on the preload bridge.");
   }
+  if (
+    payload.rendererIsolationProbe?.invalidInputErrorSafe !== true ||
+    payload.rendererIsolationProbe?.invalidInputErrorCode !== "INVALID_RENDERER_INPUT"
+  ) {
+    throw new Error("Renderer isolation probe did not receive a pathless structured input error.");
+  }
   if (!payload.rendererIsolationProbe?.coreKeys?.includes("transcriptionRunLocal")) {
     throw new Error("Renderer isolation probe did not find the typed transcription command.");
   }
