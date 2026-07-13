@@ -33,6 +33,18 @@ async function expectNoAxeViolations(page: Page): Promise<void> {
   expect(results.violations, violationSummary(results.violations)).toEqual([]);
 }
 
+async function expectMeetingNotesVisible(page: Page): Promise<void> {
+  const notesEditor = page.getByRole("textbox", { name: "Meeting notes" });
+  if (await notesEditor.isVisible()) return;
+
+  const notesPane = page
+    .getByRole("tablist", { name: "Meeting workspace panes" })
+    .getByRole("tab", { name: "Notes", exact: true });
+  await expect(notesPane).toBeVisible();
+  await notesPane.click();
+  await expect(notesEditor).toBeVisible();
+}
+
 async function expectNoViewportOverflow(page: Page, expectedScaleFactor: number): Promise<void> {
   const layout = await page.evaluate(() => ({
     innerWidth: window.innerWidth,
@@ -143,7 +155,7 @@ test("Record, Review, and Export workflow is keyboard-accessible and axe-clean",
   const session = await launchCandor({ seedMeeting: true });
   try {
     await expect(session.page.locator('[data-view="meeting"]')).toBeVisible();
-    await expect(session.page.getByRole("textbox", { name: "Meeting notes" })).toBeVisible();
+    await expectMeetingNotesVisible(session.page);
     await expectNoAxeViolations(session.page);
 
     const primaryNavigation = session.page.getByRole("navigation", { name: "Primary" });
@@ -175,7 +187,7 @@ test("Record, Review, and Export workflow is keyboard-accessible and axe-clean",
 
     await session.page.getByRole("navigation", { name: "Open meetings" }).getByRole("button", { name: "Product Strategy Sync", exact: true }).click();
     await expect(session.page.locator('[data-view="meeting"]')).toBeVisible();
-    await expect(session.page.getByRole("textbox", { name: "Meeting notes" })).toBeVisible();
+    await expectMeetingNotesVisible(session.page);
   } finally {
     await session.close();
   }
@@ -183,6 +195,10 @@ test("Record, Review, and Export workflow is keyboard-accessible and axe-clean",
 
 for (const scaleFactor of [1.25, 1.5]) {
   test(`1366x768 remains usable at ${scaleFactor * 100}% scale`, async () => {
+    test.skip(
+      process.platform === "darwin",
+      "Chromium's forced device scale factor is not a valid macOS display-scaling control.",
+    );
     const session: CandorElectronSession = await launchCandor({
       seedMeeting: true,
       width: 1366,

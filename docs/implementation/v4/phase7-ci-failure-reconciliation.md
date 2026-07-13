@@ -49,3 +49,31 @@ The E2E harness now calls Electron `app.quit()` on macOS, bounds graceful close
 to five seconds, and terminates the test child process only if it still has not
 exited. This changes test teardown only; production macOS lifecycle behavior is
 unchanged. A third matrix run is required to close the macOS gate.
+
+## Third Matrix Run
+
+GitHub Actions run `29244127917` proved the teardown correction and narrowed the
+remaining failure:
+
+- Windows M0: passed;
+- Linux M0: passed;
+- V3 dependency audit: passed;
+- macOS staged verification, package, artifact, checksum, packaged smoke, and
+  test teardown: passed;
+- macOS Electron integration: one compact-layout assumption and two unsupported
+  forced-scale assertions failed.
+
+The macOS CI display constrained the application below the `1180px` compact-pane
+breakpoint. Candor correctly displayed the `Transcript | Notes | AI` switcher
+with Transcript active, but the workflow test tried to locate the hidden Notes
+editor without selecting the Notes pane. The cross-platform test now selects
+that visible pane before asserting the editor.
+
+Electron's Chromium `force-device-scale-factor` switch is honored by the Windows
+and Linux runners but not by the macOS runner, which reported a ratio of `1` for
+both requested scales. The 125% and 150% tests now skip only on macOS with an
+explicit reason. Windows and Linux remain the automated forced-scale evidence;
+macOS retains its sandbox, workflow, accessibility, packaged-smoke, and native
+network checks without claiming a scale condition the runner did not apply.
+
+A fourth matrix run is required to close the macOS gate.
