@@ -126,7 +126,7 @@ function validateWindowsReleaseIdentity(payload, failures) {
     appArchive: payload?.appArchivePath,
   };
   const expectedPaths = {
-    appExecutable: `${releaseDir}/win-unpacked/candor v3 m0.exe`,
+    appExecutable: `${releaseDir}/win-unpacked/candor.exe`,
     coreExecutable: `${releaseDir}/win-unpacked/resources/bin/candor-core.exe`,
     appArchive: `${releaseDir}/win-unpacked/resources/app.asar`,
   };
@@ -1067,7 +1067,7 @@ function minimalValidReleaseArtifactSmokeProof() {
       },
       requiredEntries: [
         {
-          extractedPath: "Candor v3 M0.exe",
+          extractedPath: "Candor.exe",
           exists: true,
           hashMatchesUnpacked: true,
         },
@@ -1307,7 +1307,7 @@ function runSelfTest() {
   );
 
   const windowsReleaseDir = "C:\\Candor";
-  const windowsAppPath = `${windowsReleaseDir}\\win-unpacked\\Candor v3 M0.exe`;
+  const windowsAppPath = `${windowsReleaseDir}\\win-unpacked\\Candor.exe`;
   const windowsCorePath = `${windowsReleaseDir}\\win-unpacked\\resources\\bin\\candor-core.exe`;
   const windowsAppArchivePath = `${windowsReleaseDir}\\win-unpacked\\resources\\app.asar`;
   const validWindowsSmoke = cloneJson(validSmoke);
@@ -1354,7 +1354,7 @@ function runSelfTest() {
   assertSelfTest(validWindowsNetworkFailures.length === 0, "valid Windows network proof should pass");
 
   const mixedWindowsSmoke = cloneJson(validWindowsSmoke);
-  mixedWindowsSmoke.executable = "C:\\OlderCandor\\win-unpacked\\Candor v3 M0.exe";
+  mixedWindowsSmoke.executable = "C:\\OlderCandor\\win-unpacked\\Candor.exe";
   const mixedWindowsReleaseFailures = [];
   validateWindowsReleaseIdentity(
     { ...validWindowsReleaseFields, smokeProof: mixedWindowsSmoke },
@@ -1452,7 +1452,7 @@ function runSelfTest() {
     proofKind: "m0-network-deny-windows",
     prerequisiteFailure: "administrator-required",
     error: "Run this script from an elevated PowerShell session so it can create and remove temporary firewall rules.",
-    appPath: "C:\\Candor\\Candor v3 M0.exe",
+    appPath: "C:\\Candor\\Candor.exe",
     corePath: "C:\\Candor\\resources\\bin\\candor-core.exe",
     temporaryFirewallRules: [],
     observedTcpConnections: [],
@@ -1515,7 +1515,7 @@ function runSelfTest() {
       applicationBaselinePacketCount: 0,
       denyProbeCounted: true,
       denyProbePacketCount: 1,
-      observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor v3 M0" }],
+      observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor" }],
       processIdentityMismatches: [],
       observedPacketCount: 0,
       packetsWithoutProcessMetadata: [],
@@ -1565,7 +1565,7 @@ function runSelfTest() {
   const escapedIdentityManagedMacosProof = cloneJson(validManagedMacosProof);
   escapedIdentityManagedMacosProof.executionIdentity.processTreeComplete = false;
   escapedIdentityManagedMacosProof.packetAttribution.processIdentityMismatches = [
-    { pid: 2001, uid: 501, gid: 20, command: "Candor v3 M0 Helper" },
+    { pid: 2001, uid: 501, gid: 20, command: "Candor Helper" },
   ];
   const escapedIdentityManagedMacosFailures = validateNetworkProof(
     "macos",
@@ -1909,7 +1909,7 @@ function validateReleaseArtifactSmokeProof(osName, payload) {
   }
   if (osName === "windows") {
     requireField(payload?.currentPlatform?.installer?.exists === true, "Windows installer must exist", failures);
-    for (const expected of ["Candor v3 M0.exe", "resources/app.asar", "resources/bin/candor-core.exe"]) {
+    for (const expected of ["Candor.exe", "resources/app.asar", "resources/bin/candor-core.exe"]) {
       const entry = entries.find((candidate) => candidate?.extractedPath === expected);
       requireField(Boolean(entry), `Windows installer payload must include ${expected}`, failures);
       if (entry) {

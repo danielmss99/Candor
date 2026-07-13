@@ -1,55 +1,55 @@
 # Third-Party Notices
 
-Candor includes or downloads the following third-party components.
+Candor uses the following major third-party components. Their transitive
+dependencies and license files remain authoritative.
 
-## Runtime and application framework
+## Desktop And Interface
 
-- Tauri, MIT or Apache-2.0
 - Electron, MIT
-- React, MIT
-- Three.js, MIT
+- React and React DOM, MIT
 - Vite, MIT
+- Three.js, MIT
+- React Three Fiber and Drei, MIT
 
-## Audio and transcription
+## Audio And Local Models
 
-- whisper.cpp and whisper-rs, MIT
-- OpenAI Whisper model weights converted for whisper.cpp, MIT
 - CPAL, Apache-2.0 or MIT
-- ScreenCaptureKit-rs, MIT or Apache-2.0
-- apple-cf, MIT or Apache-2.0
-- Hound, Apache-2.0 or MIT
-- Symphonia, MPL-2.0
+- whisper-rs and whisper.cpp, MIT
+- ScreenCaptureKit Rust bindings, MIT or Apache-2.0
+- User-imported Whisper and GGUF model files retain their original licenses and
+  are not bundled merely by building Candor
 
-## Fonts
-
-- Space Grotesk, SIL Open Font License 1.1
-- JetBrains Mono, SIL Open Font License 1.1
-- Inter, SIL Open Font License 1.1
-- Noto Sans, SIL Open Font License 1.1. The bundled report-font license is at
-  `crates/candor-core/assets/fonts/OFL.txt`.
-
-## Local storage and document export
+## Storage, Cryptography, And Export
 
 - SQLCipher, BSD-style license
-- rusqlite, MIT
+- SQLite and rusqlite, public domain and MIT
+- OpenSSL, Apache License 2.0
+- chacha20poly1305, Apache-2.0 or MIT
 - Krilla, MIT or Apache-2.0
 - quick-xml, MIT
 - rustybuzz, MIT
 - zip, MIT
-- lopdf, MIT (test-only validation of generated PDF files)
 - pulldown-cmark, MIT
-- chacha20poly1305, Apache-2.0 or MIT
-- time, Apache-2.0 or MIT
-
-## Calendar and utility libraries
-
-- chrono and chrono-tz, Apache-2.0 or MIT
-- ureq, Apache-2.0 or MIT
-- roxmltree, MIT or Apache-2.0
 - base64, MIT or Apache-2.0
-- uuid, Apache-2.0 or MIT
-- sha2, MIT or Apache-2.0
+- serde and serde_json, Apache-2.0 or MIT
+- sha2, Apache-2.0 or MIT
+- time, Apache-2.0 or MIT
+- lopdf, MIT, used for test validation
 
-Review `package-lock.json`, `src-tauri/Cargo.lock`, and
-`crates/candor-core/Cargo.lock` before each public release for the complete
-transitive dependency list.
+## Key Storage
+
+- Windows Data Protection API, operating-system component
+- macOS Keychain, operating-system component
+- keyring and libsecret integrations, MIT or Apache-2.0 as applicable
+
+## Fonts
+
+- Inter, SIL Open Font License 1.1
+- JetBrains Mono, SIL Open Font License 1.1
+- Space Grotesk, SIL Open Font License 1.1
+- Noto Sans report font, SIL Open Font License 1.1; the bundled license is at
+  `crates/candor-core/assets/fonts/OFL.txt`
+
+Review `package-lock.json`, `crates/candor-core/Cargo.lock`, bundled license
+files, imported model licenses, and generated dependency audit output before
+every public release.

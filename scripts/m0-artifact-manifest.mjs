@@ -74,18 +74,18 @@ function ciProvenance() {
 function packagedFiles() {
   if (process.platform === "win32") {
     return {
-      appExecutable: join(releaseDir, "win-unpacked", "Candor v3 M0.exe"),
+      appExecutable: join(releaseDir, "win-unpacked", "Candor.exe"),
       coreExecutable: join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe"),
       appArchive: join(releaseDir, "win-unpacked", "resources", "app.asar"),
     };
   }
   if (process.platform === "darwin") {
     const appRoot = firstExisting([
-      join(releaseDir, "mac", "Candor v3 M0.app"),
-      join(releaseDir, "mac-arm64", "Candor v3 M0.app"),
+      join(releaseDir, "mac", "Candor.app"),
+      join(releaseDir, "mac-arm64", "Candor.app"),
     ]);
     return {
-      appExecutable: join(appRoot, "Contents", "MacOS", "Candor v3 M0"),
+      appExecutable: join(appRoot, "Contents", "MacOS", "Candor"),
       coreExecutable: join(appRoot, "Contents", "Resources", "bin", "candor-core"),
       appArchive: join(appRoot, "Contents", "Resources", "app.asar"),
     };
@@ -93,7 +93,7 @@ function packagedFiles() {
   return {
     appExecutable: firstExisting([
       join(releaseDir, "linux-unpacked", "candor"),
-      join(releaseDir, "linux-unpacked", "Candor v3 M0"),
+      join(releaseDir, "linux-unpacked", "Candor"),
     ]),
     coreExecutable: join(releaseDir, "linux-unpacked", "resources", "bin", "candor-core"),
     appArchive: join(releaseDir, "linux-unpacked", "resources", "app.asar"),

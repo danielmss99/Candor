@@ -4,7 +4,7 @@ Status: **Windows final15 preflight passed; elevated boundary and cross-OS execu
 
 ## Requirement
 
-The packaged Candor v3 M0 app must run with zero outbound network traffic.
+The packaged Candor app must run with zero outbound network traffic.
 Updater checks, model downloads, crash reporting, telemetry, and Chromium
 background calls are disabled for M0.
 
@@ -87,9 +87,9 @@ Run from an elevated PowerShell prompt after packaging. For the accepted
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/m0-network-deny-windows.ps1 `
-  -ReleaseDir ./release-v3-design-vetted-final15 `
-  -AppPath './release-v3-design-vetted-final15/win-unpacked/Candor v3 M0.exe' `
-  -CorePath ./release-v3-design-vetted-final15/win-unpacked/resources/bin/candor-core.exe `
+  -ReleaseDir ./release-v3 `
+  -AppPath './release-v3/win-unpacked/Candor.exe' `
+  -CorePath ./release-v3/win-unpacked/resources/bin/candor-core.exe `
   -ProofDir ./release-v3/proofs
 ```
 
@@ -97,9 +97,9 @@ To launch the same proof through UAC from a normal PowerShell prompt:
 
 ```powershell
 npm run m0:network-deny:windows:admin -- `
-  -ReleaseDir ./release-v3-design-vetted-final15 `
-  -AppPath './release-v3-design-vetted-final15/win-unpacked/Candor v3 M0.exe' `
-  -CorePath ./release-v3-design-vetted-final15/win-unpacked/resources/bin/candor-core.exe `
+  -ReleaseDir ./release-v3 `
+  -AppPath './release-v3/win-unpacked/Candor.exe' `
+  -CorePath ./release-v3/win-unpacked/resources/bin/candor-core.exe `
   -ProofDir ./release-v3/proofs
 ```
 
@@ -280,7 +280,7 @@ outbound block rules can be created and removed.
 2026-07-11 local Windows `final15` package-binding check:
 
 ```text
-release root: release-v3-design-vetted-final15
+release root: release-v3
 application:  e8a0d02e164df885187e5141e9a3b1f9420c6744a88c4ca80c55a62dcc1067e7
 app.asar:     7c929cbace23a5a4889551a11cfca42d2eef1f117f67b0afbc87f9c52da0207f
 sidecar:      4311c9d8af8eb34874ffd1458057509414952aac8a96d111c6944cd58d487323

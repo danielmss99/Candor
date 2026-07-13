@@ -24,7 +24,7 @@ const minimumSmokeScreenshotHeight = 600;
 
 function defaultExecutableCandidates() {
   if (process.platform === "win32") {
-    return [join(repoRoot, "release-v3", "win-unpacked", "Candor v3 M0.exe")];
+    return [join(repoRoot, "release-v3", "win-unpacked", "Candor.exe")];
   }
   if (process.platform === "darwin") {
     return [
@@ -32,25 +32,25 @@ function defaultExecutableCandidates() {
         repoRoot,
         "release-v3",
         "mac",
-        "Candor v3 M0.app",
+        "Candor.app",
         "Contents",
         "MacOS",
-        "Candor v3 M0",
+        "Candor",
       ),
       join(
         repoRoot,
         "release-v3",
         "mac-arm64",
-        "Candor v3 M0.app",
+        "Candor.app",
         "Contents",
         "MacOS",
-        "Candor v3 M0",
+        "Candor",
       ),
     ];
   }
   return [
     join(repoRoot, "release-v3", "linux-unpacked", "candor"),
-    join(repoRoot, "release-v3", "linux-unpacked", "Candor v3 M0"),
+    join(repoRoot, "release-v3", "linux-unpacked", "Candor"),
   ];
 }
 

@@ -273,7 +273,7 @@ function windowsNsisSmoke() {
     }
 
     const requiredEntries = [
-      compareExtracted(extractRoot, "Candor v3 M0.exe", rel(join(releaseDir, "win-unpacked", "Candor v3 M0.exe"))),
+      compareExtracted(extractRoot, "Candor.exe", rel(join(releaseDir, "win-unpacked", "Candor.exe"))),
       compareExtracted(extractRoot, "resources/app.asar", rel(join(releaseDir, "win-unpacked", "resources", "app.asar"))),
       compareExtracted(
         extractRoot,
@@ -300,7 +300,7 @@ function windowsNsisSmoke() {
       list: {
         ok: list.ok,
         exitCode: list.exitCode,
-        containsAppExecutable: list.stdout.includes("Candor v3 M0.exe"),
+        containsAppExecutable: list.stdout.includes("Candor.exe"),
         containsAppArchive: list.stdout.includes("resources/app.asar"),
         containsCoreSidecar: list.stdout.includes("resources/bin/candor-core.exe"),
       },
@@ -361,26 +361,26 @@ function macosDmgSmoke() {
     const requiredEntries = [
       compareExtractedToAny(
         mountPoint,
-        "Candor v3 M0.app/Contents/MacOS/Candor v3 M0",
+        "Candor.app/Contents/MacOS/Candor",
         [
-          rel(join(releaseDir, "mac", "Candor v3 M0.app", "Contents", "MacOS", "Candor v3 M0")),
-          rel(join(releaseDir, "mac-arm64", "Candor v3 M0.app", "Contents", "MacOS", "Candor v3 M0")),
+          rel(join(releaseDir, "mac", "Candor.app", "Contents", "MacOS", "Candor")),
+          rel(join(releaseDir, "mac-arm64", "Candor.app", "Contents", "MacOS", "Candor")),
         ],
       ),
       compareExtractedToAny(
         mountPoint,
-        "Candor v3 M0.app/Contents/Resources/app.asar",
+        "Candor.app/Contents/Resources/app.asar",
         [
-          rel(join(releaseDir, "mac", "Candor v3 M0.app", "Contents", "Resources", "app.asar")),
-          rel(join(releaseDir, "mac-arm64", "Candor v3 M0.app", "Contents", "Resources", "app.asar")),
+          rel(join(releaseDir, "mac", "Candor.app", "Contents", "Resources", "app.asar")),
+          rel(join(releaseDir, "mac-arm64", "Candor.app", "Contents", "Resources", "app.asar")),
         ],
       ),
       compareExtractedToAny(
         mountPoint,
-        "Candor v3 M0.app/Contents/Resources/bin/candor-core",
+        "Candor.app/Contents/Resources/bin/candor-core",
         [
-          rel(join(releaseDir, "mac", "Candor v3 M0.app", "Contents", "Resources", "bin", "candor-core")),
-          rel(join(releaseDir, "mac-arm64", "Candor v3 M0.app", "Contents", "Resources", "bin", "candor-core")),
+          rel(join(releaseDir, "mac", "Candor.app", "Contents", "Resources", "bin", "candor-core")),
+          rel(join(releaseDir, "mac-arm64", "Candor.app", "Contents", "Resources", "bin", "candor-core")),
         ],
       ),
     ];
@@ -391,7 +391,7 @@ function macosDmgSmoke() {
       }
     }
 
-    const appPath = join(mountPoint, "Candor v3 M0.app");
+    const appPath = join(mountPoint, "Candor.app");
     const infoPlistPath = join(appPath, "Contents", "Info.plist");
     const sidecarPath = join(appPath, "Contents", "Resources", "bin", "candor-core");
     const plutil = commandOnPath(["plutil"]);

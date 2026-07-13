@@ -14,11 +14,16 @@ Candor records conversations, transcribes them, extracts decisions and tasks, an
 
 ## Brand Personality
 
-Private, precise, composed. Candor should feel like a high-end local recorder with intelligence built in, not a generic AI meeting assistant or a legal archive.
+Private, precise, composed, and warm. Candor should feel like a focused local
+meeting workspace with intelligence built in, not a generic AI assistant or a
+technical diagnostics console.
 
 ## Anti-references
 
-Avoid parchment, legal scales, court imagery, cream paper, generic SaaS cards, AI-purple gradients, cloud-first imagery, bot mascots, decorative AI sparkles, and social visuals that make private work feel unserious.
+Avoid parchment, legal scales, court imagery, generic SaaS card grids, AI-purple
+gradients, cloud-first imagery, bot mascots, decorative AI sparkles, and social
+visuals that make private work feel unserious. Warm cream is the approved app
+surface, but it must read as a modern operational workspace rather than paper.
 
 ## Design Principles
 
@@ -27,6 +32,8 @@ Avoid parchment, legal scales, court imagery, cream paper, generic SaaS cards, A
 - Use hairlines, rails, and docks instead of repeated cards.
 - Keep the daily workflow fast, legible, and predictable.
 - Add cultural edge through motion, layout, and brand moments, not clutter.
+- Make `Record -> Review -> Export` obvious without exposing model or vault
+  terminology in the normal workflow.
 
 ## Accessibility & Inclusion
 

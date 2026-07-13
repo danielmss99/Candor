@@ -1,5 +1,5 @@
 appId: com.candor.v3
-productName: Candor v3 M0
+productName: Candor
 directories:
   output: release-v3
   buildResources: build

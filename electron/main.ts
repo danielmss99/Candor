@@ -582,7 +582,7 @@ function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
     height: options.smoke ? smokeWindowHeight : 760,
     minWidth: 920,
     minHeight: 620,
-    title: "Candor v3 M0",
+    title: "Candor",
     show: false,
     webPreferences: {
       preload,

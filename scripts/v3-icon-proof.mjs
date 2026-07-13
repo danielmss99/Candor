@@ -296,7 +296,7 @@ try {
   report.pngs = inspectPngFamily();
 
   if (process.platform === "win32") {
-    const executablePath = join(releaseDir, "win-unpacked", "Candor v3 M0.exe");
+    const executablePath = join(releaseDir, "win-unpacked", "Candor.exe");
     if (!existsSync(executablePath)) {
       throw new Error("Packaged Windows executable is missing: " + rel(executablePath));
     }

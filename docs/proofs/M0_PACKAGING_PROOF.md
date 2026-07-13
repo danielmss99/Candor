@@ -45,7 +45,7 @@ M0 network-deny proof.
 `npm run v3:release-artifact-smoke` writes
 `release-v3/proofs/v3-release-artifact-smoke-<platform>-<arch>.json`. On
 Windows it extracts the NSIS installer payload without installing it and checks
-that `Candor v3 M0.exe`, `resources/app.asar`, and
+that `Candor.exe`, `resources/app.asar`, and
 `resources/bin/candor-core.exe` match the unpacked package by hash. On macOS
 and Linux, the same gate must prove the DMG, AppImage, or deb payload entries
 match the corresponding unpacked app payload hashes before M0 packaging can
@@ -181,8 +181,8 @@ receipts for diagnosis.
 Current vetted Windows artifact:
 
 ```text
-release-v3-design-vetted-final15/Candor v3 M0 Setup 2.0.0.exe
-release-v3-design-vetted-final15/win-unpacked/Candor v3 M0.exe
+release-v3/Candor Setup 2.0.0.exe
+release-v3/win-unpacked/Candor.exe
 ```
 
 Immutable SHA-256 identities:
@@ -194,7 +194,7 @@ app.asar:    7c929cbace23a5a4889551a11cfca42d2eef1f117f67b0afbc87f9c52da0207f
 sidecar:     4311c9d8af8eb34874ffd1458057509414952aac8a96d111c6944cd58d487323
 ```
 
-The proof scripts were run with `--release-dir release-v3-design-vetted-final15`
+The proof scripts were run with `--release-dir release-v3`
 so installer extraction and artifact hashes refer to this exact package.
 The Windows network runner and admin-launcher validate-only paths also passed
 against this exact root on 2026-07-11. A deliberate mixed-root input was
@@ -206,7 +206,7 @@ executable path.
 
 | OS | Installer/Bundle Path | Sidecar Found | Signing/Notarization | Clean Launch | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Windows | `release-v3-design-vetted-final15/Candor v3 M0 Setup 2.0.0.exe` plus `release-v3-design-vetted-final15/win-unpacked/Candor v3 M0.exe` | `release-v3-design-vetted-final15/win-unpacked/resources/bin/candor-core.exe` verified by packaged smoke | installer artifact exists, production Authenticode certificate not configured | explicit packaged smoke passed at 1440 by 900 and 1080 by 720 on 2026-07-11 | Proof artifacts: `release-v3/proofs/m0-packaged-runtime-smoke-win32-x64.json`, `release-v3/proofs/m0-packaged-runtime-smoke-compact-win32-x64.json`, `release-v3/proofs/v3-release-artifact-smoke-win32-x64.json`, `release-v3/proofs/v3-icon-proof-win32-x64.json`, and `release-v3/proofs/m0-artifact-manifest-win32-x64.json`. Smoke proved activation and local trial, ten rendered views per viewport, preload isolation, main IPC, sidecar handshake/restart, SQLCipher vault access, blocked external navigation/network probes, native editable DOCX generation, searchable bookmarked PDF generation, packaged `candor-core` stdio RPC, fail-closed callback integrity policy, AI Suggestions mode switching, restoration of the manual notes view, notification dismissal before visual capture, and accessible accent text contrast across canvas and raised surfaces. Icon proof verified reproducible ICO, ICNS, and PNG assets plus an exact pixel match between the generated 32px source and the icon embedded in the Windows executable. Clean-machine launch still pending |
+| Windows | `release-v3/Candor Setup 2.0.0.exe` plus `release-v3/win-unpacked/Candor.exe` | `release-v3/win-unpacked/resources/bin/candor-core.exe` verified by packaged smoke | installer artifact exists, production Authenticode certificate not configured | explicit packaged smoke passed at 1440 by 900 and 1080 by 720 on 2026-07-11 | Proof artifacts: `release-v3/proofs/m0-packaged-runtime-smoke-win32-x64.json`, `release-v3/proofs/m0-packaged-runtime-smoke-compact-win32-x64.json`, `release-v3/proofs/v3-release-artifact-smoke-win32-x64.json`, `release-v3/proofs/v3-icon-proof-win32-x64.json`, and `release-v3/proofs/m0-artifact-manifest-win32-x64.json`. Smoke proved activation and local trial, ten rendered views per viewport, preload isolation, main IPC, sidecar handshake/restart, SQLCipher vault access, blocked external navigation/network probes, native editable DOCX generation, searchable bookmarked PDF generation, packaged `candor-core` stdio RPC, fail-closed callback integrity policy, AI Suggestions mode switching, restoration of the manual notes view, notification dismissal before visual capture, and accessible accent text contrast across canvas and raised surfaces. Icon proof verified reproducible ICO, ICNS, and PNG assets plus an exact pixel match between the generated 32px source and the icon embedded in the Windows executable. Clean-machine launch still pending |
 | macOS | Pending | Pending | Pending | Pending | Pending |
 | Linux | Pending | Pending | Pending | Pending | Pending |
 

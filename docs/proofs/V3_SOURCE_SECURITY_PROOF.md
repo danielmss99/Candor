@@ -1,37 +1,39 @@
 # V3 Source Security Proof
 
-Status: **implemented source leak proof**
+Status: implemented Electron/Rust source gate
 
 ## Purpose
 
-Candor v3 release readiness needs a machine-readable source security proof, not
-only a terminal-only script. This proof wraps the existing
-`scripts/audit-source-security.ps1` gate and records the same release-critical
-checks as structured JSON.
+The source proof records machine-readable evidence that the active Electron and
+Rust application retains its local-first trust boundary. Missing source is a
+failure and cannot be interpreted as an empty passing input.
 
 The proof verifies:
 
-- `.env`, `.env.local`, and `.env.production` are not tracked by git
-- `.env` and `.env.local` are ignored by git
-- `src-tauri/build.rs` does not export `CANDOR_GOOGLE_CLIENT_SECRET`
-- `src-tauri/src/calendar.rs` does not fall back to plaintext calendar secrets
-- no proof response exposes raw paths or key material to the renderer
+- required Electron, renderer, Rust, packaging, and launcher files exist;
+- sandbox, context isolation, Node.js denial, permissions, navigation, popup,
+  webview, and Chromium network switches remain present;
+- the preload exposes no generic filesystem, process, path, or IPC capability;
+- renderer CSP blocks network connections and embedded content;
+- root commands and packaging target Electron and the staged Rust core;
+- active source contains no recognized hardcoded secret pattern;
+- Rust JSONL frames are bounded and use stdio;
+- the v2 importer remains canonicalized, contained, and originals-untouched;
+- `.env` and `.env.local` remain ignored and no environment file is tracked.
+
+Five in-memory mutation tests prove the audit rejects a missing main process,
+disabled sandbox, generic preload file operation, hardcoded secret, and weakened
+v2-import guarantee.
 
 ## Commands
 
-Run the proof directly:
-
 ```powershell
+npm run audit:source:portable
+npm run audit:source
 npm run v3:source-security-proof
 ```
 
-The aggregate verifier also runs it:
-
-```powershell
-npm run v3:verify
-```
-
-The proof writes:
+The proof is also part of `npm run v3:verify` and writes:
 
 ```text
 release-v3/proofs/v3-source-security-proof-<platform>-<arch>.json
@@ -39,8 +41,6 @@ release-v3/proofs/v3-source-security-proof-<platform>-<arch>.json
 
 ## Boundary
 
-This proof is a source leak and local-secret handling gate. It does not replace
-the M0 network-deny proof, package artifact hash proof, or release artifact
-audit. On non-Windows runners, if PowerShell is unavailable, the Node proof
-still runs the same structured checks and records that the PowerShell wrapper
-was skipped.
+This proof does not replace package execution, artifact hash comparison,
+OS-boundary network denial, signing, clean-machine installation, or real capture
+evidence.

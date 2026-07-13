@@ -98,6 +98,26 @@ deleted. `crates/candor-core/src/v2_importer.rs` remains active, canonicalizes
 the selected source, constrains referenced audio to that source, copies into the
 managed recording store, and continues to report `originalsUntouched: true`.
 
+## Phase 1d: Documentation And Product Identity
+
+Date: 2026-07-12
+
+| Check | Result |
+|---|---|
+| Root documentation | README, architecture, security, design, product, release, environment, source-proof, and third-party docs now describe Electron/Rust only |
+| Product identity | window, renderer title, package product, workflow, process fixtures, and proof tools use `Candor` |
+| `npm run m0:proof-audit:self-test` | passed after updating exact Windows and macOS process identities |
+| `npm run electron:v3:dist:win` | passed; created `release-v3/Candor Setup 2.0.0.exe` and `release-v3/win-unpacked/Candor.exe` |
+| `npm run v3:release-artifact-smoke` | passed; installer payload matched unpacked app, archive, and sidecar hashes |
+| `npm run m0:packaged-smoke` | passed for `release-v3/win-unpacked/Candor.exe` |
+| `scripts/audit-release-artifacts.ps1` | passed for 13 artifacts before stale old-name outputs were removed |
+| `npm run v3:verify` | passed; full staged proof chain after the rename and documentation rewrite |
+
+The application ID remains `com.candor.v3` deliberately. Changing it during
+this consolidation could redirect OS application-data and key-storage identity,
+which would risk making existing local data appear missing. Product display
+names changed without changing that persistence identity.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;

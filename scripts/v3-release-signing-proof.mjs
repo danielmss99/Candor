@@ -155,7 +155,7 @@ function artifactConsistency() {
     : [];
   if (process.platform === "win32") {
     for (const expected of [
-      "Candor v3 M0.exe",
+      "Candor.exe",
       "resources/app.asar",
       "resources/bin/candor-core.exe",
     ]) {
@@ -485,18 +485,18 @@ const windowsInstallerCandidates = releaseFilesMatching((name) =>
 );
 const macDmgCandidates = releaseFilesMatching((name) => /\.dmg$/i.test(name));
 const macAppBundleCandidates = [
-  join(releaseDir, "mac", "Candor v3 M0.app"),
-  join(releaseDir, "mac-arm64", "Candor v3 M0.app"),
+  join(releaseDir, "mac", "Candor.app"),
+  join(releaseDir, "mac-arm64", "Candor.app"),
 ].filter((pathValue) => existsSync(pathValue));
 const linuxAppImageCandidates = releaseFilesMatching((name) => /\.AppImage$/i.test(name));
 const linuxDebCandidates = releaseFilesMatching((name) => /\.deb$/i.test(name));
 
 const windows = {
   target: "nsis",
-  appExecutable: fileEvidence(join(releaseDir, "win-unpacked", "Candor v3 M0.exe")),
+  appExecutable: fileEvidence(join(releaseDir, "win-unpacked", "Candor.exe")),
   coreExecutable: fileEvidence(join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe")),
   installerCandidates: windowsInstallerCandidates.map(fileEvidence),
-  appSignature: windowsAuthenticode(rel(join(releaseDir, "win-unpacked", "Candor v3 M0.exe"))),
+  appSignature: windowsAuthenticode(rel(join(releaseDir, "win-unpacked", "Candor.exe"))),
   coreSignature: windowsAuthenticode(rel(join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe"))),
   installerSignatures: windowsInstallerCandidates.map((pathValue) => windowsAuthenticode(rel(pathValue))),
   signingCredentialPresence: boolEnv([

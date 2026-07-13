@@ -72,14 +72,6 @@ function Get-ArtifactCandidates {
 
 function Get-DotEnvPatterns {
   $allowed = @{}
-  foreach ($key in @(
-    "VITE_MS_CLIENT_ID",
-    "VITE_GOOGLE_CLIENT_ID",
-    "CANDOR_MS_CLIENT_ID",
-    "CANDOR_GOOGLE_CLIENT_ID"
-  )) {
-    $allowed[$key] = $true
-  }
 
   if (-not [string]::IsNullOrWhiteSpace($env:CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS)) {
     foreach ($key in ($env:CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS -split ",")) {

@@ -432,7 +432,7 @@ function validateReleaseArtifactSmoke(payload) {
       failures.push("release artifact smoke must include a Windows installer");
     }
     for (const expected of [
-      "Candor v3 M0.exe",
+      "Candor.exe",
       "resources/app.asar",
       "resources/bin/candor-core.exe",
     ]) {
