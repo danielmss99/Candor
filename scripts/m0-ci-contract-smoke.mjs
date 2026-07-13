@@ -277,6 +277,7 @@ for (const [contents, pattern, label] of [
   [releaseChecksums, "SHA256SUMS", "release checksum manifest"],
   [releaseChecksums, "networkAttempted: false", "release checksum network denial evidence"],
   [releaseChecksums, "rawPathExposed: false", "release checksum path redaction evidence"],
+  [releaseChecksums, "tracked source tree must be clean", "release checksum clean-source enforcement"],
   [goalAudit, "proofKind: \"v3-goal-audit\"", "goal audit proof kind"],
   [goalAudit, "coordination.subagent_alignment", "goal audit subagent alignment requirement"],
   [goalAudit, "missionComplete", "goal audit mission completion field"],

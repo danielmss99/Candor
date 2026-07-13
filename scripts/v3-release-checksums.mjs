@@ -32,7 +32,7 @@ function sha256(filePath) {
 
 function gitValue(args, fallback) {
   try {
-    return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || fallback;
+    return execFileSync("git", args, { cwd: repoRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   } catch {
     return fallback;
   }
@@ -65,16 +65,23 @@ for (const name of names) {
   artifacts.push({ name, sha256: await sha256(filePath) });
 }
 const expectedText = `${artifacts.map((artifact) => `${artifact.sha256}  ${artifact.name}`).join("\n")}\n`;
+const gitHead = gitValue(["rev-parse", "HEAD"], null);
+const gitBranch = gitValue(["branch", "--show-current"], null);
+const gitStatus = gitValue(["status", "--porcelain", "--untracked-files=no"], null);
 
 if (verifyOnly) {
   if (!existsSync(checksumPath)) throw new Error("SHA256SUMS is missing");
   const actualText = readFileSync(checksumPath, "utf8").replace(/\r\n/g, "\n");
   if (actualText !== expectedText) throw new Error("SHA256SUMS does not match the current release packages");
+  if (gitStatus === null) throw new Error("tracked source state could not be verified");
+  if (gitStatus.length > 0) throw new Error("tracked source tree must be clean before checksum verification");
+  if (typeof gitHead !== "string" || !/^[a-f0-9]{40}$/.test(gitHead)) {
+    throw new Error("committed source revision could not be verified");
+  }
 } else {
   atomicWrite(checksumPath, expectedText);
 }
 
-const status = gitValue(["status", "--porcelain", "--untracked-files=no"], "unknown");
 const proof = {
   proofKind: "v3-release-checksums",
   generatedAt: new Date().toISOString(),
@@ -85,9 +92,9 @@ const proof = {
   artifactCount: artifacts.length,
   artifacts,
   git: {
-    head: gitValue(["rev-parse", "HEAD"], "unknown"),
-    branch: gitValue(["branch", "--show-current"], "unknown"),
-    dirty: status === "unknown" ? null : status.length > 0,
+    head: gitHead,
+    branch: gitBranch,
+    dirty: gitStatus === null ? null : gitStatus.length > 0,
   },
   localOnly: true,
   cloudAi: false,
