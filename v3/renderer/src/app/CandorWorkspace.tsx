@@ -16,6 +16,7 @@ import { ReviewView } from "../features/review/ReviewView";
 import { SettingsView } from "../features/settings/SettingsView";
 import { useCaptureSession } from "../features/capture/useCaptureSession";
 import { useLocalJob } from "../features/ai/useLocalJob";
+import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
   DEFAULT_MODEL,
   LIBRARY_PAGE_SIZE,
@@ -48,7 +49,6 @@ import {
   type LocalJsonValue,
   type MarkedMoment,
   type MeetingPrivacyReceipt,
-  type NetworkCapabilities,
   type OnboardingStep,
   type RecapItem,
   type RecordingSummary,
@@ -97,26 +97,6 @@ export function CandorWorkspace() {
     timestamps: false,
   });
 
-  const [coreStatus, setCoreStatus] = useState<JsonObject>({});
-  const [capabilities, setCapabilities] = useState<JsonObject>({});
-  const [privacyAudit, setPrivacyAudit] = useState<JsonObject>({});
-  const [networkCapabilities, setNetworkCapabilities] = useState<NetworkCapabilities>({
-    policy: "loading",
-    externalCallsAttempted: 0,
-    capabilities: [],
-  });
-  const [updateStatus, setUpdateStatus] = useState<JsonObject>({});
-  const [v2ImportStatus, setV2ImportStatus] = useState<JsonObject>({});
-  const [consentStatus, setConsentStatus] = useState<JsonObject>({});
-  const [vaultStatus, setVaultStatus] = useState<JsonObject>({});
-  const [captureStatus, setCaptureStatus] = useState<JsonObject>({});
-  const [aiStatus, setAiStatus] = useState<JsonObject>({});
-  const [instructAssetsStatus, setInstructAssetsStatus] = useState<JsonObject>({});
-  const [instructStatus, setInstructStatus] = useState<JsonObject>({});
-  const [schedulerStatus, setSchedulerStatus] = useState<JsonObject>({});
-  const [modelStatus, setModelStatus] = useState<JsonObject>({ models: [] });
-  const [transcriptionStatus, setTranscriptionStatus] = useState<JsonObject>({});
-  const [retentionStatus, setRetentionStatus] = useState<JsonObject>({});
   const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
   const [recordingTotalCount, setRecordingTotalCount] = useState(0);
   const [recordingsHaveMore, setRecordingsHaveMore] = useState(false);
@@ -148,6 +128,33 @@ export function CandorWorkspace() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+
+  const {
+    coreStatus,
+    capabilities,
+    privacyAudit,
+    networkCapabilities,
+    updateStatus,
+    v2ImportStatus,
+    consentStatus,
+    vaultStatus,
+    captureStatus,
+    aiStatus,
+    instructAssetsStatus,
+    instructStatus,
+    schedulerStatus,
+    modelStatus,
+    transcriptionStatus,
+    retentionStatus,
+    diagnosticFailures,
+    setConsentStatus,
+    loadCritical,
+    loadDiagnostics,
+    refreshCapture,
+    refreshModelsAndAi,
+    refreshPrivacyFacts,
+    refreshVaultAndRetention,
+  } = useRuntimeStatus(api, client);
 
   const activeCapture = asBool(captureStatus.active);
   const activeRecordingId = asString(asObject(captureStatus.activeSession).recordingId);
@@ -261,16 +268,6 @@ export function CandorWorkspace() {
     [api, client],
   );
 
-  const refreshCapture = useCallback(async () => {
-    if (!api || !client) return;
-    const [nextCapture, nextConsent] = await Promise.all([
-      client.object("capture.status", () => api.captureStatus()),
-      client.object("consent.status", () => api.consentStatus()),
-    ]);
-    setCaptureStatus(nextCapture);
-    setConsentStatus(nextConsent);
-  }, [api, client]);
-
   const refreshLibrary = useCallback(async (offset = 0) => {
     if (!client) return [] as RecordingSummary[];
     const token = requestCoordinator.current.begin("library-page");
@@ -283,44 +280,6 @@ export function CandorWorkspace() {
     setRecordingsHaveMore(page.hasMore);
     return page.recordings;
   }, [client]);
-
-  const refreshModelsAndAi = useCallback(async () => {
-    if (!api || !client) return;
-    const [nextModels, nextAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription] = await Promise.all([
-      client.models(),
-      client.object("ai.status", () => api.aiStatus()),
-      client.object("ai.instructAssetsStatus", () => api.aiInstructAssetsStatus()),
-      client.object("ai.instructStatus", () => api.aiInstructStatus()),
-      client.object("ai.schedulerStatus", () => api.aiSchedulerStatus()),
-      client.object("transcription.status", () => api.transcriptionStatus()),
-    ]);
-    setModelStatus({ models: nextModels as unknown as LocalJsonValue });
-    setAiStatus(nextAi);
-    setInstructAssetsStatus(nextInstructAssets);
-    setInstructStatus(nextInstruct);
-    setSchedulerStatus(nextScheduler);
-    setTranscriptionStatus(nextTranscription);
-  }, [api, client]);
-
-  const refreshPrivacyFacts = useCallback(async () => {
-    if (!api || !client) return;
-    const [nextPrivacy, nextCapabilities] = await Promise.all([
-      client.object("privacy.auditSnapshot", () => api.privacyAuditSnapshot()),
-      client.networkCapabilities(),
-    ]);
-    setPrivacyAudit(nextPrivacy);
-    setNetworkCapabilities(nextCapabilities);
-  }, [api, client]);
-
-  const refreshVaultAndRetention = useCallback(async () => {
-    if (!api || !client) return;
-    const [nextVault, nextRetention] = await Promise.all([
-      client.object("vault.status", () => api.vaultStatus()),
-      client.object("retention.status", () => api.retentionStatus()),
-    ]);
-    setVaultStatus(nextVault);
-    setRetentionStatus(nextRetention);
-  }, [api, client]);
 
   const refreshPrivacyReceipt = useCallback(async (recordingId = selectedRecordingId) => {
     if (!client || !recordingId) {
@@ -337,59 +296,10 @@ export function CandorWorkspace() {
       setError("Candor preload API is unavailable");
       return;
     }
-    const [
-      nextCore,
-      nextCapabilities,
-      nextPrivacy,
-      nextNetworkCapabilities,
-      nextUpdates,
-      nextImport,
-      nextConsent,
-      nextVault,
-      nextCapture,
-      nextAi,
-      nextInstructAssets,
-      nextInstruct,
-      nextScheduler,
-      nextModelRows,
-      nextTranscription,
-      nextRetention,
-      nextLibraryPage,
-    ] = await Promise.all([
-      client.object("core.status", () => api.status()),
-      client.object("core.capabilities", () => api.capabilities()),
-      client.object("privacy.auditSnapshot", () => api.privacyAuditSnapshot()),
-      client.networkCapabilities(),
-      client.object("updates.status", () => api.updateStatus()),
-      client.object("import.v2.status", () => api.v2ImportStatus()),
-      client.object("consent.status", () => api.consentStatus()),
-      client.object("vault.status", () => api.vaultStatus()),
-      client.object("capture.status", () => api.captureStatus()),
-      client.object("ai.status", () => api.aiStatus()),
-      client.object("ai.instructAssetsStatus", () => api.aiInstructAssetsStatus()),
-      client.object("ai.instructStatus", () => api.aiInstructStatus()),
-      client.object("ai.schedulerStatus", () => api.aiSchedulerStatus()),
-      client.models(),
-      client.object("transcription.status", () => api.transcriptionStatus()),
-      client.object("retention.status", () => api.retentionStatus()),
+    const [, nextLibraryPage] = await Promise.all([
+      loadCritical(),
       client.recordingPage(0, LIBRARY_PAGE_SIZE),
     ]);
-    setCoreStatus(nextCore);
-    setCapabilities(nextCapabilities);
-    setPrivacyAudit(nextPrivacy);
-    setNetworkCapabilities(nextNetworkCapabilities);
-    setUpdateStatus(nextUpdates);
-    setV2ImportStatus(nextImport);
-    setConsentStatus(nextConsent);
-    setVaultStatus(nextVault);
-    setCaptureStatus(nextCapture);
-    setAiStatus(nextAi);
-    setInstructAssetsStatus(nextInstructAssets);
-    setInstructStatus(nextInstruct);
-    setSchedulerStatus(nextScheduler);
-    setModelStatus({ models: nextModelRows as unknown as LocalJsonValue });
-    setTranscriptionStatus(nextTranscription);
-    setRetentionStatus(nextRetention);
     const nextRecordings = nextLibraryPage.recordings;
     setRecordings(nextRecordings);
     setRecordingTotalCount(nextLibraryPage.totalCount);
@@ -400,7 +310,8 @@ export function CandorWorkspace() {
         : nextRecordings[0]?.recordingId ?? "";
     setSelectedRecordingId(nextSelected);
     if (nextSelected) await loadSelectedRecording(nextSelected);
-  }, [api, client, loadSelectedRecording, selectedRecordingId]);
+    void loadDiagnostics();
+  }, [api, client, loadCritical, loadDiagnostics, loadSelectedRecording, selectedRecordingId]);
 
   useEffect(() => {
     if (startupLoaded.current) return;
@@ -991,6 +902,7 @@ export function CandorWorkspace() {
     ["V2 import", asBool(v2ImportStatus.implemented) ? "native picker" : "pending"],
     ["Scheduler", asBool(schedulerStatus.whisperLlmConcurrent) ? "unsafe" : "single job"],
     ["Model import", metric(modelStatus.manualImportMethod, "native picker")],
+    ["Diagnostics", diagnosticFailures.length ? `${diagnosticFailures.length} unavailable` : "ready"],
   ];
 
   const filteredRecordings = recordings.filter((recording) => {
