@@ -150,6 +150,24 @@ Deferred to later planned phases:
 - namespace the stable release-core target for concurrent local worktrees;
 - add the substitute-core 2 MiB stderr stress test during process extraction.
 
+### Committed Phase 1 Closure
+
+Revision: `50f2b3e`
+
+| Command | Result |
+|---|---|
+| `npm run electron:v3:dist:win` | passed; rebuilt `Candor Setup 2.0.0.exe` and the unpacked app from the committed revision |
+| `npm run m0:packaged-smoke` | passed; exact renderer and arbitrary local-file navigation controls exercised |
+| `npm run m0:artifact-manifest` | passed; current app, archive, and core hashes recorded |
+| `npm run v3:release-artifact-smoke` | passed; installer payload matched unpacked artifacts |
+| `scripts/audit-release-artifacts.ps1` | passed for 12 Electron release artifacts |
+| `npm run v3:verify` | passed; 62 Rust tests, 29 frontend tests, SQLCipher, recovery, transcription, local AI, export, and importer proof chain |
+
+The packaged renderer scan inspected 302 strings and found no absolute path.
+The supervisor payload contained `candor-core.exe` as a basename and no
+`executable` field. The network probe recorded two denied navigations: one
+external URL and one arbitrary local file.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
