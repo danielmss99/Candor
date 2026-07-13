@@ -24,7 +24,7 @@ import type { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import type { useMeetingWorkspace } from "../features/meetings/useMeetingWorkspace";
 import type { useAppNavigation } from "./navigation";
 import type { useCaptureSession } from "../features/capture/useCaptureSession";
-import type { useCaptureActions } from "../features/capture/useCaptureActions";
+import { shouldDisableRecordControl, type useCaptureActions } from "../features/capture/useCaptureActions";
 import type { useOperationRunner } from "../features/jobs/useOperationRunner";
 import type { useLicenseState } from "../features/licensing/useLicenseState";
 import type { useLocalAiWorkspace } from "../features/local-ai/useLocalAiWorkspace";
@@ -71,7 +71,7 @@ export function AppRouteOutlet(props: AppRouteOutletProps) {
   const storageHealth = asObject(runtime.recordingStatus.storageHealth);
   const storageLevel = asString(storageHealth.level, "unavailable");
   const recordingBlocked = storageLevel === "blocking" || storageLevel === "unavailable";
-  const recordControlDisabled = Boolean(operations.busy) || (recordingBlocked && !activeCapture);
+  const recordControlDisabled = shouldDisableRecordControl(operations.busy, activeCapture, recordingBlocked);
   const persistentAlerts = buildPersistentAlerts({
     coreStatus: runtime.coreStatus,
     captureStatus: runtime.captureStatus,

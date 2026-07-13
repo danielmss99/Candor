@@ -34,6 +34,19 @@ export function preferredCaptureAction(active: boolean, combinedAvailable: boole
   return "microphone";
 }
 
+export function shouldDisableRecordControl(busy: string, activeCapture: boolean, recordingBlocked: boolean): boolean {
+  if (busy === "stop") return true;
+  return !activeCapture && (Boolean(busy) || recordingBlocked);
+}
+
+export function requireStartedRecordingId(result: unknown): string {
+  const recordingId = asString(asObject(asObject(result).capture).recordingId);
+  if (!recordingId) {
+    throw new Error("Capture start did not return a durable recording ID.");
+  }
+  return recordingId;
+}
+
 export function useCaptureActions(options: UseCaptureActionsOptions) {
   const {
     api,
@@ -81,7 +94,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     let started = false;
     await run("record", async () => {
       const result = await api.captureStartMic({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
-      const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
+      const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
       onNotice(`Recording ${recordingId}`);
@@ -109,7 +122,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     let started = false;
     await run("record", async () => {
       const result = await api.captureStartSystem({ label: recordingTitle.trim() || "Untitled local system audio", chunkMs: 500 });
-      const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
+      const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
       onNotice("System audio recording started locally");
@@ -137,7 +150,7 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     let started = false;
     await run("record", async () => {
       const result = await api.captureStartMicAndSystem({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
-      const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
+      const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
       onNotice("Microphone and system audio recording started locally");
