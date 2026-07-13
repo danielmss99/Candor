@@ -14,6 +14,7 @@ import { MeetingDetailView } from "../features/detail/MeetingDetailView";
 import { ReviewView } from "../features/review/ReviewView";
 import { SettingsView } from "../features/settings/SettingsView";
 import { useCaptureSession } from "../features/capture/useCaptureSession";
+import { useCaptureActions } from "../features/capture/useCaptureActions";
 import { useOperationRunner } from "../features/jobs/useOperationRunner";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
@@ -216,6 +217,30 @@ export function CandorWorkspace() {
   const selectedTitle = selectedRecording?.label || recordingTitle || "Untitled local meeting";
   const combinedCaptureAvailable = asBool(asObject(asObject(captureStatus.sources).system).simultaneousMicAndSystem);
   const licenseKeyInvalid = licenseKeyTouched && !licenseKey.trim();
+  const captureActions = useCaptureActions({
+    api,
+    captureSession,
+    captureStatus,
+    consentStatus,
+    activeCapture,
+    combinedCaptureAvailable,
+    recordingTitle,
+    run,
+    refreshCapture,
+    refreshLibrary,
+    loadRecording: loadSelectedRecording,
+    onOpenRecordingSettings: () => { setSettingsSection("recording"); setView("settings"); },
+    onShowLive: () => setView("meeting"),
+    onSelectRecording: setSelectedRecordingId,
+    onPinRecording: (recordingId) => setOpenMeetingIds((current) => [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3)),
+    onNotice: setNotice,
+    onError: setError,
+  });
+  const {
+    startSystem: startSystemRecording,
+    startCombined: startMicAndSystemRecording,
+    startPreferred: startPreferredRecording,
+  } = captureActions;
 
   const refresh = useCallback(async () => {
     if (!api || !client) {
@@ -280,107 +305,6 @@ export function CandorWorkspace() {
       if (audioUrl) URL.revokeObjectURL(audioUrl);
     };
   }, [audioUrl]);
-
-  async function startRecording() {
-    if (!api) return;
-    captureSession.requestPermission();
-    if (!asBool(consentStatus.readyForMicRecording)) {
-      setError("Acknowledge local storage and microphone recording consent before recording.");
-      captureSession.failed("Microphone consent is required.");
-      setSettingsSection("recording");
-      setView("settings");
-      return;
-    }
-    captureSession.permissionGranted();
-    await run("record", async () => {
-      const result = await api.captureStartMic({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
-      const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
-      captureSession.started(recordingId);
-      setNotice(`Recording ${recordingId}`);
-      setView("meeting");
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
-    }, "capture");
-  }
-
-  async function startSystemRecording() {
-    if (!api) return;
-    captureSession.requestPermission();
-    if (!asBool(asObject(asObject(captureStatus.sources).system).implemented)) {
-      setError("System audio capture is not implemented on this OS yet.");
-      captureSession.failed("System audio is unavailable on this OS.");
-      return;
-    }
-    if (!asBool(consentStatus.readyForSystemAudioRecording)) {
-      setError("Acknowledge local storage and system audio consent before recording system audio.");
-      captureSession.failed("System audio consent is required.");
-      setSettingsSection("recording");
-      setView("settings");
-      return;
-    }
-    captureSession.permissionGranted();
-    await run("record", async () => {
-      const result = await api.captureStartSystem({ label: recordingTitle.trim() || "Untitled local system audio", chunkMs: 500 });
-      const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
-      captureSession.started(recordingId);
-      setNotice("System audio recording started locally");
-      setView("meeting");
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
-    }, "capture");
-  }
-
-  async function startMicAndSystemRecording() {
-    if (!api) return;
-    captureSession.requestPermission();
-    if (!combinedCaptureAvailable) {
-      setError("Combined mic and system capture is not implemented on this OS yet.");
-      captureSession.failed("Combined capture is unavailable on this OS.");
-      return;
-    }
-    if (!asBool(consentStatus.readyForMicAndSystemAudioRecording)) {
-      setError("Acknowledge local storage, microphone, and system audio consent before combined recording.");
-      captureSession.failed("Microphone and system audio consent are required.");
-      setSettingsSection("recording");
-      setView("settings");
-      return;
-    }
-    captureSession.permissionGranted();
-    await run("record", async () => {
-      const result = await api.captureStartMicAndSystem({ label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
-      const recordingId = asString(asObject(asObject(result).capture).recordingId, "started");
-      captureSession.started(recordingId);
-      setNotice("Microphone and system audio recording started locally");
-      setView("meeting");
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
-    }, "capture");
-  }
-
-  async function startPreferredRecording() {
-    if (activeCapture) {
-      await stopRecording();
-    } else if (combinedCaptureAvailable && asBool(consentStatus.readyForMicAndSystemAudioRecording)) {
-      await startMicAndSystemRecording();
-    } else {
-      await startRecording();
-    }
-  }
-
-  async function stopRecording() {
-    if (!api) return;
-    captureSession.stopRequested();
-    await run("stop", async () => {
-      captureSession.finalizing();
-      const result = await api.captureStop();
-      const recordingId = asString(asObject(asObject(result).capture).recordingId);
-      setNotice("Recording saved locally");
-      await Promise.all([refreshCapture(), refreshLibrary(0)]);
-      if (recordingId) {
-        captureSession.saved(recordingId);
-        setSelectedRecordingId(recordingId);
-        setOpenMeetingIds((current) => [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3));
-        await loadSelectedRecording(recordingId);
-      }
-    }, "capture");
-  }
 
   async function importModel() {
     if (!api) return;

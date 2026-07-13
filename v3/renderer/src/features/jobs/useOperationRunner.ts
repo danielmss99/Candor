@@ -7,6 +7,13 @@ export function operationErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export type RunOperation = (
+  label: string,
+  task: () => Promise<void>,
+  exclusiveScope?: string,
+  jobKind?: JobKind,
+) => Promise<void>;
+
 export function useOperationRunner(onCaptureFailure: (message: string) => void) {
   const exclusiveActions = useRef(new ExclusiveActionRegistry());
   const captureFailure = useRef(onCaptureFailure);
@@ -27,7 +34,7 @@ export function useOperationRunner(onCaptureFailure: (message: string) => void) 
 
   const acquire = useCallback((scope: string) => exclusiveActions.current.acquire(scope), []);
 
-  const run = useCallback(async (
+  const run: RunOperation = useCallback(async (
     label: string,
     task: () => Promise<void>,
     exclusiveScope = label,
@@ -69,4 +76,3 @@ export function useOperationRunner(onCaptureFailure: (message: string) => void) 
     setError,
   };
 }
-
