@@ -13,6 +13,7 @@ import {
   type RecordingSummary,
 } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
+import type { NotesSaveDisposition, NotesSnapshot, NotesUpdate } from "../notes/notes-draft";
 
 type CoreApi = NonNullable<Window["candor"]>["core"];
 
@@ -22,19 +23,18 @@ interface UseMeetingActionsOptions {
   recordings: RecordingSummary[];
   selectedRecordingId: string;
   selectedTrack: string;
-  notesMarkdown: string;
   searchQuery: string;
   transcriptHasMore: boolean;
   setSelectedRecordingId: (recordingId: string) => void;
-  setNotesMarkdown: (update: string | ((current: string) => string)) => void;
-  setNotesStatus: (status: JsonObject) => void;
-  setNotesDirty: (dirty: boolean) => void;
+  setNotesMarkdown: (update: NotesUpdate) => void;
   setMarkedMoments: (update: MarkedMoment[] | ((current: MarkedMoment[]) => MarkedMoment[])) => void;
   refreshLibrary: (offset?: number) => Promise<RecordingSummary[]>;
   refreshPrivacyReceipt: (recordingId?: string) => Promise<void>;
   loadRecording: (recordingId: string) => Promise<void>;
   loadMoreTranscriptPage: () => Promise<void>;
   searchLibrary: () => Promise<void>;
+  captureNotesSnapshot: () => NotesSnapshot;
+  commitNotesSave: (snapshot: NotesSnapshot, status: JsonObject) => NotesSaveDisposition;
   resetMeetingAi: () => void;
   setView: (view: AppView, recordingId?: string) => void;
   setNotice: (message: string) => void;
@@ -52,19 +52,18 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
     recordings,
     selectedRecordingId,
     selectedTrack,
-    notesMarkdown,
     searchQuery,
     transcriptHasMore,
     setSelectedRecordingId,
     setNotesMarkdown,
-    setNotesStatus,
-    setNotesDirty,
     setMarkedMoments,
     refreshLibrary,
     refreshPrivacyReceipt,
     loadRecording,
     loadMoreTranscriptPage,
     searchLibrary,
+    captureNotesSnapshot,
+    commitNotesSave,
     resetMeetingAi,
     setView,
     setNotice,
@@ -124,13 +123,18 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
 
   const saveMeetingNotes = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
+    const snapshot = captureNotesSnapshot();
     await run("notes", async () => {
-      setNotesStatus(asObject(await api.recordingNotesSave(selectedRecordingId, notesMarkdown)));
-      setNotesDirty(false);
-      setNotice("Meeting notes saved locally");
+      const status = asObject(await api.recordingNotesSave(selectedRecordingId, snapshot.markdown));
+      const disposition = commitNotesSave(snapshot, status);
+      setNotice(disposition === "current"
+        ? "Meeting notes saved locally"
+        : disposition === "newer-edits"
+          ? "Earlier edits saved; newer note changes remain unsaved"
+          : "Notes saved for the original meeting; current meeting notes were unchanged");
       await Promise.all([refreshLibrary(0), refreshPrivacyReceipt()]);
     }, "document-write", "notes-save");
-  }, [api, notesMarkdown, refreshLibrary, refreshPrivacyReceipt, run, selectedRecordingId, setNotesDirty, setNotesStatus, setNotice]);
+  }, [api, captureNotesSnapshot, commitNotesSave, refreshLibrary, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
 
   const markMoment = useCallback((timeMs: number) => {
     if (!selectedRecordingId) {
@@ -148,10 +152,9 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
       const line = `- [${formatDuration(roundedMs)}] Moment marked`;
       return prefix ? `${prefix}\n${line}` : line;
     });
-    setNotesDirty(true);
     setError("");
     setNotice(`Moment linked to notes at ${formatDuration(roundedMs)}`);
-  }, [selectedRecordingId, setError, setMarkedMoments, setNotesDirty, setNotesMarkdown, setNotice]);
+  }, [selectedRecordingId, setError, setMarkedMoments, setNotesMarkdown, setNotice]);
 
   const loadAudio = useCallback(async () => {
     if (!api || !selectedRecordingId) return;

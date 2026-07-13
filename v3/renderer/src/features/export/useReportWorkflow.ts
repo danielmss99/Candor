@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useState } from "react";
 import {
   asBool,
   asObject,
@@ -13,6 +13,7 @@ import {
   type RecapItem,
 } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
+import type { NotesSaveDisposition, NotesSnapshot } from "../notes/notes-draft";
 
 type CoreApi = NonNullable<Window["candor"]>["core"];
 
@@ -28,16 +29,25 @@ export interface ExportSections {
 }
 
 export type ReviewState = "accepted" | "rejected";
+export type ReviewStates = Record<string, ReviewState>;
+export type ReviewStatesAction =
+  | { type: "review"; key: string; state: ReviewState }
+  | { type: "recording-changed" };
+
+export function reviewStatesReducer(state: ReviewStates, action: ReviewStatesAction): ReviewStates {
+  if (action.type === "recording-changed") return {};
+  return { ...state, [action.key]: action.state };
+}
 
 interface UseReportWorkflowOptions {
   api: CoreApi | undefined;
   selectedRecordingId: string;
-  notesMarkdown: string;
   notesDirty: boolean;
   recap: LocalAiRecap | null;
   run: RunOperation;
-  setNotesStatus: (status: JsonObject) => void;
-  setNotesDirty: (dirty: boolean) => void;
+  captureNotesSnapshot: () => NotesSnapshot;
+  notesSnapshotDisposition: (snapshot: NotesSnapshot) => NotesSaveDisposition;
+  commitNotesSave: (snapshot: NotesSnapshot, status: JsonObject) => NotesSaveDisposition;
   setNotice: (message: string) => void;
   refreshPrivacyReceipt: () => Promise<void>;
 }
@@ -50,16 +60,16 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
   const {
     api,
     selectedRecordingId,
-    notesMarkdown,
     notesDirty,
     recap,
     run,
-    setNotesStatus,
-    setNotesDirty,
+    captureNotesSnapshot,
+    notesSnapshotDisposition,
+    commitNotesSave,
     setNotice,
     refreshPrivacyReceipt,
   } = options;
-  const [reviewStates, setReviewStates] = useState<Record<string, ReviewState>>({});
+  const [reviewStates, dispatchReview] = useReducer(reviewStatesReducer, {});
   const [summaryDraft, setSummaryDraft] = useState("");
   const [format, setFormat] = useState<ExportFormat>("docx");
   const [paperSize, setPaperSize] = useState<ExportPaperSize>("letter");
@@ -76,6 +86,7 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
   const [markdownExport, setMarkdownExport] = useState("");
 
   useEffect(() => setSummaryDraft(recap?.summary ?? ""), [recap]);
+  useEffect(() => dispatchReview({ type: "recording-changed" }), [selectedRecordingId]);
 
   const reviewedItems = useCallback((items: RecapItem[]) => reviewedReportItems(items, reviewStates), [reviewStates]);
 
@@ -111,10 +122,13 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
 
   const saveLocalReport = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
+    const notesSnapshot = captureNotesSnapshot();
     await run("export", async () => {
       if (notesDirty) {
-        setNotesStatus(asObject(await api.recordingNotesSave(selectedRecordingId, notesMarkdown)));
-        setNotesDirty(false);
+        commitNotesSave(
+          notesSnapshot,
+          asObject(await api.recordingNotesSave(selectedRecordingId, notesSnapshot.markdown)),
+        );
       }
       const result = asObject(await api.exportSaveLocal(buildParams(format)));
       if (asBool(result.canceled)) {
@@ -125,17 +139,23 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
         throw new Error("The local report was not saved.");
       }
       setMarkdownExport(format === "markdown" ? asString(result.markdown) : "");
-      setNotice(`Saved ${asString(result.fileName, exportFormatLabel(format))} locally`);
+      const fileName = asString(result.fileName, exportFormatLabel(format));
+      const notesDisposition = notesSnapshotDisposition(notesSnapshot);
+      setNotice(notesDisposition === "current"
+        ? `Saved ${fileName} locally`
+        : notesDisposition === "newer-edits"
+          ? `Saved ${fileName} locally; newer note changes remain unsaved`
+          : `Saved ${fileName} locally for the original meeting`);
       await refreshPrivacyReceipt();
     }, "document-write", "export");
-  }, [api, buildParams, format, notesDirty, notesMarkdown, refreshPrivacyReceipt, run, selectedRecordingId, setNotesDirty, setNotesStatus, setNotice]);
+  }, [api, buildParams, captureNotesSnapshot, commitNotesSave, format, notesDirty, notesSnapshotDisposition, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
 
   const toggleSection = useCallback((key: keyof ExportSections) => {
     setSections((current) => ({ ...current, [key]: !current[key] }));
   }, []);
 
   const reviewItem = useCallback((key: string, state: ReviewState) => {
-    setReviewStates((current) => ({ ...current, [key]: state }));
+    dispatchReview({ type: "review", key, state });
   }, []);
 
   return {

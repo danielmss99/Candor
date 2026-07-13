@@ -79,10 +79,10 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
     }
     if (asString(licenseStatus.state, "inactive") === "inactive") {
       setStep(inactiveLicenseStep(recordingCount, licensePromptDismissed));
-    } else if (step === "activate") {
-      setStep("app");
+    } else {
+      setStep((current) => current === "activate" ? "app" : current);
     }
-  }, [licenseAvailable, licenseLoaded, licensePromptDismissed, licenseStatus, recordingCount, step]);
+  }, [licenseAvailable, licenseLoaded, licensePromptDismissed, licenseStatus, recordingCount]);
 
   const activate = useCallback(async () => {
     await run("license", async () => {
@@ -214,4 +214,3 @@ export function useOnboardingSettings(options: UseOnboardingSettingsOptions) {
     importModel,
   };
 }
-

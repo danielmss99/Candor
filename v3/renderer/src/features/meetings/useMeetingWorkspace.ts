@@ -15,6 +15,12 @@ import {
   type TranscriptSegment,
 } from "../../core/contracts";
 import { RequestCoordinator } from "../../state/request-coordinator";
+import {
+  NotesDraftTracker,
+  type NotesSaveDisposition,
+  type NotesSnapshot,
+  type NotesUpdate,
+} from "../notes/notes-draft";
 
 type CoreApi = NonNullable<Window["candor"]>["core"];
 
@@ -39,6 +45,7 @@ export function chooseInitialSelection(currentId: string, recordings: RecordingS
 
 export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions) {
   const requests = useRef(new RequestCoordinator());
+  const notesDraft = useRef(new NotesDraftTracker());
   const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
   const [recordingTotalCount, setRecordingTotalCount] = useState(0);
   const [recordingsHaveMore, setRecordingsHaveMore] = useState(false);
@@ -48,7 +55,7 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
   const [transcriptHasMore, setTranscriptHasMore] = useState(false);
   const [privacyReceipt, setPrivacyReceipt] = useState<MeetingPrivacyReceipt | null>(null);
   const [replay, setReplay] = useState<JsonObject>({});
-  const [notesMarkdown, setNotesMarkdown] = useState("");
+  const [notesMarkdown, setNotesMarkdownState] = useState("");
   const [notesStatus, setNotesStatus] = useState<JsonObject>({});
   const [notesDirty, setNotesDirty] = useState(false);
   const [markedMoments, setMarkedMoments] = useState<MarkedMoment[]>([]);
@@ -65,7 +72,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     setTranscriptTotalCount(0);
     setTranscriptHasMore(false);
     setReplay({});
-    setNotesMarkdown("");
+    const clearedNotes = notesDraft.current.load("", "");
+    setNotesMarkdownState(clearedNotes.markdown);
     setNotesStatus({});
     setNotesDirty(false);
     setMarkedMoments([]);
@@ -91,7 +99,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     setTranscriptHasMore(nextTranscript.hasMore);
     setReplay(replayObject);
     const nextMarkdown = asString(notesObject.markdown);
-    setNotesMarkdown(nextMarkdown);
+    notesDraft.current.load(recordingId, nextMarkdown);
+    setNotesMarkdownState(nextMarkdown);
     setNotesStatus(notesObject);
     setNotesDirty(false);
     setMarkedMoments(parseMarkedMoments(nextMarkdown));
@@ -143,9 +152,21 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     setSearchMatches(asArray(asObject(result).matches));
   }, [api, searchQuery]);
 
-  const updateNotes = useCallback((markdown: string) => {
-    setNotesMarkdown(markdown);
+  const updateNotes = useCallback((update: NotesUpdate) => {
+    const draft = notesDraft.current.edit(update);
+    setNotesMarkdownState(draft.markdown);
     setNotesDirty(true);
+  }, []);
+
+  const captureNotesSnapshot = useCallback((): NotesSnapshot => notesDraft.current.snapshot(), []);
+  const notesSnapshotDisposition = useCallback((snapshot: NotesSnapshot): NotesSaveDisposition => notesDraft.current.disposition(snapshot), []);
+
+  const commitNotesSave = useCallback((snapshot: NotesSnapshot, status: JsonObject): NotesSaveDisposition => {
+    const disposition = notesDraft.current.disposition(snapshot);
+    if (disposition === "different-recording") return disposition;
+    setNotesStatus(status);
+    if (disposition === "current") setNotesDirty(false);
+    return disposition;
   }, []);
 
   useEffect(() => () => {
@@ -173,9 +194,7 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     searchQuery,
     searchMatches,
     setSelectedRecordingId,
-    setNotesMarkdown,
-    setNotesStatus,
-    setNotesDirty,
+    setNotesMarkdown: updateNotes,
     setMarkedMoments,
     setSelectedTrack,
     setRecordingTitle,
@@ -186,5 +205,8 @@ export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions)
     loadMoreTranscript,
     search,
     updateNotes,
+    captureNotesSnapshot,
+    notesSnapshotDisposition,
+    commitNotesSave,
   };
 }
