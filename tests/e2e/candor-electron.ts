@@ -48,6 +48,27 @@ function launchEnvironment(dataDir: string, scaleFactor: number): Record<string,
   };
 }
 
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function closeElectronApplication(app: ElectronApplication): Promise<void> {
+  const child = app.process();
+  if (process.platform === "darwin") {
+    await app.evaluate(({ app: electronApp }) => {
+      electronApp.quit();
+    }).catch(() => undefined);
+  }
+
+  let closed = false;
+  const closeAttempt = app.close()
+    .catch(() => undefined)
+    .then(() => { closed = true; });
+  await Promise.race([closeAttempt, delay(5_000)]);
+  if (!closed && child.exitCode === null) child.kill();
+  await Promise.race([closeAttempt, delay(2_000)]);
+}
+
 async function seedLocalMeeting(dataDir: string): Promise<string> {
   const previousDataDir = process.env.CANDOR_V3_DATA_DIR;
   process.env.CANDOR_V3_DATA_DIR = dataDir;
@@ -124,7 +145,7 @@ export async function launchCandor(options: LaunchCandorOptions = {}): Promise<C
     dataDir,
     recordingId,
     async close() {
-      await app.close().catch(() => undefined);
+      await closeElectronApplication(app);
       rmSync(dataDir, { recursive: true, force: true });
     },
   };

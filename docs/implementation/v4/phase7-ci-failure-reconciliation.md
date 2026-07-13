@@ -28,3 +28,24 @@ Local verification after the fix:
 
 The fix must pass a new Windows, macOS, and Linux matrix run before this CI
 failure is considered closed.
+
+## Second Matrix Run
+
+GitHub Actions run `29241810155` closed the original defect:
+
+- Windows M0: passed;
+- Linux M0: passed, including packaged runtime, Electron/axe, and network denial;
+- V3 dependency audit: passed;
+- macOS staged verification, package, artifact, checksum, and packaged smoke:
+  passed.
+
+macOS then timed out in all four Playwright tests. The downloaded traces show
+each test body reached its final assertion and hung only in `session.close()`.
+Candor intentionally stays active on macOS after the last window closes, so
+Playwright's generic close waited for process exit until the 90-second test
+timeout.
+
+The E2E harness now calls Electron `app.quit()` on macOS, bounds graceful close
+to five seconds, and terminates the test child process only if it still has not
+exited. This changes test teardown only; production macOS lifecycle behavior is
+unchanged. A third matrix run is required to close the macOS gate.
