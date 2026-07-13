@@ -98,7 +98,7 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
     const sessionRequestBlocked = await session.app.evaluate(async ({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
       try {
-        await window.webContents.session.fetch("https://example.invalid");
+        await window.webContents.session.fetch("https://example.com");
         return false;
       } catch {
         return true;

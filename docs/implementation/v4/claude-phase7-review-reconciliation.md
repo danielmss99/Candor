@@ -30,3 +30,13 @@ repository before changing code.
 The release package must be rebuilt after this source commit before artifact
 manifest and checksum receipts can pass again. This is intentional source and
 package provenance enforcement, not a release failure to bypass.
+
+## Focused Re-Review
+
+Claude confirmed that the two-way package binding and deterministic navigation
+proof correctly close H1 and H2. It identified one Medium ambiguity in the new
+session request test: `.invalid` would fail DNS even without Candor's guard. The
+probe now uses `https://example.com`, which the current Electron session policy
+cancels before outbound traffic. Removing that policy would allow a successful
+response and fail the assertion. Claude stated that no further re-review is
+required for this direct correction.
