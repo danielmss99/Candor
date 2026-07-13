@@ -1,6 +1,8 @@
 # Candor Release Checklist
 
-Use this before publishing any installer.
+Use this before publishing any installer. Execute the hardware, upgrade,
+network-denial, and signing gates with
+[`docs/testing/MANUAL_RELEASE_PROOF_RUNBOOK.md`](testing/MANUAL_RELEASE_PROOF_RUNBOOK.md).
 
 ## Source And Tests
 
@@ -18,6 +20,7 @@ Use this before publishing any installer.
 - [ ] `npm run m0:packaged-smoke` passes.
 - [ ] `npm run m0:artifact-manifest` records final hashes.
 - [ ] `npm run audit:release` finds no profile path, checkout path, or secret.
+- [ ] `npm run v3:release-checksums:verify` matches every release package.
 - [ ] The renderer has no Node.js globals and exposes the exact preload surface.
 - [ ] Navigation, popups, webviews, and unauthorized network attempts are blocked.
 

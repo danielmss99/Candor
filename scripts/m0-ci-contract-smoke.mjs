@@ -16,6 +16,7 @@ const electronBuilder = readFileSync(resolve(repoRoot, "electron-builder.v3.yml"
 const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "utf8");
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
+const releaseChecksums = readFileSync(resolve(repoRoot, "scripts", "v3-release-checksums.mjs"), "utf8");
 const packagedSmoke = readFileSync(resolve(repoRoot, "scripts", "m0-packaged-smoke.mjs"), "utf8");
 const releaseArtifactSmoke = readFileSync(resolve(repoRoot, "scripts", "v3-release-artifact-smoke.mjs"), "utf8");
 const transcriptionProofAudit = readFileSync(resolve(repoRoot, "scripts", "m2-transcription-proof-audit.mjs"), "utf8");
@@ -130,8 +131,11 @@ const requiredPatterns = [
   ["sudo chmod 4755 release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox setuid mode"],
   ["stat -c '%u:%g:%a' release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox ownership and mode assertion"],
   ["npm run v3:release-artifact-smoke", "release artifact contents smoke"],
+  ["npm run v3:release-checksums && npm run v3:release-checksums:verify", "release checksum generation and verification"],
   ["npm run m0:packaged-smoke", "packaged smoke"],
   ["xvfb-run -a npm run m0:packaged-smoke", "Linux packaged smoke display wrapper"],
+  ["npm run test:electron", "Electron integration and accessibility tests"],
+  ["xvfb-run -a npm run test:electron", "Linux Electron integration and accessibility display wrapper"],
   ["npm run m0:network-deny:windows -- -ValidateOnly", "Windows proof validation"],
   ["npm run m0:network-deny:windows", "Windows network-deny proof"],
   ["npm run m0:network-deny:macos -- --validate-only", "macOS proof validation"],
@@ -269,6 +273,10 @@ for (const [contents, pattern, label] of [
   [releaseReadinessAudit, "release signing proof must show a signed macOS app bundle", "release readiness macOS app signing validator"],
   [releaseArtifactSmoke, "releaseGaps", "M0 structural package proof keeps release signing gaps explicit"],
   [releaseArtifactSmoke, "strictFailures", "strict artifact smoke promotes release gaps to failures"],
+  [releaseChecksums, 'proofKind: "v3-release-checksums"', "release checksum proof kind"],
+  [releaseChecksums, "SHA256SUMS", "release checksum manifest"],
+  [releaseChecksums, "networkAttempted: false", "release checksum network denial evidence"],
+  [releaseChecksums, "rawPathExposed: false", "release checksum path redaction evidence"],
   [goalAudit, "proofKind: \"v3-goal-audit\"", "goal audit proof kind"],
   [goalAudit, "coordination.subagent_alignment", "goal audit subagent alignment requirement"],
   [goalAudit, "missionComplete", "goal audit mission completion field"],

@@ -165,6 +165,16 @@ function summarizePayload(payload) {
       failures: payload?.failures ?? [],
     };
   }
+  if (payload?.proofKind === "v3-release-checksums") {
+    return {
+      ok: payload?.ok === true,
+      mode: payload?.mode ?? null,
+      artifactCount: payload?.artifactCount ?? null,
+      gitHead: payload?.git?.head ?? null,
+      gitDirty: payload?.git?.dirty ?? null,
+      failures: payload?.failures ?? [],
+    };
+  }
   if (payload?.proofKind === "m1-real-capture-proof") {
     return {
       ok: payload?.ok === true,
@@ -450,6 +460,41 @@ function validateReleaseArtifactSmoke(payload) {
   return failures;
 }
 
+function validateReleaseChecksums(payload) {
+  const failures = [];
+  if (payload?.ok !== true) failures.push("release checksum proof did not pass");
+  if (payload?.proofKind !== "v3-release-checksums") {
+    failures.push("release checksum proofKind must be v3-release-checksums");
+  }
+  if (payload?.mode !== "verify") failures.push("release checksum proof must come from verification mode");
+  if (payload?.localOnly !== true) failures.push("release checksum proof localOnly must be true");
+  if (payload?.cloudAi !== false) failures.push("release checksum proof cloudAi must be false");
+  if (payload?.networkAttempted !== false) failures.push("release checksum proof must not attempt network");
+  if (payload?.rawPathExposed !== false) failures.push("release checksum proof must not expose raw paths");
+  if (payload?.keyMaterialExposed !== false) failures.push("release checksum proof must not expose key material");
+  if (typeof payload?.git?.head !== "string" || !/^[a-f0-9]{40}$/.test(payload.git.head)) {
+    failures.push("release checksum proof must identify a committed source revision");
+  }
+  if (payload?.git?.dirty !== false) failures.push("release checksum proof must come from a clean tracked source tree");
+
+  const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
+  if (!Number.isInteger(payload?.artifactCount) || payload.artifactCount < 1) {
+    failures.push("release checksum proof must include at least one package");
+  }
+  if (payload?.artifactCount !== artifacts.length) {
+    failures.push("release checksum artifact count does not match the artifact list");
+  }
+  for (const artifact of artifacts) {
+    if (typeof artifact?.name !== "string" || artifact.name.length === 0 || artifact.name !== artifact.name.replaceAll("\\", "/").split("/").at(-1)) {
+      failures.push("release checksum artifact names must be non-empty basenames");
+    }
+    if (typeof artifact?.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
+      failures.push(`release checksum is invalid for ${artifact?.name ?? "unknown artifact"}`);
+    }
+  }
+  return failures;
+}
+
 function validateIconProof(payload) {
   const failures = [];
   if (payload?.ok !== true) failures.push("application icon proof did not pass");
@@ -650,6 +695,7 @@ const gates = [
   fromProof(files, /^v3-source-security-proof-.+\.json$/, "V3 source security proof", validateSourceSecurity),
   fromProof(files, /^v3-updater-policy-proof-.+\.json$/, "V3 updater policy proof", validateUpdaterPolicy),
   fromProof(files, /^v3-release-artifact-smoke-.+\.json$/, "V3 release artifact smoke", validateReleaseArtifactSmoke),
+  fromProof(files, /^v3-release-checksums-.+\.json$/, "V3 release package checksums", validateReleaseChecksums),
   fromProof(files, /^v3-icon-proof-.+\.json$/, "V3 packaged application icon proof", validateIconProof),
   fromProof(files, /^v3-release-signing-proof-.+\.json$/, "V3 signed release and installer proof", validateReleaseSigning),
   fromProof(files, /^m1-real-capture-readiness-.+\.json$/, "M1 real capture readiness", validateRealCaptureReadiness),

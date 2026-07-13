@@ -112,6 +112,9 @@ jobs:
       - name: Smoke release artifact contents
         run: npm run v3:release-artifact-smoke
 
+      - name: Generate and verify release checksums
+        run: npm run v3:release-checksums && npm run v3:release-checksums:verify
+
       - name: Smoke packaged M0 app
         if: runner.os != 'Linux'
         run: npm run m0:packaged-smoke

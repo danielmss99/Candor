@@ -42,6 +42,8 @@
     "v3:updater-policy-proof": "node scripts/v3-updater-policy-proof.mjs",
     "v3:release-artifact-smoke": "node scripts/v3-release-artifact-smoke.mjs",
     "v3:release-artifact-smoke:strict": "node scripts/v3-release-artifact-smoke.mjs --strict",
+    "v3:release-checksums": "node scripts/v3-release-checksums.mjs",
+    "v3:release-checksums:verify": "node scripts/v3-release-checksums.mjs --verify",
     "v3:release-signing-proof": "node scripts/v3-release-signing-proof.mjs",
     "v3:release-signing-proof:strict": "node scripts/v3-release-signing-proof.mjs --strict",
     "v3:release-readiness-audit": "node scripts/v3-release-readiness-audit.mjs",
