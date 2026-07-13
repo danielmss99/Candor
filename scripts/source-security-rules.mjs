@@ -25,6 +25,7 @@ export const requiredSourcePaths = [
   "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
   "electron/window/create-main-window.ts",
+  "electron/window/capture-close-guard.ts",
   "electron/window/navigation-policy.ts",
   "electron/license-service.ts",
   "scripts/build-release-core.mjs",
@@ -175,6 +176,24 @@ export function evaluateSourceSecurity(input) {
     "electron/security/network-policy.ts",
     "return false;",
     "permission checks are denied unconditionally",
+  );
+  includes(
+    "electron-main:capture-close-prevented",
+    "electron/window/capture-close-guard.ts",
+    "event.preventDefault();",
+    "window close is blocked until the capture guard approves it",
+  );
+  includes(
+    "electron-main:capture-finalized-before-shutdown",
+    "electron/window/capture-close-guard.ts",
+    "await dependencies.finalizeCapture();",
+    "capture finalization completes before core shutdown",
+  );
+  includes(
+    "electron-main:active-capture-shutdown-denied",
+    "electron/core/core-client.ts",
+    'if (this.captureGuardPhase() !== "idle")',
+    "core shutdown is denied while capture is active or changing state",
   );
 
   const preload = "electron/preload.cts";

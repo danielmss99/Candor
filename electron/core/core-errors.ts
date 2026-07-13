@@ -5,6 +5,8 @@ export type CoreClientErrorCode =
   | "CORE_PROTOCOL_FAULT"
   | "CORE_PROTOCOL_MISMATCH"
   | "CORE_CAPTURE_ACTIVE"
+  | "CORE_CAPTURE_FINALIZE_FAILED"
+  | "CORE_CAPTURE_FINALIZE_TIMEOUT"
   | "CORE_PROCESS_EXITED";
 
 export class CoreClientError extends Error {

@@ -50,6 +50,13 @@ interface CoreClientOptions {
 }
 
 const MAX_CORE_STDERR_BYTES = 64 * 1024;
+const CAPTURE_START_METHODS = new Set([
+  "capture.startMic",
+  "capture.startSystem",
+  "capture.startMicAndSystem",
+]);
+
+export type CaptureGuardPhase = "idle" | "starting" | "recording" | "finalizing";
 
 function defaultSpawnCore(executable: string): ChildProcessWithoutNullStreams {
   return spawn(executable, [], {
@@ -124,6 +131,12 @@ export class CoreClient {
       lastHandshake: snapshot.lastHandshake ?? null,
       captureActive: snapshot.captureActive === true,
     };
+  }
+
+  captureGuardPhase(): CaptureGuardPhase {
+    if (this.registry.hasMethod("capture.stop")) return "finalizing";
+    if (this.registry.hasAnyMethod(CAPTURE_START_METHODS)) return "starting";
+    return this.captureActive ? "recording" : "idle";
   }
 
   call(method: string, params: JsonValue = null, timeoutMs = 5000): Promise<CoreResponse> {
@@ -207,6 +220,13 @@ export class CoreClient {
   }
 
   async shutdown(): Promise<void> {
+    if (this.captureGuardPhase() !== "idle") {
+      throw new CoreClientError(
+        "CORE_CAPTURE_ACTIVE",
+        "candor-core shutdown is denied while capture is active or changing state",
+        false,
+      );
+    }
     const child = this.child;
     if (!child || child.killed) return;
     this.supervisor.state = "stopping";
@@ -214,6 +234,31 @@ export class CoreClient {
     await this.waitForExit(child, 5000).catch(() => {
       child.kill("SIGKILL");
     });
+  }
+
+  async finalizeCaptureForClose(timeoutMs = 20_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const phase = this.captureGuardPhase();
+      if (phase === "idle") return;
+      if (phase === "recording") {
+        const response = await this.call("capture.stop", null, Math.min(15_000, timeoutMs));
+        if (!response.ok) {
+          throw new CoreClientError(
+            "CORE_CAPTURE_FINALIZE_FAILED",
+            "candor-core could not durably finalize the active capture",
+            Boolean(response.error?.retryable),
+          );
+        }
+        continue;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new CoreClientError(
+      "CORE_CAPTURE_FINALIZE_TIMEOUT",
+      "candor-core did not durably finalize capture before the close deadline",
+      true,
+    );
   }
 
   private start(): void {

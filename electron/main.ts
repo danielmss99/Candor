@@ -1,4 +1,4 @@
-import { app, BrowserWindow } from "electron";
+import { app, BrowserWindow, dialog } from "electron";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { CoreClient } from "./core/core-client.js";
@@ -9,6 +9,7 @@ import { LicenseService } from "./license-service.js";
 import { applyChromiumNetworkPolicy, installSessionHardening, NetworkGuard } from "./security/network-policy.js";
 import { runM0Smoke } from "./smoke/m0-smoke.js";
 import { createMainWindow } from "./window/create-main-window.js";
+import { installCaptureCloseGuard } from "./window/capture-close-guard.js";
 import { createRendererNavigationPolicy } from "./window/navigation-policy.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -71,6 +72,40 @@ function createWindow(smoke = false): BrowserWindow {
     smokeWidth: smokeWindowWidth,
     smokeHeight: smokeWindowHeight,
   });
+  if (!smoke) {
+    installCaptureCloseGuard(mainWindow, {
+      phase: () => coreClient.captureGuardPhase(),
+      confirmStopAndQuit: async (window, phase) => {
+        const detail = phase === "recording"
+          ? "Candor is recording. Stop and save the recording before quitting?"
+          : "Candor is changing recording state. Wait for a durable save before quitting?";
+        const result = await dialog.showMessageBox(window, {
+          type: "warning",
+          title: "Recording in progress",
+          message: "Keep Candor open until the recording is safe.",
+          detail,
+          buttons: ["Keep recording", "Stop, save, and quit"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        return result.response === 1;
+      },
+      finalizeCapture: () => coreClient.finalizeCaptureForClose(),
+      shutdownCore: () => coreClient.shutdown(),
+      reportFailure: async (window, message) => {
+        await dialog.showMessageBox(window, {
+          type: "error",
+          title: "Recording not yet safe to close",
+          message,
+          buttons: ["Keep Candor open"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+      },
+    });
+  }
   return mainWindow;
 }
 
@@ -121,6 +156,6 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-app.on("before-quit", () => {
-  void coreClient.shutdown();
+app.on("will-quit", () => {
+  void coreClient.shutdown().catch(() => undefined);
 });

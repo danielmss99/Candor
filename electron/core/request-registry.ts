@@ -62,4 +62,12 @@ export class RequestRegistry<T> {
   get size(): number {
     return this.pending.size;
   }
+
+  hasMethod(method: string): boolean {
+    return [...this.pending.values()].some((entry) => entry.method === method);
+  }
+
+  hasAnyMethod(methods: ReadonlySet<string>): boolean {
+    return [...this.pending.values()].some((entry) => methods.has(entry.method));
+  }
 }

@@ -3,7 +3,14 @@ import { describe, expect, it } from "vitest";
 import { CoreClient } from "./core-client.js";
 import { CORE_PROTOCOL_VERSION } from "./protocol.js";
 
-const allowedMethods = new Set(["core.version", "core.status", "core.shutdown", "capture.status"]);
+const allowedMethods = new Set([
+  "core.version",
+  "core.status",
+  "core.shutdown",
+  "capture.status",
+  "capture.startMic",
+  "capture.stop",
+]);
 
 function spawnNode(script: string): ChildProcessWithoutNullStreams {
   return spawn(process.execPath, ["-e", script], {
@@ -16,6 +23,7 @@ function responsiveCore(active = false): string {
   return `
     const readline = require("node:readline");
     const protocolVersion = ${JSON.stringify(CORE_PROTOCOL_VERSION)};
+    let captureActive = ${String(active)};
     const input = readline.createInterface({ input: process.stdin });
     input.on("line", (line) => {
       const request = JSON.parse(line);
@@ -27,7 +35,15 @@ function responsiveCore(active = false): string {
         capabilities: ["stdio-json-lines"],
         build: { target: "test-target", features: [] }
       };
-      if (request.method === "capture.status") result = { active: ${String(active)}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { active: captureActive, rawPathExposed: false };
+      if (request.method === "capture.startMic") {
+        captureActive = true;
+        result = { active: true, recordingId: "recording-1", rawPathExposed: false };
+      }
+      if (request.method === "capture.stop") {
+        captureActive = false;
+        result = { active: false, recordingId: "recording-1", state: "finished", rawPathExposed: false };
+      }
       process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       if (request.method === "core.shutdown") setTimeout(() => process.exit(0), 5);
     });
@@ -90,17 +106,19 @@ describe("core client process boundary", () => {
   });
 
   it("does not restart a core while capture is active", async () => {
+    const child = spawnNode(responsiveCore(true));
     const client = new CoreClient({
       executablePath: () => process.execPath,
       allowedMethods,
       isDev: false,
-      spawnCore: () => spawnNode(responsiveCore(true)),
+      spawnCore: () => child,
     });
 
     await client.ensureHandshake();
     await expect(client.exerciseRestartForSmoke()).rejects.toThrow("restart is denied while capture is active");
     expect(client.snapshot()).toMatchObject({ state: "running", captureActive: true, restartCount: 0 });
-    await client.shutdown();
+    await expect(client.shutdown()).rejects.toMatchObject({ code: "CORE_CAPTURE_ACTIVE" });
+    child.kill();
   });
 
   it("bounds a hung request and transitions to a failed supervisor state", async () => {
@@ -162,5 +180,22 @@ describe("core client process boundary", () => {
     await expect(client.call("core.status")).rejects.toMatchObject({ code: "CORE_UNAVAILABLE" });
     expect(client.snapshot()).toMatchObject({ state: "failed", restartCount: 0 });
     expect(JSON.stringify(client.rendererSnapshot())).not.toContain("private");
+  });
+
+  it("finalizes an active capture before allowing shutdown", async () => {
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => spawnNode(responsiveCore(true)),
+    });
+
+    await client.ensureHandshake();
+    await client.call("capture.status");
+    expect(client.captureGuardPhase()).toBe("recording");
+    await client.finalizeCaptureForClose();
+    expect(client.captureGuardPhase()).toBe("idle");
+    await client.shutdown();
+    expect(client.snapshot()).toMatchObject({ state: "stopped", captureActive: false });
   });
 });
