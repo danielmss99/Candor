@@ -51,6 +51,35 @@ from an unpackaged built renderer, uses the matching debug or release Rust core,
 and rejects non-loopback renderer URLs. No `@tauri-apps` package remains in
 `package.json` or `package-lock.json`.
 
+## Phase 1b: Electron/Rust Source And Artifact Audits
+
+Date: 2026-07-12
+
+| Command | Result |
+|---|---|
+| `npm run audit:source:portable` | passed; 72 Electron/Rust checks and 5 mutation tests |
+| `npm run audit:source` | passed through the PowerShell compatibility entry point |
+| `npm run v3:source-security-proof` | passed; required-source, environment, Electron/Rust rule, and mutation evidence recorded |
+| `npm run electron:v3:pack` | passed; staged path-remapped release core packaged into the unpacked Electron app |
+| `scripts/audit-release-artifacts.ps1` | passed for 11 Electron package artifacts |
+| `npm run m0:packaged-smoke` | passed; packaged Electron app and staged Rust sidecar completed the runtime proof |
+| `npm run m0:artifact-manifest` | passed; package and sidecar hashes recorded |
+| `npm run v3:verify` | passed; full staged V3 proof chain after audit replacement |
+
+The source proof no longer reads Tauri files or treats a missing source as an
+empty passing input. Its in-memory mutations prove failure for a missing main
+process, disabled sandbox, generic preload filesystem operation, hardcoded
+secret, and weakened v2-import originals guarantee. The previously mismatched
+`recording.durable.status` operation is now present in the main allowlist,
+preload operation set, and renderer declaration.
+
+The first Electron-wide artifact scan found checkout and user-profile strings in
+the Rust release sidecar. Production core builds now use a stable system build
+root, remap repository and home prefixes, stage only the finished binary under
+`build/core-bin`, and package that staged sidecar. A direct byte scan and the
+full artifact audit confirmed that the rebuilt core contains neither the local
+repository path nor `C:/Users/danny`.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;

@@ -229,8 +229,10 @@ function coreExecutableName(): string {
 
 function corePath(): string {
   if (isDev) {
-    const profile = useDevRenderer ? "debug" : "release";
-    return path.resolve(__dirname, "..", "..", "crates", "candor-core", "target", profile, coreExecutableName());
+    if (useDevRenderer) {
+      return path.resolve(__dirname, "..", "..", "crates", "candor-core", "target", "debug", coreExecutableName());
+    }
+    return path.resolve(__dirname, "..", "..", "build", "core-bin", coreExecutableName());
   }
   return path.join(process.resourcesPath, "bin", coreExecutableName());
 }

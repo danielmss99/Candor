@@ -40,6 +40,7 @@ const allowedMethods = new Set([
   "ai.schedulerStatus",
   "transcription.status",
   "transcription.runLocal",
+  "recording.durable.status",
   "recording.durable.listPage",
   "recording.durable.read",
   "recording.durable.replayManifest",
@@ -127,6 +128,7 @@ contextBridge.exposeInMainWorld("candor", {
       language?: string;
       initialPrompt?: string;
     }) => callCore("transcription.runLocal", params),
+    recordingDurableStatus: () => callCore("recording.durable.status"),
     recordingDurableListPage: (offset = 0, limit = 50) =>
       callCore("recording.durable.listPage", { offset, limit }),
     recordingDurableRead: (recordingId: string) =>

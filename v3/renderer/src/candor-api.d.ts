@@ -57,6 +57,7 @@ interface CandorApi {
       language?: string;
       initialPrompt?: string;
     }): Promise<JsonValue>;
+    recordingDurableStatus(): Promise<JsonValue>;
     recordingDurableListPage(offset?: number, limit?: number): Promise<JsonValue>;
     recordingDurableRead(recordingId: string): Promise<JsonValue>;
     recordingDurableReplayManifest(recordingId: string): Promise<JsonValue>;

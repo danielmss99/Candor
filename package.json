@@ -19,7 +19,7 @@
     "preview": "npm run build && npm run start",
     "test": "vitest run",
     "core:v3:build": "node scripts/cargo-with-local-perl.mjs build --manifest-path crates/candor-core/Cargo.toml",
-    "core:v3:release": "node scripts/cargo-with-local-perl.mjs build --manifest-path crates/candor-core/Cargo.toml --release --features sqlcipher-vault,local-whisper",
+    "core:v3:release": "node scripts/build-release-core.mjs",
     "electron:v3:build-main": "node scripts/m0-build-electron.mjs",
     "electron:v3:typecheck-renderer": "tsc -p v3/renderer/tsconfig.json",
     "electron:v3:build-renderer": "vite build -c vite.v3.config.ts",
@@ -36,6 +36,7 @@
     "v3:verify": "node scripts/v3-verify.mjs",
     "v3:dependency-audit": "npm audit --audit-level=high && cargo audit --file crates/candor-core/Cargo.lock",
     "v3:source-security-proof": "node scripts/v3-source-security-proof.mjs",
+    "v3:source-security-proof:self-test": "node scripts/audit-source-security.mjs --self-test",
     "v3:updater-policy-proof": "node scripts/v3-updater-policy-proof.mjs",
     "v3:release-artifact-smoke": "node scripts/v3-release-artifact-smoke.mjs",
     "v3:release-artifact-smoke:strict": "node scripts/v3-release-artifact-smoke.mjs --strict",
@@ -104,6 +105,7 @@
     "m5:v2-import-smoke": "node scripts/m5-v2-import-smoke.mjs",
     "m5:verify": "npm run core:v3:build && npm run m5:v2-import-smoke",
     "audit:source": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/audit-source-security.ps1",
+    "audit:source:portable": "node scripts/audit-source-security.mjs",
     "audit:release": "npm run audit:source && powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/audit-release-artifacts.ps1"
   },
   "dependencies": {

@@ -124,7 +124,7 @@ async function launch() {
     requireBuiltFile("dist-v3/renderer/index.html", "Run npm run build first.");
     const coreName = process.platform === "win32" ? "candor-core.exe" : "candor-core";
     requireBuiltFile(
-      `crates/candor-core/target/release/${coreName}`,
+      `build/core-bin/${coreName}`,
       "Run npm run build first.",
     );
   }

@@ -8,7 +8,7 @@ files:
   - dist-v3/renderer/**/*
   - package.json
 extraResources:
-  - from: crates/candor-core/target/release
+  - from: build/core-bin
     to: bin
     filter:
       - candor-core
