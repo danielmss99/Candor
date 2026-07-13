@@ -26,6 +26,7 @@ import {
   useMeetingWorkspace,
 } from "../features/meetings/useMeetingWorkspace";
 import { shouldShowActivationPrompt } from "../features/licensing/access-policy";
+import { useLicenseState } from "../features/licensing/useLicenseState";
 import { useAppNavigation } from "./navigation";
 import {
   DEFAULT_MODEL,
@@ -48,7 +49,6 @@ import {
   type ExportFormat,
   type ExportPaperSize,
   type InstructAssetKind,
-  type JsonObject,
   type LibraryFilter,
   type LocalAiAnswer,
   type LocalAiRecap,
@@ -67,13 +67,6 @@ export function CandorWorkspace() {
   const startupLoaded = useRef(false);
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>("activate");
-  const [licenseStatus, setLicenseStatus] = useState<JsonObject>({});
-  const [licensePortalInfo, setLicensePortalInfo] = useState<JsonObject>({});
-  const [licenseLoaded, setLicenseLoaded] = useState(false);
-  const [licenseKey, setLicenseKey] = useState("");
-  const [licenseEmail, setLicenseEmail] = useState("");
-  const [licenseKeyTouched, setLicenseKeyTouched] = useState(false);
-  const [licensePromptDismissed, setLicensePromptDismissed] = useState(false);
   const [startupPhase, setStartupPhase] = useState<StartupPhase>("loading");
   const [startupError, setStartupError] = useState("");
   const [notesPanelMode, setNotesPanelMode] = useState<"notes" | "suggestions">("notes");
@@ -109,6 +102,24 @@ export function CandorWorkspace() {
   const [busy, setBusy] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const handleLicenseLoadError = useCallback((message: string) => setError(message), []);
+  const license = useLicenseState(licenseApi, handleLicenseLoadError);
+  const {
+    status: licenseStatus,
+    portalInfo: licensePortalInfo,
+    loaded: licenseLoaded,
+    licenseKey,
+    licenseEmail,
+    licenseKeyTouched,
+    promptDismissed: licensePromptDismissed,
+    active: licenseActive,
+    state: licenseState,
+    setLicenseKey,
+    setLicenseEmail,
+    setLicenseKeyTouched,
+    setPromptDismissed: setLicensePromptDismissed,
+    refresh: refreshLicense,
+  } = license;
 
   const resetMeetingAi = useCallback(() => {
     setRecap(null);
@@ -200,8 +211,6 @@ export function CandorWorkspace() {
   const selectedRecording = recordings.find((item) => item.recordingId === selectedRecordingId);
   const selectedTitle = selectedRecording?.label || recordingTitle || "Untitled local meeting";
   const combinedCaptureAvailable = asBool(asObject(asObject(captureStatus.sources).system).simultaneousMicAndSystem);
-  const licenseState = asString(licenseStatus.state, "inactive");
-  const licenseActive = licenseState === "activated" || licenseState === "trial";
   const licenseKeyInvalid = licenseKeyTouched && !licenseKey.trim();
 
   const run = useCallback(async (
@@ -233,20 +242,6 @@ export function CandorWorkspace() {
     }
   }, [captureSession, localJob]);
 
-  const refreshLicense = useCallback(async () => {
-    if (!licenseApi) {
-      setLicenseLoaded(true);
-      return;
-    }
-    const [nextLicenseStatus, nextPortalInfo] = await Promise.all([
-      licenseApi.status(),
-      licenseApi.portalInfo(),
-    ]);
-    setLicenseStatus(asObject(nextLicenseStatus));
-    setLicensePortalInfo(asObject(nextPortalInfo));
-    setLicenseLoaded(true);
-  }, [licenseApi]);
-
   const refresh = useCallback(async () => {
     if (!api || !client) {
       throw new Error("Candor preload API is unavailable");
@@ -274,13 +269,6 @@ export function CandorWorkspace() {
       setStartupPhase("failed");
     });
   }, [refresh]);
-
-  useEffect(() => {
-    void refreshLicense().catch((reason) => {
-      setLicenseLoaded(true);
-      setError(reason instanceof Error ? reason.message : String(reason));
-    });
-  }, [refreshLicense]);
 
   useEffect(() => {
     if (!licenseLoaded) return;
@@ -671,42 +659,24 @@ export function CandorWorkspace() {
   }
 
   async function activateLicense() {
-    if (!licenseApi) return;
-    setLicenseKeyTouched(true);
-    if (!licenseKey.trim()) {
-      setError("Enter a license key or start a local trial.");
-      return;
-    }
     await run("license", async () => {
-      const status = await licenseApi.activate({
-        licenseKey: licenseKey.trim(),
-        purchaserEmail: licenseEmail.trim() || undefined,
-      });
-      setLicenseStatus(asObject(status));
-      await refreshLicense();
+      await license.activate();
       setOnboardingStep("yours");
       setNotice("Candor activated locally");
     });
   }
 
   async function startTrial() {
-    if (!licenseApi) return;
     await run("license", async () => {
-      const status = await licenseApi.startTrial();
-      setLicenseStatus(asObject(status));
-      await refreshLicense();
+      await license.startTrial();
       setOnboardingStep("yours");
       setNotice("Local trial started");
     });
   }
 
   async function deactivateLicense() {
-    if (!licenseApi) return;
     await run("license", async () => {
-      const status = await licenseApi.deactivateDevice();
-      setLicenseStatus(asObject(status));
-      await refreshLicense();
-      setLicensePromptDismissed(true);
+      await license.deactivate();
       setOnboardingStep("app");
       setView(recordings.length ? "library" : "home");
       setNotice("Local activation removed from this device");
