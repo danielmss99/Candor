@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 
 const MANIFEST_FILE: &str = "manifest.json";
 const RECORDINGS_DIR: &str = "recordings";
+const QUARANTINE_RECEIPTS_DIR: &str = "recovery/quarantine";
+const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 2;
 const ENCRYPTED_CHUNK_MAGIC: &[u8] = b"CANDORCHUNK1\n";
 const ENCRYPTED_CHUNK_EXT: &str = ".cchunk";
 const PLAINTEXT_CHUNK_EXT: &str = ".raw";
@@ -226,6 +228,12 @@ struct RecordingManifest {
     privacy_events: Vec<PrivacyEvent>,
 }
 
+#[derive(Debug)]
+struct RecordingManifestCollection {
+    items: Vec<(RecordingManifest, PathBuf)>,
+    quarantined: Vec<Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PrivacyEvent {
@@ -338,7 +346,7 @@ impl RecordingStore {
 
         let now = now_ms();
         let manifest = RecordingManifest {
-            schema_version: 2,
+            schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
             recording_id: recording_id.clone(),
             label: params.label,
             state: RecordingState::Recording,
@@ -660,10 +668,14 @@ impl RecordingStore {
         fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
 
         let mut recovered = Vec::new();
+        let mut quarantined = Vec::new();
         for entry in
             fs::read_dir(&recordings_root).map_err(io_error("RECORDING_STORE_READ_FAILED"))?
         {
-            let entry = entry.map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
             if !entry.path().is_dir() {
                 continue;
             }
@@ -671,21 +683,24 @@ impl RecordingStore {
             if validate_id(&id).is_err() {
                 continue;
             }
-            let mut manifest = match read_manifest(&entry.path()) {
-                Ok(manifest) => manifest,
-                Err(_) => self.manifest_from_chunks(&id, &entry.path())?,
-            };
-            let scanned_chunks = self.scan_chunks(&id, &entry.path())?;
-            if scanned_chunks.len() > manifest.chunks.len() {
-                manifest.chunks = scanned_chunks;
-            }
-            if manifest.state == RecordingState::Recording {
-                manifest.state = RecordingState::NeedsRecovery;
-            }
-            manifest.updated_at_ms = now_ms();
-            write_manifest(&entry.path(), &manifest)?;
-            if manifest.state == RecordingState::NeedsRecovery {
-                recovered.push(recording_summary(&manifest, self.root_kind));
+            let recovery_result = (|| -> Result<Option<Value>, RecordingStoreError> {
+                let mut manifest = self.load_or_rebuild_manifest(&id, &entry.path())?;
+                let scanned_chunks = self.scan_chunks(&id, &entry.path())?;
+                if scanned_chunks.len() > manifest.chunks.len() {
+                    manifest.chunks = scanned_chunks;
+                }
+                if manifest.state == RecordingState::Recording {
+                    manifest.state = RecordingState::NeedsRecovery;
+                }
+                manifest.updated_at_ms = now_ms();
+                write_manifest(&entry.path(), &manifest)?;
+                Ok((manifest.state == RecordingState::NeedsRecovery)
+                    .then(|| recording_summary(&manifest, self.root_kind)))
+            })();
+            match recovery_result {
+                Ok(Some(summary)) => recovered.push(summary),
+                Ok(None) => {}
+                Err(error) => quarantined.push(self.quarantine_summary(&id, error.code)),
             }
         }
 
@@ -693,12 +708,19 @@ impl RecordingStore {
             "rootKind": self.root_kind,
             "rawPathExposed": false,
             "recoveredRecordings": recovered,
-            "recoveredCount": recovered.len()
+            "recoveredCount": recovered.len(),
+            "quarantinedRecordings": quarantined,
+            "quarantinedCount": quarantined.len()
         }))
     }
 
     pub fn list(&self) -> Result<Value, RecordingStoreError> {
-        let mut recordings = self.all_recording_summaries()?;
+        let collection = self.collect_recording_manifests()?;
+        let mut recordings = collection
+            .items
+            .into_iter()
+            .map(|(manifest, _dir)| recording_summary(&manifest, self.root_kind))
+            .collect::<Vec<_>>();
         recordings.sort_by_key(|value| {
             std::cmp::Reverse(
                 value
@@ -711,13 +733,20 @@ impl RecordingStore {
             "rootKind": self.root_kind,
             "rawPathExposed": false,
             "recordingCount": recordings.len(),
-            "recordings": recordings
+            "recordings": recordings,
+            "quarantinedCount": collection.quarantined.len(),
+            "quarantinedRecordings": collection.quarantined
         }))
     }
 
     pub fn list_page(&self, params: RecordingPageParams) -> Result<Value, RecordingStoreError> {
         let (offset, limit) = page_bounds(params.offset, params.limit)?;
-        let mut recordings = self.all_recording_summaries()?;
+        let collection = self.collect_recording_manifests()?;
+        let mut recordings = collection
+            .items
+            .into_iter()
+            .map(|(manifest, _dir)| recording_summary(&manifest, self.root_kind))
+            .collect::<Vec<_>>();
         recordings.sort_by_key(|value| {
             std::cmp::Reverse(
                 value
@@ -739,7 +768,9 @@ impl RecordingStore {
             "limit": limit,
             "totalCount": total_count,
             "hasMore": offset.saturating_add(page.len()) < total_count,
-            "recordings": page
+            "recordings": page,
+            "quarantinedCount": collection.quarantined.len(),
+            "quarantinedRecordings": collection.quarantined
         }))
     }
 
@@ -1093,9 +1124,19 @@ impl RecordingStore {
         }
         let query_lower = query.to_ascii_lowercase();
         let mut matches = Vec::new();
+        let collection = self.collect_recording_manifests()?;
+        let mut quarantined_count = collection.quarantined.len() as u64;
 
-        for (manifest, dir) in self.all_recording_manifests()? {
-            for chunk in self.read_manifest_chunks(&manifest, &dir)? {
+        for (manifest, dir) in collection.items {
+            let chunks = match self.read_manifest_chunks(&manifest, &dir) {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    let _ = self.quarantine_summary(&manifest.recording_id, error.code);
+                    quarantined_count = quarantined_count.saturating_add(1);
+                    continue;
+                }
+            };
+            for chunk in chunks {
                 let text = chunk
                     .get("textUtf8")
                     .and_then(Value::as_str)
@@ -1120,6 +1161,7 @@ impl RecordingStore {
             "rawPathExposed": false,
             "query": query,
             "matchCount": matches.len(),
+            "quarantinedCount": quarantined_count,
             "matches": matches
         }))
     }
@@ -1648,7 +1690,12 @@ impl RecordingStore {
                 continue;
             }
             let encrypted = file_name.ends_with(ENCRYPTED_CHUNK_EXT);
-            let index = chunk_index_from_name(&file_name).unwrap_or(chunks.len() as u32);
+            let index = chunk_index_from_name(&file_name).ok_or_else(|| {
+                RecordingStoreError::new(
+                    "RECORDING_CHUNK_NAME_INVALID",
+                    "recording chunk file name did not contain a valid index",
+                )
+            })?;
             let metadata = entry
                 .metadata()
                 .map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
@@ -1681,19 +1728,102 @@ impl RecordingStore {
             });
         }
         chunks.sort_by_key(|chunk| chunk.index);
+        for (expected_index, chunk) in chunks.iter().enumerate() {
+            if chunk.index != expected_index as u32 {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_CHUNK_SEQUENCE_INVALID",
+                    "recording chunk files must be contiguous from zero",
+                ));
+            }
+        }
         Ok(chunks)
     }
 
-    fn all_recording_manifests(
+    fn load_or_rebuild_manifest(
         &self,
-    ) -> Result<Vec<(RecordingManifest, PathBuf)>, RecordingStoreError> {
+        recording_id: &str,
+        dir: &Path,
+    ) -> Result<RecordingManifest, RecordingStoreError> {
+        match read_manifest(dir) {
+            Ok(manifest) => Ok(manifest),
+            Err(error) if error.code == "RECORDING_MANIFEST_SCHEMA_TOO_NEW" => Err(error),
+            Err(_) => self.manifest_from_chunks(recording_id, dir),
+        }
+    }
+
+    fn quarantine_summary(&self, recording_id: &str, reason_code: &'static str) -> Value {
+        let receipt_persisted = self
+            .write_quarantine_receipt(recording_id, reason_code)
+            .is_ok();
+        json!({
+            "recordingId": recording_id,
+            "reasonCode": reason_code,
+            "receiptPersisted": receipt_persisted,
+            "contentModified": false,
+            "rawPathExposed": false
+        })
+    }
+
+    fn write_quarantine_receipt(
+        &self,
+        recording_id: &str,
+        reason_code: &'static str,
+    ) -> Result<(), RecordingStoreError> {
+        validate_id(recording_id)?;
+        let receipt_root = self.root.join(QUARANTINE_RECEIPTS_DIR);
+        fs::create_dir_all(&receipt_root).map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+        let receipt_path = receipt_root.join(format!("{recording_id}.json"));
+        let temporary_path = receipt_root.join(format!("{recording_id}.json.tmp"));
+        if receipt_path.exists() {
+            let _ = fs::remove_file(&temporary_path);
+            return Ok(());
+        }
+        let receipt = json!({
+            "receiptVersion": 1,
+            "recordingId": recording_id,
+            "reasonCode": reason_code,
+            "detectedAtMs": now_ms(),
+            "contentModified": false,
+            "rawPathExposed": false
+        });
+        let bytes = serde_json::to_vec_pretty(&receipt).map_err(|err| {
+            RecordingStoreError::new("RECORDING_QUARANTINE_WRITE_FAILED", err.to_string())
+        })?;
+        {
+            let mut file = File::create(&temporary_path)
+                .map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+            file.write_all(&bytes)
+                .map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+            file.sync_all()
+                .map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+        }
+        match fs::rename(&temporary_path, &receipt_path) {
+            Ok(()) => Ok(()),
+            Err(_) if receipt_path.exists() => {
+                let _ = fs::remove_file(&temporary_path);
+                Ok(())
+            }
+            Err(error) => Err(RecordingStoreError::new(
+                "RECORDING_QUARANTINE_WRITE_FAILED",
+                error.to_string(),
+            )),
+        }
+    }
+
+    fn collect_recording_manifests(
+        &self,
+    ) -> Result<RecordingManifestCollection, RecordingStoreError> {
         let recordings_root = self.recordings_root();
         fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
-        let mut manifests = Vec::new();
+        let mut items = Vec::new();
+        let mut quarantined = Vec::new();
         for entry in
             fs::read_dir(&recordings_root).map_err(io_error("RECORDING_STORE_READ_FAILED"))?
         {
-            let entry = entry.map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
             if !entry.path().is_dir() {
                 continue;
             }
@@ -1701,13 +1831,19 @@ impl RecordingStore {
             if validate_id(&id).is_err() {
                 continue;
             }
-            let manifest = match read_manifest(&entry.path()) {
-                Ok(manifest) => manifest,
-                Err(_) => self.manifest_from_chunks(&id, &entry.path())?,
-            };
-            manifests.push((manifest, entry.path()));
+            match self.load_or_rebuild_manifest(&id, &entry.path()) {
+                Ok(manifest) => items.push((manifest, entry.path())),
+                Err(error) => quarantined.push(self.quarantine_summary(&id, error.code)),
+            }
         }
-        Ok(manifests)
+        Ok(RecordingManifestCollection { items, quarantined })
+    }
+
+    fn all_recording_manifests(
+        &self,
+    ) -> Result<Vec<(RecordingManifest, PathBuf)>, RecordingStoreError> {
+        self.collect_recording_manifests()
+            .map(|collection| collection.items)
     }
 
     fn all_recording_summaries(&self) -> Result<Vec<Value>, RecordingStoreError> {
@@ -1727,7 +1863,7 @@ impl RecordingStore {
         validate_id(recording_id)?;
         let dir = self.recording_dir(recording_id)?;
         let mut manifest = read_manifest(&dir)?;
-        manifest.schema_version = manifest.schema_version.max(2);
+        manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
         manifest.privacy_events.push(event);
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)
@@ -2305,13 +2441,13 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
             continue;
         }
         match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(bytes) => match parse_and_validate_manifest(&bytes, dir) {
                 Ok(manifest) => return Ok(manifest),
+                Err(error) if error.code == "RECORDING_MANIFEST_SCHEMA_TOO_NEW" => {
+                    return Err(error);
+                }
                 Err(err) => {
-                    last_error = Some(RecordingStoreError::new(
-                        "RECORDING_MANIFEST_PARSE_FAILED",
-                        format!("failed to parse recording manifest: {err}"),
-                    ));
+                    last_error = Some(RecordingStoreError::new(err.code, err.message));
                 }
             },
             Err(err) => {
@@ -2328,6 +2464,97 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
             "recording manifest and recovery copies are missing",
         )
     }))
+}
+
+fn parse_and_validate_manifest(
+    bytes: &[u8],
+    dir: &Path,
+) -> Result<RecordingManifest, RecordingStoreError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|err| {
+        RecordingStoreError::new(
+            "RECORDING_MANIFEST_PARSE_FAILED",
+            format!("failed to parse recording manifest: {err}"),
+        )
+    })?;
+    let schema_version = value
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            RecordingStoreError::new(
+                "RECORDING_MANIFEST_SCHEMA_INVALID",
+                "recording manifest schemaVersion must be an unsigned integer",
+            )
+        })?;
+    if schema_version > u64::from(CURRENT_MANIFEST_SCHEMA_VERSION) {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_SCHEMA_TOO_NEW",
+            format!(
+                "recording manifest schema {schema_version} is newer than supported schema {CURRENT_MANIFEST_SCHEMA_VERSION}"
+            ),
+        ));
+    }
+    if schema_version == 0 {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED",
+            "recording manifest schema 0 is unsupported",
+        ));
+    }
+
+    let manifest: RecordingManifest = serde_json::from_value(value).map_err(|err| {
+        RecordingStoreError::new(
+            "RECORDING_MANIFEST_PARSE_FAILED",
+            format!("failed to parse recording manifest: {err}"),
+        )
+    })?;
+    validate_manifest_structure(&manifest, dir)?;
+    Ok(manifest)
+}
+
+fn validate_manifest_structure(
+    manifest: &RecordingManifest,
+    dir: &Path,
+) -> Result<(), RecordingStoreError> {
+    let directory_id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            RecordingStoreError::new(
+                "RECORDING_MANIFEST_ID_MISMATCH",
+                "recording directory did not have a valid opaque identifier",
+            )
+        })?;
+    if manifest.recording_id != directory_id {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_ID_MISMATCH",
+            "recording manifest identifier did not match its directory",
+        ));
+    }
+
+    for (expected_index, chunk) in manifest.chunks.iter().enumerate() {
+        if chunk.index != expected_index as u32 {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_SEQUENCE_INVALID",
+                "recording manifest chunk indices must be contiguous from zero",
+            ));
+        }
+        let file_name = Path::new(&chunk.file_name);
+        if file_name.components().count() != 1
+            || file_name.file_name().and_then(|name| name.to_str())
+                != Some(chunk.file_name.as_str())
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_NAME_INVALID",
+                "recording manifest chunk name was not a local file name",
+            ));
+        }
+        if !dir.join(file_name).is_file() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_MISSING",
+                "recording manifest referenced a missing chunk",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), RecordingStoreError> {
@@ -2781,6 +3008,140 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_recording_is_quarantined_without_hiding_healthy_recordings() {
+        let store = temp_store();
+        let healthy = store
+            .start(StartRecordingParams {
+                label: Some("Healthy".to_string()),
+            })
+            .expect("start healthy recording");
+        let healthy_id = recording_id(&healthy);
+        store
+            .finish(RecordingIdParams {
+                recording_id: healthy_id.clone(),
+            })
+            .expect("finish healthy recording");
+
+        let corrupt_id = "corrupt-recording";
+        let corrupt_dir = store
+            .recording_dir(corrupt_id)
+            .expect("corrupt recording dir");
+        fs::create_dir_all(&corrupt_dir).expect("create corrupt recording");
+        fs::write(corrupt_dir.join(MANIFEST_FILE), b"not-json").expect("write corrupt manifest");
+        fs::write(corrupt_dir.join("chunk-000001.raw"), b"orphaned chunk")
+            .expect("write gapped chunk");
+        let manifest_before = fs::read(corrupt_dir.join(MANIFEST_FILE)).expect("read corrupt data");
+        let chunk_before =
+            fs::read(corrupt_dir.join("chunk-000001.raw")).expect("read corrupt chunk");
+
+        let listed = store.list().expect("list around corrupt recording");
+
+        assert_eq!(listed["recordingCount"], 1);
+        assert_eq!(listed["recordings"][0]["recordingId"], healthy_id);
+        assert_eq!(listed["quarantinedCount"], 1);
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["recordingId"],
+            corrupt_id
+        );
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["reasonCode"],
+            "RECORDING_CHUNK_SEQUENCE_INVALID"
+        );
+        assert_eq!(listed["quarantinedRecordings"][0]["contentModified"], false);
+        assert_eq!(
+            fs::read(corrupt_dir.join(MANIFEST_FILE)).expect("reread corrupt manifest"),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(corrupt_dir.join("chunk-000001.raw")).expect("reread corrupt chunk"),
+            chunk_before
+        );
+
+        let receipt_path = store
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{corrupt_id}.json"));
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(receipt_path).expect("read quarantine receipt"))
+                .expect("parse quarantine receipt");
+        let receipt_keys = receipt
+            .as_object()
+            .expect("receipt object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipt_keys,
+            vec![
+                "contentModified",
+                "detectedAtMs",
+                "rawPathExposed",
+                "reasonCode",
+                "receiptVersion",
+                "recordingId",
+            ]
+        );
+
+        let recovered = store.recover().expect("recover around corrupt recording");
+        assert_eq!(recovered["quarantinedCount"], 1);
+        assert_eq!(
+            recovered["quarantinedRecordings"][0]["rawPathExposed"],
+            false
+        );
+    }
+
+    #[test]
+    fn future_manifest_is_left_byte_for_byte_untouched_and_not_rebuilt_from_backup() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Future manifest".to_string()),
+            })
+            .expect("start future recording");
+        let recording_id = recording_id(&started);
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("future recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        fs::copy(&manifest_path, dir.join("manifest.json.bak"))
+            .expect("preserve current-schema backup");
+        let mut future: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read current manifest"))
+                .expect("parse current manifest");
+        future["schemaVersion"] = json!(99);
+        future["futureOnly"] = json!({ "mustSurvive": true });
+        let future_bytes = serde_json::to_vec_pretty(&future).expect("serialize future manifest");
+        fs::write(&manifest_path, &future_bytes).expect("write future manifest");
+
+        let read_error = store
+            .read(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("future manifest must fail closed");
+        assert_eq!(read_error.code, "RECORDING_MANIFEST_SCHEMA_TOO_NEW");
+
+        let listed = store.list().expect("list around future manifest");
+        assert_eq!(listed["recordingCount"], 0);
+        assert_eq!(listed["quarantinedCount"], 1);
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["reasonCode"],
+            "RECORDING_MANIFEST_SCHEMA_TOO_NEW"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread future manifest"),
+            future_bytes
+        );
+
+        let recovered = store.recover().expect("recover around future manifest");
+        assert_eq!(recovered["recoveredCount"], 0);
+        assert_eq!(recovered["quarantinedCount"], 1);
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread future manifest after recovery"),
+            future_bytes
+        );
+    }
+
+    #[test]
     fn unsafe_recording_ids_are_denied() {
         let store = temp_store();
         let error = store
@@ -2860,6 +3221,85 @@ mod tests {
             .as_str()
             .expect("markdown")
             .contains("Focus on the core platform refresh."));
+    }
+
+    #[test]
+    fn search_skips_unreadable_recording_content_and_returns_healthy_matches() {
+        let store = temp_store();
+        let healthy = store
+            .start(StartRecordingParams {
+                label: Some("Healthy search".to_string()),
+            })
+            .expect("start healthy search recording");
+        let healthy_id = recording_id(&healthy);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: healthy_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "platform decision".to_string(),
+            })
+            .expect("write healthy search chunk");
+        store
+            .finish(RecordingIdParams {
+                recording_id: healthy_id.clone(),
+            })
+            .expect("finish healthy search recording");
+
+        let unreadable_id = "unreadable-content";
+        let unreadable_dir = store
+            .recording_dir(unreadable_id)
+            .expect("unreadable recording dir");
+        fs::create_dir_all(&unreadable_dir).expect("create unreadable recording");
+        let chunk_name = "chunk-000000.raw";
+        fs::write(unreadable_dir.join(chunk_name), [0xff, 0xfe])
+            .expect("write invalid UTF-8 chunk");
+        let now = now_ms();
+        write_manifest(
+            &unreadable_dir,
+            &RecordingManifest {
+                schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+                recording_id: unreadable_id.to_string(),
+                label: Some("Unreadable".to_string()),
+                state: RecordingState::Finished,
+                created_at_ms: now,
+                updated_at_ms: now,
+                chunks: vec![DurableChunk {
+                    index: 0,
+                    kind: DurableChunkKind::TranscriptText,
+                    file_name: chunk_name.to_string(),
+                    channel: "mic".to_string(),
+                    bytes: 2,
+                    stored_bytes: 2,
+                    encrypted: false,
+                    cipher: None,
+                    speaker: None,
+                    confidence: None,
+                    sample_rate_hz: None,
+                    channel_count: None,
+                    bits_per_sample: None,
+                    start_ms: None,
+                    duration_ms: None,
+                    created_at_ms: now,
+                }],
+                privacy_events: Vec::new(),
+            },
+        )
+        .expect("write unreadable manifest");
+
+        let searched = store
+            .search(SearchRecordingsParams {
+                query: "platform".to_string(),
+            })
+            .expect("search around unreadable content");
+
+        assert_eq!(searched["matchCount"], 1);
+        assert_eq!(searched["matches"][0]["recordingId"], healthy_id);
+        assert_eq!(searched["quarantinedCount"], 1);
+        assert!(store
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{unreadable_id}.json"))
+            .is_file());
     }
 
     #[test]
