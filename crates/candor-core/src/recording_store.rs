@@ -2099,7 +2099,14 @@ impl RecordingStore {
     ) -> Result<RecordingManifest, RecordingStoreError> {
         match read_manifest(dir) {
             Ok(manifest) => Ok(manifest),
-            Err(error) if error.code == "RECORDING_MANIFEST_SCHEMA_TOO_NEW" => Err(error),
+            Err(error)
+                if matches!(
+                    error.code,
+                    "RECORDING_MANIFEST_SCHEMA_TOO_NEW" | "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED"
+                ) =>
+            {
+                Err(error)
+            }
             Err(_) => self.manifest_from_chunks(recording_id, dir),
         }
     }
@@ -2812,7 +2819,13 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
         match fs::read(&path) {
             Ok(bytes) => match parse_and_validate_manifest(&bytes, dir) {
                 Ok(manifest) => return Ok(manifest),
-                Err(error) if error.code == "RECORDING_MANIFEST_SCHEMA_TOO_NEW" => {
+                Err(error)
+                    if matches!(
+                        error.code,
+                        "RECORDING_MANIFEST_SCHEMA_TOO_NEW"
+                            | "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED"
+                    ) =>
+                {
                     return Err(error);
                 }
                 Err(err) => {
@@ -3532,6 +3545,59 @@ mod tests {
         assert_eq!(
             fs::read(&manifest_path).expect("reread future manifest after recovery"),
             future_bytes
+        );
+    }
+
+    #[test]
+    fn unsupported_schema_zero_manifest_is_untouched_and_not_rebuilt_from_backup() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Unsupported manifest".to_string()),
+            })
+            .expect("start unsupported recording");
+        let recording_id = recording_id(&started);
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("unsupported recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        fs::copy(&manifest_path, dir.join("manifest.json.bak")).expect("preserve supported backup");
+        let mut unsupported: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read current manifest"))
+                .expect("parse current manifest");
+        unsupported["schemaVersion"] = json!(0);
+        unsupported["unsupportedOnly"] = json!({ "mustSurvive": true });
+        let unsupported_bytes =
+            serde_json::to_vec_pretty(&unsupported).expect("serialize unsupported manifest");
+        fs::write(&manifest_path, &unsupported_bytes).expect("write unsupported manifest");
+
+        let read_error = store
+            .read(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("unsupported manifest must fail closed");
+        assert_eq!(read_error.code, "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED");
+
+        let listed = store.list().expect("list around unsupported manifest");
+        assert_eq!(listed["recordingCount"], 0);
+        assert_eq!(listed["quarantinedCount"], 1);
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["reasonCode"],
+            "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread unsupported manifest"),
+            unsupported_bytes
+        );
+
+        let recovered = store
+            .recover()
+            .expect("recover around unsupported manifest");
+        assert_eq!(recovered["recoveredCount"], 0);
+        assert_eq!(recovered["quarantinedCount"], 1);
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread unsupported manifest after recovery"),
+            unsupported_bytes
         );
     }
 
