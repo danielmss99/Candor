@@ -384,6 +384,26 @@ High defects, and approved renderer decomposition. The remaining low-risk audit
 backlog item is a second mutation case for the permission-check return path; the
 behavior already has a direct unit test and an exact source check.
 
+## Phase 4 And 5: Renderer And Focused GUI
+
+Date: 2026-07-13
+
+The renderer decomposition, startup isolation, license-independent data access,
+typed navigation, Record -> Review -> Export information architecture, warm
+brand tokens, and Advanced Settings separation are implemented. The full record,
+Claude findings and dispositions, package proof, and screenshot inventory are in
+`docs/implementation/v4/renderer-gui-verification.md`.
+
+| Check | Result |
+|---|---|
+| `npm run v3:verify` | passed; 66 Rust tests and 86 Vitest tests |
+| Claude focused renderer fix review | **Go** |
+| Windows unpacked package | passed |
+| packaged runtime smoke | passed twice after updating obsolete activation/navigation assumptions |
+| visual inspection at 1440 by 900 | passed; stable recheck screenshots recorded |
+
+Commits: `541f91b` through `41d2763`, plus packaged proof alignment in `5a628e3`.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
