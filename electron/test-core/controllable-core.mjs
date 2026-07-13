@@ -76,7 +76,7 @@ if (mode === "startup-timeout") {
   process.stdout.write("not-json\n");
   process.stdin.resume();
 } else if (mode === "oversized-line") {
-  process.stdout.write(`${"x".repeat(24 * 1024 * 1024 + 1)}\n`);
+  process.stdout.write(`${"x".repeat(2 * 1024)}\n`);
   process.stdin.resume();
 } else {
   const input = readline.createInterface({ input: process.stdin });

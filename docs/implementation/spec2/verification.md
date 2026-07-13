@@ -22,6 +22,12 @@ The reviewed source passed:
 - Product-surface smoke passed.
 - `git diff --check` passed.
 
+The hosted Ubuntu and macOS runners initially exposed a timing race in the
+oversized-line test harness. The deterministic replacement passed six
+consecutive focused runs, the Electron main build, and the complete staged
+verification. Claude independently reviewed that final fix and returned
+`approve`.
+
 ## Independent review
 
 Claude Code reviewed the implementation and returned six findings. Codex fixed

@@ -67,5 +67,17 @@ the rule.
 Claude independently re-read `git diff 918ee24`, re-evaluated all six findings,
 and returned `APPROVE`. It identified no regression in the reconciliation.
 
+## Hosted CI follow-up
+
+The first PR run exposed a cross-platform timing race in the oversized-response
+fault harness. Ubuntu and macOS timed out while transferring a 24 MB test line
+before the boundary fault reached the client. The test now injects a 1,024-byte
+limit only for that harness mode and sends a 2,048-byte line. Production still
+uses the 24 MB response limit.
+
+The fault harness passed six consecutive local runs, and the complete staged
+verification passed. Claude reviewed the final three-file change in
+`claude-ci-followup-review.md` and returned `approve` with no required changes.
+
 Claude review is advisory. Repository tests and release evidence remain the
 authoritative acceptance record.

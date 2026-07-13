@@ -36,6 +36,7 @@ function clientFor(mode: string, timeoutMs = 2_000): CoreClient {
     isDev: false,
     spawnCore: () => spawnHarness(mode),
     timeoutMsForTesting: () => timeoutMs,
+    maxResponseLineBytesForTesting: mode === "oversized-line" ? 1_024 : undefined,
   });
 }
 

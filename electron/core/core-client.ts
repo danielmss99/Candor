@@ -61,6 +61,7 @@ interface CoreClientOptions {
   isDev: boolean;
   spawnCore?: SpawnCore;
   timeoutMsForTesting?: (method: string, configuredTimeoutMs: number) => number;
+  maxResponseLineBytesForTesting?: number;
   onCaptureConnectionDegraded?: (metadata: CaptureDegradedMetadata) => void | Promise<void>;
   onCaptureRecoveryResolved?: () => void | Promise<void>;
 }
@@ -426,11 +427,12 @@ export class CoreClient {
 
   private handleStdout(chunk: Buffer, child: ChildProcessWithoutNullStreams): void {
     if (this.child !== child) return;
+    const maxResponseLineBytes = this.responseLineLimit();
     this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
     while (true) {
       const newline = this.stdoutBuffer.indexOf(0x0a);
       if (newline < 0) break;
-      if (newline > MAX_CORE_RESPONSE_LINE_BYTES) {
+      if (newline > maxResponseLineBytes) {
         this.failProtocol(child, "candor-core response exceeded the JSONL boundary limit");
         return;
       }
@@ -488,9 +490,15 @@ export class CoreClient {
         return;
       }
     }
-    if (this.stdoutBuffer.byteLength > MAX_CORE_RESPONSE_LINE_BYTES) {
+    if (this.stdoutBuffer.byteLength > maxResponseLineBytes) {
       this.failProtocol(child, "candor-core response exceeded the JSONL boundary limit");
     }
+  }
+
+  private responseLineLimit(): number {
+    const testLimit = this.options.maxResponseLineBytesForTesting;
+    if (typeof testLimit === "number" && Number.isSafeInteger(testLimit) && testLimit > 0) return testLimit;
+    return MAX_CORE_RESPONSE_LINE_BYTES;
   }
 
   private failProtocol(child: ChildProcessWithoutNullStreams, message: string): void {
