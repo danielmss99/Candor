@@ -8,6 +8,11 @@ const __filename = fileURLToPath(import.meta.url);
 const repoRoot = path.resolve(path.dirname(__filename), "..");
 const releaseRoot = path.resolve(repoRoot, "release-v3");
 const checksumPath = path.join(releaseRoot, "SHA256SUMS");
+const artifactManifestPath = path.join(
+  releaseRoot,
+  "proofs",
+  `m0-artifact-manifest-${process.platform}-${process.arch}.json`,
+);
 const proofPath = path.join(
   releaseRoot,
   "proofs",
@@ -46,6 +51,46 @@ function atomicWrite(filePath, content) {
   renameSync(temporaryPath, filePath);
 }
 
+function bindArtifactManifest(artifacts, gitHead) {
+  if (!existsSync(artifactManifestPath)) {
+    throw new Error("M0 artifact manifest is missing; record package provenance before generating checksums");
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(artifactManifestPath, "utf8").replace(/^\uFEFF/, ""));
+  } catch {
+    throw new Error("M0 artifact manifest is not valid JSON");
+  }
+  if (manifest?.ok !== true || manifest?.proofKind !== "m0-artifact-manifest") {
+    throw new Error("M0 artifact manifest did not pass");
+  }
+  if (manifest?.git?.head !== gitHead || manifest?.git?.dirty !== false) {
+    throw new Error("M0 artifact manifest does not match the clean committed source revision");
+  }
+
+  const releaseArtifacts = Array.isArray(manifest?.releaseArtifacts) ? manifest.releaseArtifacts : [];
+  if (!releaseArtifacts.length) throw new Error("M0 artifact manifest has no release packages");
+
+  const matchedArtifactNames = [];
+  for (const entry of releaseArtifacts) {
+    const name = typeof entry?.path === "string" ? path.basename(entry.path) : "";
+    const artifact = artifacts.find((candidate) => candidate.name === name);
+    if (!name || entry?.exists !== true || !artifact || artifact.sha256 !== entry?.sha256) {
+      throw new Error(`release checksum does not match M0 artifact provenance for ${name || "unknown package"}`);
+    }
+    matchedArtifactNames.push(name);
+  }
+
+  return {
+    proofKind: manifest.proofKind,
+    gitHead: manifest.git.head,
+    dirty: manifest.git.dirty,
+    artifactCount: releaseArtifacts.length,
+    matchedArtifactNames,
+  };
+}
+
 if (!existsSync(releaseRoot)) {
   throw new Error("release-v3 does not exist; build release artifacts before generating checksums");
 }
@@ -68,6 +113,7 @@ const expectedText = `${artifacts.map((artifact) => `${artifact.sha256}  ${artif
 const gitHead = gitValue(["rev-parse", "HEAD"], null);
 const gitBranch = gitValue(["branch", "--show-current"], null);
 const gitStatus = gitValue(["status", "--porcelain", "--untracked-files=no"], null);
+const sourceManifest = bindArtifactManifest(artifacts, gitHead);
 
 if (verifyOnly) {
   if (!existsSync(checksumPath)) throw new Error("SHA256SUMS is missing");
@@ -91,6 +137,7 @@ const proof = {
   mode: verifyOnly ? "verify" : "generate",
   artifactCount: artifacts.length,
   artifacts,
+  sourceManifest,
   git: {
     head: gitHead,
     branch: gitBranch,

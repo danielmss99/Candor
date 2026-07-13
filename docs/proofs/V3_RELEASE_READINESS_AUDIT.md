@@ -91,6 +91,8 @@ npm run v3:release-signing-proof
 The release checksum gate is produced only after packages are built:
 
 ```powershell
+npm run v3:release-artifact-smoke
+npm run m0:artifact-manifest
 npm run v3:release-checksums
 npm run v3:release-checksums:verify
 ```
@@ -98,7 +100,8 @@ npm run v3:release-checksums:verify
 Verification recomputes every top-level release package hash and requires an
 exact match with `release-v3/SHA256SUMS`. The readiness audit accepts only the
 verification-mode receipt from a clean committed source tree, not the
-generation receipt.
+generation receipt. The receipt must also match the source revision and package
+hashes in the M0 artifact manifest.
 
 Strict mode writes:
 

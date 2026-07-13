@@ -131,6 +131,7 @@ const requiredPatterns = [
   ["sudo chmod 4755 release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox setuid mode"],
   ["stat -c '%u:%g:%a' release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox ownership and mode assertion"],
   ["npm run v3:release-artifact-smoke", "release artifact contents smoke"],
+  ["name: Record release artifact provenance", "pre-checksum artifact provenance step"],
   ["npm run v3:release-checksums && npm run v3:release-checksums:verify", "release checksum generation and verification"],
   ["npm run m0:packaged-smoke", "packaged smoke"],
   ["xvfb-run -a npm run m0:packaged-smoke", "Linux packaged smoke display wrapper"],
@@ -278,6 +279,7 @@ for (const [contents, pattern, label] of [
   [releaseChecksums, "networkAttempted: false", "release checksum network denial evidence"],
   [releaseChecksums, "rawPathExposed: false", "release checksum path redaction evidence"],
   [releaseChecksums, "tracked source tree must be clean", "release checksum clean-source enforcement"],
+  [releaseChecksums, "bindArtifactManifest", "release checksum artifact-manifest binding"],
   [goalAudit, "proofKind: \"v3-goal-audit\"", "goal audit proof kind"],
   [goalAudit, "coordination.subagent_alignment", "goal audit subagent alignment requirement"],
   [goalAudit, "missionComplete", "goal audit mission completion field"],
@@ -376,6 +378,16 @@ requireOrder(
   "npm run electron:v3:dist",
   "npm run v3:release-artifact-smoke",
   "package before release artifact smoke",
+);
+requireOrder(
+  "npm run v3:release-artifact-smoke",
+  "name: Record release artifact provenance",
+  "artifact smoke before package provenance",
+);
+requireOrder(
+  "name: Record release artifact provenance",
+  "npm run v3:release-checksums && npm run v3:release-checksums:verify",
+  "package provenance before checksum verification",
 );
 requireOrder(
   "npm run v3:release-artifact-smoke",

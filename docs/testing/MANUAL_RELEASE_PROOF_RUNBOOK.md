@@ -21,10 +21,11 @@ Preserve failed-machine logs and the untouched source vault. Do not rerun a dest
 
 1. Check out the release commit with no tracked changes.
 2. Run `npm ci`, `npm run v3:verify`, `npm run test:electron:build`, and the platform `electron:v3:dist:*` command.
-3. Run `npm run v3:release-checksums` and `npm run v3:release-checksums:verify`.
-4. Record commit, package filename, byte size, SHA-256, OS version, architecture, operator, and UTC time.
-5. Copy the installer and `SHA256SUMS` to the test machine through the planned distribution channel.
-6. Verify the checksum on the destination before launch.
+3. Run `npm run v3:release-artifact-smoke` and `npm run m0:artifact-manifest`.
+4. Run `npm run v3:release-checksums` and `npm run v3:release-checksums:verify`.
+5. Record commit, package filename, byte size, SHA-256, OS version, architecture, operator, and UTC time.
+6. Copy the installer and `SHA256SUMS` to the test machine through the planned distribution channel.
+7. Verify the checksum on the destination before launch.
 
 ## Clean install
 

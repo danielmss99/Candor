@@ -404,6 +404,60 @@ Claude findings and dispositions, package proof, and screenshot inventory are in
 
 Commits: `541f91b` through `41d2763`, plus packaged proof alignment in `5a628e3`.
 
+## Phase 6: Reliability And Data Protection
+
+Date: 2026-07-12
+
+SQLCipher migrations now create and retain verified encrypted backups, restore
+after transactional failure, and reject unknown future schemas without touching
+the source vault. Capture manifests with unsupported schemas are quarantined
+without a legacy fallback. Disk headroom, active-write reserve, permanent
+deletion intent, and persistent renderer recovery states are implemented.
+
+Focused evidence is recorded in:
+
+- `phase6-vault-migration-verification.md`;
+- `phase6-manifest-quarantine-verification.md`;
+- `phase6-storage-pressure-verification.md`;
+- `phase6-permanent-deletion-verification.md`;
+- `phase6-renderer-recovery-verification.md`;
+- `phase6-implementation-review-reconciliation.md`.
+
+Claude separately reviewed the Rust data-safety boundary and Electron/renderer
+recovery boundary. Both focused re-reviews returned **Go** after the unsupported
+schema fallback and shared Record/Stop disablement defects were fixed.
+
+| Check | Result |
+|---|---|
+| Rust default tests | passed; 82 tests |
+| Rust SQLCipher tests | passed; 97 tests |
+| `npm test` | passed; 33 files and 101 tests |
+| `npm run v3:verify` | passed; full M0-M5 staged chain |
+
+## Phase 7: Electron, Accessibility, And Release Evidence
+
+Date: 2026-07-12
+
+Playwright now launches the real Electron shell and verifies the exact preload
+surface, missing Node globals, navigation and popup denial, primary-screen axe
+results, keyboard focus, and 1366 by 768 behavior at 125 and 150 percent display
+scaling. The suite runs on the three-OS CI matrix, with Xvfb on Linux.
+
+Release packages now receive streamed SHA-256 hashes in `SHA256SUMS`. Verification
+requires an exact package match and a clean committed source tree. The readiness
+audit accepts only the verification-mode path-safe receipt. The manual release
+runbook defines stop conditions and the clean-install, upgrade, long-recording,
+sleep/resume, device, disk-pressure, network-denial, and signing evidence still
+required from real machines.
+
+| Check | Result |
+|---|---|
+| `npm run test:electron` | passed; 4 Electron/axe tests |
+| `npm test` | passed; 33 files and 101 tests |
+| `npm run m0:ci-contract-smoke` | passed |
+| `npm run v3:release-checksums:verify` | passed from commit `0a2d03e` |
+| `npm run v3:release-readiness-audit` | checksum gate passed; external capture, cross-OS, and signing gaps remain visible |
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
@@ -412,5 +466,4 @@ Commits: `541f91b` through `41d2763`, plus packaged proof alignment in `5a628e3`
 - physical cross-platform microphone/system capture;
 - 5/30/60/180-minute real recording matrix;
 - sleep/resume and device switching;
-- final data migration and rollback proof;
 - macOS notarization and production Windows signing.

@@ -172,6 +172,7 @@ function summarizePayload(payload) {
       artifactCount: payload?.artifactCount ?? null,
       gitHead: payload?.git?.head ?? null,
       gitDirty: payload?.git?.dirty ?? null,
+      sourceManifestHead: payload?.sourceManifest?.gitHead ?? null,
       failures: payload?.failures ?? [],
     };
   }
@@ -476,6 +477,21 @@ function validateReleaseChecksums(payload) {
     failures.push("release checksum proof must identify a committed source revision");
   }
   if (payload?.git?.dirty !== false) failures.push("release checksum proof must come from a clean tracked source tree");
+  if (payload?.sourceManifest?.proofKind !== "m0-artifact-manifest") {
+    failures.push("release checksum proof must bind to the M0 artifact manifest");
+  }
+  if (payload?.sourceManifest?.gitHead !== payload?.git?.head || payload?.sourceManifest?.dirty !== false) {
+    failures.push("release checksum proof source manifest must match the clean committed revision");
+  }
+  if (!Number.isInteger(payload?.sourceManifest?.artifactCount) || payload.sourceManifest.artifactCount < 1) {
+    failures.push("release checksum proof source manifest must include at least one package");
+  }
+  if (
+    !Array.isArray(payload?.sourceManifest?.matchedArtifactNames) ||
+    payload.sourceManifest.matchedArtifactNames.length !== payload?.sourceManifest?.artifactCount
+  ) {
+    failures.push("release checksum proof must match every package recorded by the source manifest");
+  }
 
   const artifacts = Array.isArray(payload?.artifacts) ? payload.artifacts : [];
   if (!Number.isInteger(payload?.artifactCount) || payload.artifactCount < 1) {
@@ -490,6 +506,14 @@ function validateReleaseChecksums(payload) {
     }
     if (typeof artifact?.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(artifact.sha256)) {
       failures.push(`release checksum is invalid for ${artifact?.name ?? "unknown artifact"}`);
+    }
+  }
+  for (const name of payload?.sourceManifest?.matchedArtifactNames ?? []) {
+    if (typeof name !== "string" || name.length === 0 || name !== name.replaceAll("\\", "/").split("/").at(-1)) {
+      failures.push("release checksum source-manifest matches must use basename-only package names");
+    }
+    if (!artifacts.some((artifact) => artifact?.name === name)) {
+      failures.push(`release checksum source-manifest package is absent: ${name}`);
     }
   }
   return failures;
