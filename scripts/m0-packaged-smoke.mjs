@@ -529,7 +529,7 @@ function assertSmokePayload(payload) {
     payload.rendererVisualState?.bodyTextCharacters < 200 ||
     payload.rendererVisualState?.aiModeVisible !== true ||
     payload.rendererVisualState?.selectedMode !== "Quality" ||
-    payload.rendererVisualState?.statusText !== "Fast fallback, model unavailable" ||
+    payload.rendererVisualState?.statusText !== "Fast local fallback" ||
     payload.rendererVisualState?.aiSuggestionsTabActivated !== true ||
     payload.rendererVisualState?.notesTabRestored !== true ||
     payload.rendererVisualState?.currentView !== "meeting" ||
