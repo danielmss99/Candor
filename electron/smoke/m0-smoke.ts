@@ -337,20 +337,6 @@ async function captureSettledSmokePage(
   };
 }
 
-async function clickSmokeButton(windowRef: BrowserWindow, label: string): Promise<void> {
-  const clicked = (await windowRef.webContents.executeJavaScript(
-    `(() => {
-      const button = Array.from(document.querySelectorAll('button'))
-        .find((node) => node.textContent?.trim() === ${JSON.stringify(label)});
-      if (!(button instanceof HTMLButtonElement) || button.disabled) return false;
-      button.click();
-      return true;
-    })()`,
-    true,
-  )) as JsonValue;
-  if (clicked !== true) throw new Error(`Smoke could not activate the ${label} button.`);
-}
-
 async function captureSmokeView(
   windowRef: BrowserWindow,
   view: string,
@@ -370,6 +356,7 @@ async function captureSmokeView(
         };
         let clicked = false;
         const targetView = ${JSON.stringify(view)};
+        const expectedView = targetView === 'advanced' ? 'settings' : targetView;
         if (targetView === 'home') {
           const wordmark = document.querySelector('.wordmark');
           if (wordmark instanceof HTMLButtonElement && !wordmark.disabled) {
@@ -393,23 +380,22 @@ async function captureSmokeView(
           clicked = await clickExact('button', 'Review report');
           if (!clicked) clicked = await clickExact('button', 'Review meeting');
         } else if (targetView === 'export') {
-          clicked = await clickExact('.desktop-nav button', 'Exports');
+          clicked = await clickExact('button', 'Export report');
         } else if (targetView === 'settings') {
           clicked = await clickExact('.desktop-nav button', 'Settings');
-        } else if (targetView === 'proof') {
+        } else if (targetView === 'advanced') {
           await clickExact('.desktop-nav button', 'Settings');
           const advanced = document.querySelector('.advanced-settings-toggle');
           if (advanced instanceof HTMLButtonElement && advanced.getAttribute('aria-expanded') !== 'true') {
             advanced.click();
             await settle();
           }
-          await clickExact('.settings-layout nav button', 'Privacy and diagnostics');
-          clicked = await clickExact('button', 'Open full diagnostics');
+          clicked = await clickExact('.settings-layout nav button', 'Privacy and diagnostics');
         }
         if (!clicked) return { clicked: false, reason: 'workflow-navigation-unavailable' };
         for (let index = 0; index < 80; index += 1) {
           const current = document.querySelector('[data-view]')?.getAttribute('data-view');
-          if (current === targetView) break;
+          if (current === expectedView) break;
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
         if (${JSON.stringify(view)} === 'detail') {
@@ -699,30 +685,26 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
     const windowRef = createWindow();
     await waitForRendererLoad(windowRef);
     windowRef.showInactive();
-    const rendererOnboardingScreenshots: JsonValue[] = [];
-    await waitForRendererView(windowRef, "activation");
-    if (smokeScreenshotPath) {
-      rendererOnboardingScreenshots.push(
-        await captureSettledSmokePage(
-          windowRef,
-          smokeViewScreenshotPath(smokeScreenshotPath, "activation"),
-        ),
-      );
-    }
-    await clickSmokeButton(windowRef, "Start Trial");
-    await waitForRendererView(windowRef, "onboarding");
-    if (smokeScreenshotPath) {
-      rendererOnboardingScreenshots.push(
-        await captureSettledSmokePage(
-          windowRef,
-          smokeViewScreenshotPath(smokeScreenshotPath, "onboarding"),
-        ),
-      );
-    }
-    await clickSmokeButton(windowRef, "Open App");
-    await waitForRendererView(windowRef, "home");
-    await clickSmokeButton(windowRef, "Current meeting");
     await waitForRendererView(windowRef, "meeting");
+    const rendererEntryState = (await windowRef.webContents.executeJavaScript(
+      `({
+        currentView: document.querySelector('[data-view]')?.getAttribute('data-view') ?? null,
+        activationVisible: Boolean(document.querySelector('[data-view="activation"]')),
+        onboardingVisible: Boolean(document.querySelector('[data-view="onboarding"]')),
+        transcriptVisible: Boolean(document.querySelector('.live-transcript')),
+        notesVisible: Boolean(document.querySelector('.meeting-notes-panel'))
+      })`,
+      true,
+    )) as JsonValue;
+    const rendererEntryScreenshots: JsonValue[] = [];
+    if (smokeScreenshotPath) {
+      rendererEntryScreenshots.push(
+        await captureSettledSmokePage(
+          windowRef,
+          smokeViewScreenshotPath(smokeScreenshotPath, "local-data-access"),
+        ),
+      );
+    }
     const smokeLicense = await getLicenseService().status();
     const licenseFixture: JsonValue = {
       state: smokeLicense.state,
@@ -830,6 +812,27 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
       `,
       true,
     )) as JsonValue;
+    const localNoticeExercise = (await windowRef.webContents.executeJavaScript(
+      `
+        (async () => {
+          const button = Array.from(document.querySelectorAll('button'))
+            .find((node) => node.textContent?.trim() === 'Mark moment');
+          if (!(button instanceof HTMLButtonElement) || button.disabled) {
+            return { triggered: false, notificationVisible: false };
+          }
+          button.click();
+          for (let index = 0; index < 40; index += 1) {
+            if (document.querySelector('[aria-label="Dismiss notification"]')) break;
+            await new Promise((resolve) => setTimeout(resolve, 25));
+          }
+          return {
+            triggered: true,
+            notificationVisible: Boolean(document.querySelector('[aria-label="Dismiss notification"]'))
+          };
+        })()
+      `,
+      true,
+    )) as JsonValue;
     let rendererScreenshot: JsonValue = {
       captured: false,
       bytes: 0,
@@ -844,9 +847,9 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
         ["library", "Meetings"],
         ["detail", "Open meeting"],
         ["review", "Review report"],
-        ["export", "Exports"],
+        ["export", "Export report"],
         ["settings", "Settings"],
-        ["proof", "Privacy and diagnostics"],
+        ["advanced", "Privacy and diagnostics"],
       ];
       for (const [view, navLabel] of views) {
         rendererViewScreenshots.push(await captureSmokeView(windowRef, view, navLabel));
@@ -897,8 +900,10 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
       rendererIsolationProbe: rendererIsolationEvidence,
       rendererPathAudit,
       rendererVisualState,
+      localNoticeExercise,
       rendererScreenshot,
-      rendererOnboardingScreenshots,
+      rendererEntryState,
+      rendererEntryScreenshots,
       rendererViewScreenshots,
       designFixture,
       documentExportFixture,
