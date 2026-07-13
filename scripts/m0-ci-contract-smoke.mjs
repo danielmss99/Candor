@@ -209,7 +209,7 @@ for (const [contents, pattern, label] of [
   [macosNetworkProof, "uid: invokingUid", "macOS network proof non-root UID drop"],
   [macosNetworkProof, "gid: executionGid", "macOS network proof isolated GID drop"],
   [macosNetworkProof, 'const captureInterface = "pktap,all"', "macOS PKTAP all-interface capture"],
-  [macosNetworkProof, '"NPD"', "macOS PKTAP process metadata"],
+  [macosNetworkProof, '"NPDfF"', "macOS PKTAP process and flow metadata"],
   [macosNetworkProof, 'const captureMetadataFilter = "dir=out"', "macOS outbound metadata filter"],
   [macosNetworkProof, '"temporary-pcapng-file"', "macOS temporary pcapng capture mode"],
   [macosNetworkProof, '"-w"', "macOS binary PKTAP capture"],

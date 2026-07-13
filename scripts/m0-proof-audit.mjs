@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isCandorProcessName } from "./m0-process-identity.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -294,6 +295,165 @@ function validateMacosManagedPf(payload, failures) {
   requireField(managed?.anchorFlushed === true, "managed PF anchor must be flushed", failures);
   requireField(managed?.enableTokenReleased === true, "managed PF enable token must be released", failures);
   requireField(!managed?.cleanupError, "managed PF cleanup must not report an error", failures);
+}
+
+const MACOS_FLOW_CORRELATION_REASON =
+  "matched named non-Candor flow by PKTAP flow ID and endpoint tuple; zero-length outbound TCP reset";
+const MACOS_FLOW_CORRELATION_EVIDENCE_LIMIT = 25;
+
+function validNonZeroPktapFlowId(value) {
+  return (
+    typeof value === "string" &&
+    /^0x[0-9a-f]+$/.test(value) &&
+    !/^0x0+$/.test(value)
+  );
+}
+
+function validateMacosFlowCorrelations(attribution, failures) {
+  const count = attribution?.flowCorrelatedKernelControlPacketCount;
+  const samples = attribution?.flowCorrelatedKernelControlPacketSamples;
+  requireField(
+    Number.isInteger(count) && count >= 0,
+    "flow-correlated kernel-control packet count must be a non-negative integer",
+    failures,
+  );
+  requireField(
+    Array.isArray(samples),
+    "flow-correlated kernel-control packet samples must be recorded",
+    failures,
+  );
+  if (!Number.isInteger(count) || count < 0 || !Array.isArray(samples)) return;
+
+  requireField(
+    attribution?.flowCorrelationEvidenceLimit === MACOS_FLOW_CORRELATION_EVIDENCE_LIMIT,
+    "flow-correlation evidence limit must match the audited bound",
+    failures,
+  );
+  requireField(
+    count <= MACOS_FLOW_CORRELATION_EVIDENCE_LIMIT,
+    "flow-correlated kernel-control packet count must not exceed the complete evidence limit",
+    failures,
+  );
+  requireField(
+    samples.length === count,
+    "every flow-correlated kernel-control packet must include audit evidence",
+    failures,
+  );
+  requireField(
+    Number.isInteger(attribution?.kernelAttributedPacketCount) &&
+      attribution.kernelAttributedPacketCount >= count,
+    "kernel-attributed packet count must include every flow-correlated kernel-control packet",
+    failures,
+  );
+
+  const packetIndexes = new Set();
+  for (const [index, sample] of samples.entries()) {
+    const label = `flow-correlated kernel-control sample ${index + 1}`;
+    requireField(
+      Number.isInteger(sample?.packetIndex) && sample.packetIndex >= 0,
+      `${label} must record its packet index`,
+      failures,
+    );
+    if (Number.isInteger(sample?.packetIndex)) packetIndexes.add(sample.packetIndex);
+    requireField(
+      sample?.reason === MACOS_FLOW_CORRELATION_REASON,
+      `${label} must record the narrow correlation reason`,
+      failures,
+    );
+    requireField(
+      validNonZeroPktapFlowId(sample?.flowId),
+      `${label} must include a non-zero PKTAP flow identifier`,
+      failures,
+    );
+    requireField(
+      (sample?.networkProtocol === "IP" || sample?.networkProtocol === "IP6") &&
+        sample?.transportProtocol === "TCP",
+      `${label} must identify its IP and TCP protocols`,
+      failures,
+    );
+    requireField(
+      typeof sample?.sourceEndpoint === "string" && sample.sourceEndpoint.length > 0 &&
+        typeof sample?.destinationEndpoint === "string" && sample.destinationEndpoint.length > 0,
+      `${label} must include both flow endpoints`,
+      failures,
+    );
+    requireField(
+      sample?.direction === "out" &&
+        typeof sample?.tcpFlags === "string" &&
+        sample.tcpFlags.includes("R") &&
+        sample?.payloadLength === 0,
+      `${label} must be an outbound zero-length TCP reset`,
+      failures,
+    );
+    requireField(
+      sample?.matchedFlow?.flowId === sample?.flowId &&
+        sample?.matchedFlow?.networkProtocol === sample?.networkProtocol &&
+        sample?.matchedFlow?.transportProtocol === sample?.transportProtocol &&
+        sample?.matchedFlow?.sourceEndpoint === sample?.sourceEndpoint &&
+        sample?.matchedFlow?.destinationEndpoint === sample?.destinationEndpoint,
+      `${label} must match the exact PKTAP flow identifier and endpoint tuple`,
+      failures,
+    );
+
+    const matchedPacket = sample?.matchedPacket;
+    requireField(
+      Number.isInteger(matchedPacket?.packetIndex) &&
+        matchedPacket.packetIndex >= 0 &&
+        matchedPacket.packetIndex < sample?.packetIndex,
+      `${label} must cite an earlier named owner packet`,
+      failures,
+    );
+    requireField(
+      matchedPacket?.direction === "out" && matchedPacket?.transportProtocol === "TCP",
+      `${label} owner evidence must be an outbound TCP packet`,
+      failures,
+    );
+    requireField(
+      matchedPacket?.flowId === sample?.flowId &&
+        matchedPacket?.networkProtocol === sample?.networkProtocol &&
+        matchedPacket?.transportProtocol === sample?.transportProtocol &&
+        matchedPacket?.sourceEndpoint === sample?.sourceEndpoint &&
+        matchedPacket?.destinationEndpoint === sample?.destinationEndpoint,
+      `${label} owner evidence must match the exact PKTAP flow identifier and endpoint tuple`,
+      failures,
+    );
+
+    const matchedProcess = sample?.matchedProcess;
+    requireField(
+      matchedProcess?.processName === matchedPacket?.processName &&
+        matchedProcess?.pid === matchedPacket?.pid &&
+        matchedProcess?.effectiveProcessName === matchedPacket?.effectiveProcessName &&
+        matchedProcess?.effectivePid === matchedPacket?.effectivePid,
+      `${label} matched process must agree with the cited owner packet`,
+      failures,
+    );
+    const namedPrimary =
+      Number.isInteger(matchedPacket?.pid) &&
+      matchedPacket.pid > 0 &&
+      typeof matchedPacket?.processName === "string" &&
+      matchedPacket.processName.length > 0;
+    const namedEffective =
+      Number.isInteger(matchedPacket?.effectivePid) &&
+      matchedPacket.effectivePid > 0 &&
+      typeof matchedPacket?.effectiveProcessName === "string" &&
+      matchedPacket.effectiveProcessName.length > 0;
+    requireField(
+      namedPrimary || namedEffective,
+      `${label} must match a named process with a positive PID`,
+      failures,
+    );
+    requireField(
+      !isCandorProcessName(matchedPacket?.processName) &&
+        !isCandorProcessName(matchedPacket?.effectiveProcessName),
+      `${label} must never classify a Candor-owned flow as background kernel control`,
+      failures,
+    );
+  }
+  requireField(
+    packetIndexes.size === samples.length,
+    "flow-correlated kernel-control packet evidence must use unique packet indexes",
+    failures,
+  );
 }
 
 function validateDenyLayerProbe(payload, failures) {
@@ -1566,6 +1726,52 @@ function runSelfTest() {
     "Windows network proof must report prerequisite failures without cascading rule checks",
   );
 
+  const validKernelControlCorrelation = {
+    line:
+      "00:00:00.000001 (out, flowid 0xabc123) IP 192.168.64.2.58230 > 17.253.5.154.443: Flags [R], length 0",
+    packetIndex: 12,
+    processName: null,
+    pid: null,
+    effectiveProcessName: null,
+    effectivePid: null,
+    direction: "out",
+    flowId: "0xabc123",
+    networkProtocol: "IP",
+    transportProtocol: "TCP",
+    sourceEndpoint: "192.168.64.2.58230",
+    destinationEndpoint: "17.253.5.154.443",
+    tcpFlags: "R",
+    payloadLength: 0,
+    reason: MACOS_FLOW_CORRELATION_REASON,
+    matchedProcess: {
+      processName: "nsurlsessiond",
+      pid: 244,
+      effectiveProcessName: null,
+      effectivePid: null,
+    },
+    matchedFlow: {
+      flowId: "0xabc123",
+      networkProtocol: "IP",
+      transportProtocol: "TCP",
+      sourceEndpoint: "192.168.64.2.58230",
+      destinationEndpoint: "17.253.5.154.443",
+    },
+    matchedPacket: {
+      packetIndex: 7,
+      processName: "nsurlsessiond",
+      pid: 244,
+      effectiveProcessName: null,
+      effectivePid: null,
+      direction: "out",
+      flowId: "0xabc123",
+      networkProtocol: "IP",
+      transportProtocol: "TCP",
+      sourceEndpoint: "192.168.64.2.58230",
+      destinationEndpoint: "17.253.5.154.443",
+      tcpFlags: "P.",
+      payloadLength: 80,
+    },
+  };
   const validManagedMacosProof = {
     ok: true,
     proofKind: "m0-network-deny-macos",
@@ -1586,6 +1792,7 @@ function runSelfTest() {
       mode: "temporary-pcapng-file",
       snapshotLengthBytes: 256,
       metadataFilter: "dir=out",
+      metadataDisplay: "NPDfF",
       rawCaptureRemoved: true,
     },
     packetCount: 0,
@@ -1593,9 +1800,11 @@ function runSelfTest() {
     packetAttribution: {
       captureInterface: "pktap,all",
       captureMetadataFilter: "dir=out",
+      metadataSource:
+        "macOS PKTAP process name, PID, direction, flow identifier, and flags with exact flow correlation for kernel-generated zero-length TCP resets",
       captureStats: {
         parsed: true,
-        captured: 0,
+        captured: 1,
         receivedByFilter: 12,
         kernelDropped: 0,
         metadataFilterDropped: 12,
@@ -1618,10 +1827,13 @@ function runSelfTest() {
       denyProbePacketCount: 1,
       observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor" }],
       processIdentityMismatches: [],
-      observedPacketCount: 0,
+      observedPacketCount: 1,
       packetsWithoutProcessMetadata: [],
-      kernelAttributedPacketCount: 0,
-      kernelAttributedPacketSamples: [],
+      kernelAttributedPacketCount: 1,
+      kernelAttributedPacketSamples: [validKernelControlCorrelation],
+      flowCorrelatedKernelControlPacketCount: 1,
+      flowCorrelationEvidenceLimit: 25,
+      flowCorrelatedKernelControlPacketSamples: [validKernelControlCorrelation],
     },
     managedPf: {
       requested: true,
@@ -1643,6 +1855,85 @@ function runSelfTest() {
   assertSelfTest(
     validManagedMacosFailures.length === 0,
     `valid managed macOS network proof should pass. Actual failures: ${validManagedMacosFailures.join("; ")}`,
+  );
+
+  const mismatchedFlowManagedMacosProof = cloneJson(validManagedMacosProof);
+  mismatchedFlowManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .matchedFlow.flowId = "0xabc124";
+  const mismatchedFlowManagedMacosFailures = validateNetworkProof(
+    "macos",
+    mismatchedFlowManagedMacosProof,
+  );
+  assertSelfTest(
+    mismatchedFlowManagedMacosFailures.some((failure) =>
+      failure.includes("must match the exact PKTAP flow identifier and endpoint tuple"),
+    ),
+    "macOS proof must reject a kernel-control packet without exact flow correlation",
+  );
+
+  const candorOwnedFlowManagedMacosProof = cloneJson(validManagedMacosProof);
+  candorOwnedFlowManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .matchedProcess.processName = "Candor";
+  candorOwnedFlowManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .matchedPacket.processName = "Candor";
+  const candorOwnedFlowManagedMacosFailures = validateNetworkProof(
+    "macos",
+    candorOwnedFlowManagedMacosProof,
+  );
+  assertSelfTest(
+    candorOwnedFlowManagedMacosFailures.some((failure) =>
+      failure.includes("must never classify a Candor-owned flow"),
+    ),
+    "macOS proof must reject kernel-control correlation to a Candor-owned flow",
+  );
+
+  const dataBearingResetManagedMacosProof = cloneJson(validManagedMacosProof);
+  dataBearingResetManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .payloadLength = 1;
+  const dataBearingResetManagedMacosFailures = validateNetworkProof(
+    "macos",
+    dataBearingResetManagedMacosProof,
+  );
+  assertSelfTest(
+    dataBearingResetManagedMacosFailures.some((failure) =>
+      failure.includes("must be an outbound zero-length TCP reset"),
+    ),
+    "macOS proof must reject a data-bearing processless packet",
+  );
+
+  const zeroFlowManagedMacosProof = cloneJson(validManagedMacosProof);
+  zeroFlowManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .flowId = "0x00000000";
+  zeroFlowManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .matchedFlow.flowId = "0x00000000";
+  zeroFlowManagedMacosProof.packetAttribution.flowCorrelatedKernelControlPacketSamples[0]
+    .matchedPacket.flowId = "0x00000000";
+  const zeroFlowManagedMacosFailures = validateNetworkProof(
+    "macos",
+    zeroFlowManagedMacosProof,
+  );
+  assertSelfTest(
+    zeroFlowManagedMacosFailures.some((failure) =>
+      failure.includes("must include a non-zero PKTAP flow identifier"),
+    ),
+    "macOS proof must reject a padded all-zero flow identifier",
+  );
+
+  const incompleteCorrelationEvidenceMacosProof = cloneJson(validManagedMacosProof);
+  incompleteCorrelationEvidenceMacosProof.packetAttribution
+    .flowCorrelatedKernelControlPacketCount = 26;
+  const incompleteCorrelationEvidenceMacosFailures = validateNetworkProof(
+    "macos",
+    incompleteCorrelationEvidenceMacosProof,
+  );
+  assertSelfTest(
+    incompleteCorrelationEvidenceMacosFailures.some((failure) =>
+      failure.includes("must not exceed the complete evidence limit"),
+    ) &&
+      incompleteCorrelationEvidenceMacosFailures.some((failure) =>
+        failure.includes("every flow-correlated kernel-control packet must include audit evidence"),
+      ),
+    "macOS proof must reject unsampled flow-correlation evidence",
   );
 
   const staleManagedMacosProof = cloneJson(validManagedMacosProof);
@@ -1836,14 +2127,21 @@ function validateNetworkProof(osName, payload) {
       payload?.captureConfiguration?.mode === "temporary-pcapng-file" &&
         payload.captureConfiguration.snapshotLengthBytes === 256 &&
         payload.captureConfiguration.metadataFilter === "dir=out" &&
+        payload.captureConfiguration.metadataDisplay === "NPDfF" &&
         payload.captureConfiguration.rawCaptureRemoved === true,
-      "PKTAP capture must use a removed temporary pcapng file with bounded snapshots",
+      "PKTAP capture must use a removed temporary pcapng file with bounded snapshots and process/flow metadata",
       failures,
     );
     requireField(
       attribution?.captureMetadataFilter === "dir=out" &&
         attribution.captureMetadataFilter === payload?.captureConfiguration?.metadataFilter,
       "PKTAP capture must be restricted to outbound packet metadata",
+      failures,
+    );
+    requireField(
+      attribution?.metadataSource ===
+        "macOS PKTAP process name, PID, direction, flow identifier, and flags with exact flow correlation for kernel-generated zero-length TCP resets",
+      "PKTAP attribution source must record process metadata and exact kernel-control flow correlation",
       failures,
     );
     requireField(
@@ -1863,9 +2161,10 @@ function validateNetworkProof(osName, payload) {
     requireField(
       Array.isArray(attribution?.packetsWithoutProcessMetadata) &&
         attribution.packetsWithoutProcessMetadata.length === 0,
-      "PKTAP packets must have process or explicit kernel attribution",
+      "PKTAP packets must have process, explicit kernel, or evidence-backed kernel-control attribution",
       failures,
     );
+    validateMacosFlowCorrelations(attribution, failures);
     if (payload?.managedPf?.requested === true) {
       requireField(
         attribution?.blockedMetadataSource ===
@@ -1882,7 +2181,7 @@ function validateNetworkProof(osName, payload) {
         failures,
       );
     }
-    requireField(attribution?.complete === true, "PKTAP process attribution must be complete", failures);
+    requireField(attribution?.complete === true, "PKTAP attribution must be complete", failures);
     requireField(attribution?.packetOverflowCount === 0, "PKTAP packet capture must not overflow", failures);
     requireField(
       attribution?.tcpdumpExitedBeforeCleanup === false,

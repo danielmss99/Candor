@@ -28,6 +28,33 @@ consecutive focused runs, the Electron main build, and the complete staged
 verification. Claude independently reviewed that final fix and returned
 `approve`.
 
+The replacement hosted run then passed Windows and Ubuntu but exposed one
+macOS proof-parser edge: PKTAP emitted three processless, zero-length TCP reset
+records on a flow already owned by `nsurlsessiond`. The hardened parser now
+requires a nonzero PKTAP flow ID, exact IP/TCP endpoint tuple, an earlier named
+non-Candor owner packet, zero payload, and a reset flag. Conflicting owners,
+future-only ownership, Candor ownership, missing metadata, data-bearing packets,
+and incomplete correlation evidence all fail closed. The proof retains complete
+evidence for every accepted correlation and refuses more than 25 correlations.
+
+Verification for the final proof change:
+
+- `node scripts/m0-network-deny-macos.mjs --validate-only`: passed.
+- `npm run m0:proof-audit:self-test`: passed.
+- `npm run m0:ci-contract-smoke`: passed.
+- `npm run v3:verify`: passed after one isolated M2 timeout was reproduced by
+  neither the focused M2 smoke nor the clean full rerun.
+- `npm run test:electron`: 5 tests passed.
+- `npm run v3:dependency-audit`: 0 vulnerabilities and 2 allowed unmaintained
+  warnings for `rustybuzz` and `ttf-parser`.
+- `git diff --check`: passed.
+
+Claude independently reviewed the macOS correlation rule and returned
+`approve` with no required findings. Its optional regression suggestions were
+implemented and recorded in `claude-macos-proof-review-reconciliation.md`.
+Claude then reviewed the complete reconciled diff and again returned `approve`
+with no required defects.
+
 ## Independent review
 
 Claude Code reviewed the implementation and returned six findings. Codex fixed
