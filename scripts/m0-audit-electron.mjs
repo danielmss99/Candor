@@ -8,6 +8,10 @@ const repoRoot = path.resolve(__dirname, "..");
 
 const files = [
   "electron/main.ts",
+  "electron/core/json.ts",
+  "electron/security/network-policy.ts",
+  "electron/window/create-main-window.ts",
+  "electron/window/navigation-policy.ts",
   "electron/preload.cts",
   "v3/renderer/index.html",
   "vite.v3.config.ts",
@@ -160,9 +164,13 @@ const requiredPackagedSmokePatterns = [
 const contents = Object.fromEntries(
   files.map((file) => [file, readFileSync(path.join(repoRoot, file), "utf8")]),
 );
+const electronRuntimeSource = Object.entries(contents)
+  .filter(([file]) => file.startsWith("electron/") && file !== "electron/preload.cts")
+  .map(([, content]) => content)
+  .join("\n");
 
 for (const pattern of requiredMainPatterns) {
-  if (!contents["electron/main.ts"].includes(pattern)) {
+  if (!electronRuntimeSource.includes(pattern)) {
     throw new Error(`Electron hardening pattern missing: ${pattern}`);
   }
 }

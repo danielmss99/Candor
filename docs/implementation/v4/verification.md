@@ -168,6 +168,28 @@ The supervisor payload contained `candor-core.exe` as a basename and no
 `executable` field. The network probe recorded two denied navigations: one
 external URL and one arbitrary local file.
 
+## Phase 2a: Window And Network Policy Extraction
+
+Date: 2026-07-12
+
+- Extracted JSON boundary primitives, renderer navigation policy, Chromium
+  network enforcement, and main-window construction into focused modules.
+- Security auditors now inspect the complete Electron runtime module set and
+  require each extracted security source explicitly.
+- Added unit coverage for packaged renderer pinning, loopback-only development,
+  blocked remote requests, and pathless denial diagnostics.
+
+| Check | Result |
+|---|---|
+| `npm test` | passed; 8 files and 35 tests |
+| `npm run electron:v3:build-main` | passed with recursive Electron TypeScript compilation |
+| `node scripts/m0-audit-electron.mjs` | passed |
+| `node scripts/audit-source-security.mjs --self-test` | passed; 76 checks and 5 mutation tests |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed |
+
+`electron/main.ts` decreased from 1,909 to 1,750 lines without changing preload,
+vault, recording, importer, or application-data behavior.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;

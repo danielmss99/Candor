@@ -5,6 +5,10 @@ import { relative, resolve } from "node:path";
 export const requiredSourcePaths = [
   "electron/main.ts",
   "electron/preload.cts",
+  "electron/core/json.ts",
+  "electron/security/network-policy.ts",
+  "electron/window/create-main-window.ts",
+  "electron/window/navigation-policy.ts",
   "electron/license-service.ts",
   "scripts/build-release-core.mjs",
   "scripts/electron-dev.mjs",
@@ -97,6 +101,15 @@ export function evaluateSourceSecurity(input) {
   }
 
   const main = "electron/main.ts";
+  const electronRuntimeSource = Object.entries(input.sources)
+    .filter(([sourcePath, content]) =>
+      sourcePath.startsWith("electron/") &&
+      sourcePath !== "electron/preload.cts" &&
+      !sourcePath.endsWith(".test.ts") &&
+      typeof content === "string"
+    )
+    .map(([, content]) => content)
+    .join("\n");
   for (const [id, pattern] of [
     ["insecure-content-disabled", "allowRunningInsecureContent: false"],
     ["permission-request-denied", "setPermissionRequestHandler"],
@@ -111,7 +124,7 @@ export function evaluateSourceSecurity(input) {
     ["sync-disabled", 'appendSwitch("disable-sync")'],
     ["loopback-dev-url", "CANDOR_V3_RENDERER_URL must use loopback HTTP without credentials"],
   ]) {
-    includes(`electron-main:${id}`, main, pattern, `Electron main requires ${id}`);
+    add(`electron-main:${id}`, electronRuntimeSource.includes(pattern), main, `Electron runtime requires ${id}`);
   }
   for (const [id, pattern] of [
     ["context-isolation", /contextIsolation\s*:\s*true/g],
@@ -119,7 +132,7 @@ export function evaluateSourceSecurity(input) {
     ["node-disabled", /nodeIntegration\s*:\s*false/g],
     ["web-security", /webSecurity\s*:\s*true/g],
   ]) {
-    const count = [...sourceText(input, main).matchAll(pattern)].length;
+    const count = [...electronRuntimeSource.matchAll(pattern)].length;
     add(
       `electron-main:${id}`,
       count >= 2,
@@ -127,13 +140,13 @@ export function evaluateSourceSecurity(input) {
       `all BrowserWindow configurations require ${id}; observed ${count}`,
     );
   }
-  excludes("electron-main:no-node-integration", main, /nodeIntegration\s*:\s*true/, "Node.js stays disabled");
-  excludes("electron-main:no-sandbox-disable", main, /sandbox\s*:\s*false/, "sandbox stays enabled");
-  excludes("electron-main:no-context-disable", main, /contextIsolation\s*:\s*false/, "context isolation stays enabled");
-  excludes("electron-main:no-auto-updater", main, /\bautoUpdater\b/, "background updater is absent");
-  excludes("electron-main:no-crash-upload", main, /crashReporter\.start\s*\(/, "crash upload is absent");
-  excludes("electron-main:no-shell-open", main, /shell\.openExternal\s*\(/, "main does not open arbitrary URLs");
-  excludes("electron-main:no-sandbox-flag", main, /--no-sandbox|ELECTRON_DISABLE_SANDBOX/, "sandbox bypass is absent");
+  add("electron-main:no-node-integration", !/nodeIntegration\s*:\s*true/.test(electronRuntimeSource), main, "Node.js stays disabled");
+  add("electron-main:no-sandbox-disable", !/sandbox\s*:\s*false/.test(electronRuntimeSource), main, "sandbox stays enabled");
+  add("electron-main:no-context-disable", !/contextIsolation\s*:\s*false/.test(electronRuntimeSource), main, "context isolation stays enabled");
+  add("electron-main:no-auto-updater", !/\bautoUpdater\b/.test(electronRuntimeSource), main, "background updater is absent");
+  add("electron-main:no-crash-upload", !/crashReporter\.start\s*\(/.test(electronRuntimeSource), main, "crash upload is absent");
+  add("electron-main:no-shell-open", !/shell\.openExternal\s*\(/.test(electronRuntimeSource), main, "main does not open arbitrary URLs");
+  add("electron-main:no-sandbox-flag", !/--no-sandbox|ELECTRON_DISABLE_SANDBOX/.test(electronRuntimeSource), main, "sandbox bypass is absent");
 
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [

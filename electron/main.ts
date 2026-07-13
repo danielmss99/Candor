@@ -1,20 +1,16 @@
-import { app, BrowserWindow, dialog, ipcMain, session, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { objectValue, stringField, type JsonValue } from "./core/json.js";
 import { LicenseService } from "./license-service.js";
-
-type JsonValue =
-  | null
-  | boolean
-  | number
-  | string
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+import { applyChromiumNetworkPolicy, installSessionHardening, NetworkGuard } from "./security/network-policy.js";
+import { createMainWindow } from "./window/create-main-window.js";
+import { createRendererNavigationPolicy } from "./window/navigation-policy.js";
 
 interface CoreResponse {
   id: number;
@@ -53,15 +49,12 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDev = !app.isPackaged;
 const expectedCoreProtocolVersion = "m0-jsonrpc-stdio-1";
-const configuredRendererDevUrl = process.env.CANDOR_V3_RENDERER_URL?.trim() ?? "";
-if (configuredRendererDevUrl && !isLoopbackHttpUrl(configuredRendererDevUrl)) {
-  throw new Error("CANDOR_V3_RENDERER_URL must use loopback HTTP without credentials.");
-}
-const useDevRenderer = isDev && configuredRendererDevUrl.length > 0;
-const rendererDevUrl = configuredRendererDevUrl || "http://127.0.0.1:5173";
-const rendererDevEndpoint = new URL(rendererDevUrl);
-const rendererFilePath = path.join(__dirname, "..", "renderer", "index.html");
-const rendererFileUrl = pathToFileURL(rendererFilePath).href;
+const rendererNavigation = createRendererNavigationPolicy({
+  isDev,
+  electronOutputDir: __dirname,
+  configuredDevUrl: process.env.CANDOR_V3_RENDERER_URL,
+});
+const useDevRenderer = rendererNavigation.useDevRenderer;
 const MAX_CORE_STDERR_BYTES = 64 * 1024;
 const smokeOutputPath = process.env.CANDOR_M0_SMOKE_OUT ?? "";
 const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
@@ -124,43 +117,6 @@ const rendererCoreMethods = new Set([
   "export.create",
 ]);
 
-function isLoopbackHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return (
-      url.protocol === "http:" &&
-      !url.username &&
-      !url.password &&
-      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isRendererDevRequest(value: string): boolean {
-  if (!useDevRenderer) return false;
-  try {
-    const url = new URL(value);
-    return (
-      (url.protocol === "http:" || url.protocol === "ws:") &&
-      url.hostname === rendererDevEndpoint.hostname &&
-      url.port === rendererDevEndpoint.port
-    );
-  } catch {
-    return false;
-  }
-}
-
-function isRendererDevNavigation(value: string): boolean {
-  if (!useDevRenderer) return false;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" && url.origin === rendererDevEndpoint.origin;
-  } catch {
-    return false;
-  }
-}
 const privateCoreMethods = new Set([
   ...rendererCoreMethods,
   "core.shutdown",
@@ -188,16 +144,7 @@ let licenseService: LicenseService | null = null;
 let coreHasStarted = false;
 let handshakePromise: Promise<void> | null = null;
 let nextRpcId = 1;
-const networkGuard = {
-  totalRequests: 0,
-  localAllowedRequests: 0,
-  externalAllowedRequests: 0,
-  blockedRequests: 0,
-  blockedSamples: [] as string[],
-  deniedWindowOpenRequests: 0,
-  deniedNavigationRequests: 0,
-  deniedNavigationSamples: [] as string[],
-};
+const networkGuard = new NetworkGuard();
 const pending = new Map<
   number,
   {
@@ -216,15 +163,7 @@ const coreSupervisor: CoreSupervisorState = {
   lastHandshake: null,
 };
 
-app.commandLine.appendSwitch("disable-background-networking");
-app.commandLine.appendSwitch("disable-component-update");
-app.commandLine.appendSwitch("disable-domain-reliability");
-app.commandLine.appendSwitch("disable-features", "AutofillServerCommunication,OptimizationHints");
-app.commandLine.appendSwitch("no-proxy-server");
-app.commandLine.appendSwitch("disable-sync");
-if (isSmokeMode) {
-  app.commandLine.appendSwitch("disable-gpu");
-}
+applyChromiumNetworkPolicy(app.commandLine, isSmokeMode);
 
 function coreExecutableName(): string {
   return process.platform === "win32" ? "candor-core.exe" : "candor-core";
@@ -437,18 +376,6 @@ function requireCoreResult(response: CoreResponse, method: string): JsonValue {
   return response.result ?? null;
 }
 
-function objectValue(value: JsonValue): Record<string, JsonValue> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return {};
-  }
-  return value;
-}
-
-function stringField(value: JsonValue, field: string): string {
-  const child = objectValue(value)[field];
-  return typeof child === "string" ? child : "";
-}
-
 type LocalReportFormat = "markdown" | "docx" | "pdf";
 
 interface LocalExportSpecification {
@@ -562,104 +489,18 @@ function getLicenseService(): LicenseService {
   return licenseService;
 }
 
-function installSessionHardening(): void {
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(false);
-  });
-  session.defaultSession.setPermissionCheckHandler(() => false);
-
-  session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
-    networkGuard.totalRequests += 1;
-    const url = new URL(details.url);
-    const isLocalDev = isRendererDevRequest(details.url);
-    const allowed =
-      url.protocol === "file:" ||
-      url.protocol === "devtools:" ||
-      url.protocol === "data:" ||
-      isLocalDev;
-    if (allowed) {
-      if (url.protocol === "file:" || url.protocol === "devtools:" || url.protocol === "data:") {
-        networkGuard.localAllowedRequests += 1;
-      } else {
-        networkGuard.externalAllowedRequests += 1;
-      }
-    } else {
-      networkGuard.blockedRequests += 1;
-      if (networkGuard.blockedSamples.length < 5) {
-        networkGuard.blockedSamples.push(`${url.protocol}//${url.hostname}`);
-      }
-    }
-    callback({ cancel: !allowed });
-  });
-}
-
 function networkGuardSnapshot(): JsonValue {
-  return {
-    totalRequests: networkGuard.totalRequests,
-    localAllowedRequests: networkGuard.localAllowedRequests,
-    externalAllowedRequests: networkGuard.externalAllowedRequests,
-    blockedRequests: networkGuard.blockedRequests,
-    blockedSamples: [...networkGuard.blockedSamples],
-    deniedWindowOpenRequests: networkGuard.deniedWindowOpenRequests,
-    deniedNavigationRequests: networkGuard.deniedNavigationRequests,
-    deniedNavigationSamples: [...networkGuard.deniedNavigationSamples],
-  };
+  return networkGuard.snapshot();
 }
 
 function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
-  const preload = path.join(__dirname, "preload.cjs");
-  mainWindow = new BrowserWindow({
-    width: options.smoke ? smokeWindowWidth : 1180,
-    height: options.smoke ? smokeWindowHeight : 760,
-    minWidth: 920,
-    minHeight: 620,
-    title: "Candor",
-    show: false,
-    webPreferences: {
-      preload,
-      contextIsolation: true,
-      sandbox: true,
-      nodeIntegration: false,
-      webSecurity: true,
-      allowRunningInsecureContent: false,
-      devTools: useDevRenderer,
-    },
-  });
-
-  mainWindow.webContents.setWindowOpenHandler((details) => {
-    networkGuard.deniedWindowOpenRequests += 1;
-    if (networkGuard.deniedNavigationSamples.length < 5) {
-      const category = details.url.startsWith("file:") ? "local-file" : "external";
-      networkGuard.deniedNavigationSamples.push(`window-open-denied:${category}`);
-    }
-    return { action: "deny" };
-  });
-  mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
-    const allowed = useDevRenderer
-      ? isRendererDevNavigation(targetUrl)
-      : targetUrl === rendererFileUrl || targetUrl.startsWith(`${rendererFileUrl}#`);
-    if (!allowed) {
-      networkGuard.deniedNavigationRequests += 1;
-      if (networkGuard.deniedNavigationSamples.length < 5) {
-        const category = targetUrl.startsWith("file:") ? "local-file" : "external";
-        networkGuard.deniedNavigationSamples.push(`navigation-denied:${category}`);
-      }
-      event.preventDefault();
-    }
-  });
-  mainWindow.webContents.on("before-input-event", (event, input) => {
-    if (!useDevRenderer && input.control && input.shift && input.key.toLowerCase() === "i") {
-      event.preventDefault();
-    }
-  });
-
-  if (useDevRenderer) {
-    void mainWindow.loadURL(rendererDevUrl);
-  } else {
-    void mainWindow.loadFile(rendererFilePath);
-  }
-  mainWindow.once("ready-to-show", () => {
-    if (!options.smoke) mainWindow?.show();
+  mainWindow = createMainWindow({
+    preloadPath: path.join(__dirname, "preload.cjs"),
+    navigation: rendererNavigation,
+    networkGuard,
+    smoke: options.smoke,
+    smokeWidth: smokeWindowWidth,
+    smokeHeight: smokeWindowHeight,
   });
   return mainWindow;
 }
@@ -1317,7 +1158,7 @@ async function runNetworkBlockProbe(windowRef: BrowserWindow): Promise<JsonValue
 
 async function runM0Smoke(): Promise<void> {
   try {
-    installSessionHardening();
+    installSessionHardening(networkGuard, (value) => rendererNavigation.isDevRequest(value));
     await ensureCoreHandshake();
     const restartExercise = await exerciseCoreRestartForSmoke();
     const designFixture = await seedDesignSmokeMeeting();
@@ -1886,7 +1727,7 @@ app.whenReady().then(async () => {
     void runM0Smoke();
     return;
   }
-  installSessionHardening();
+  installSessionHardening(networkGuard, (value) => rendererNavigation.isDevRequest(value));
   try {
     await ensureCoreHandshake();
   } catch (error) {
