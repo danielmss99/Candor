@@ -22,7 +22,7 @@ export type CompactMeetingPane = "transcript" | "notes" | "ai";
 export const EXPECTED_PROTOCOL_VERSION = "m0-jsonrpc-stdio-1";
 export const DEFAULT_MODEL = "base.en";
 export const LIBRARY_PAGE_SIZE = 50;
-export const TRANSCRIPT_PAGE_SIZE = 200;
+export const TRANSCRIPT_PAGE_SIZE = 100;
 
 export interface RecordingSummary {
   recordingId: string;

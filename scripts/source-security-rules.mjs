@@ -19,6 +19,7 @@ export const requiredSourcePaths = [
   "electron/ipc/models-ipc.ts",
   "electron/ipc/register-ipc.ts",
   "electron/security/input-limits.ts",
+  "electron/security/validate-core-input.ts",
   "electron/security/validate-sender.ts",
   "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
@@ -188,6 +189,12 @@ export function evaluateSourceSecurity(input) {
     !/candor-core:call/.test(electronRuntimeSource),
     "electron/ipc/core-ipc.ts",
     "main registers fixed product channels only",
+  );
+  includes(
+    "electron-main:validated-core-input",
+    "electron/ipc/core-ipc.ts",
+    "validateRendererCoreParams(operation.method, params ?? null)",
+    "each named core channel validates its payload before crossing into Rust",
   );
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";

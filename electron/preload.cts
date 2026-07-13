@@ -82,7 +82,7 @@ contextBridge.exposeInMainWorld("candor", {
       ipcRenderer.invoke("candor-core:recording-durable-read", { recordingId }) as Promise<JsonValue>,
     recordingDurableReplayManifest: (recordingId: string) =>
       ipcRenderer.invoke("candor-core:recording-durable-replay-manifest", { recordingId }) as Promise<JsonValue>,
-    recordingDurableTranscriptPage: (recordingId: string, offset = 0, limit = 200) =>
+    recordingDurableTranscriptPage: (recordingId: string, offset = 0, limit = 100) =>
       ipcRenderer.invoke("candor-core:recording-durable-transcript-page", { recordingId, offset, limit }) as Promise<JsonValue>,
     recordingPrivacyReceipt: (recordingId: string) =>
       ipcRenderer.invoke("candor-core:recording-privacy-receipt", { recordingId }) as Promise<JsonValue>,
