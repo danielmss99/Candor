@@ -76,6 +76,10 @@ function redactCoreDiagnostic(value: string): string {
     .replace(/\b(?:sk-(?:live|prod)-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b/g, "<secret>");
 }
 
+function executableBasename(value: string): string {
+  return path.win32.basename(value.replaceAll("/", "\\"));
+}
+
 export class CoreClient {
   private child: ChildProcessWithoutNullStreams | null = null;
   private readonly registry = new RequestRegistry<CoreResponse>();
@@ -101,7 +105,7 @@ export class CoreClient {
       state: this.supervisor.state,
       restartCount: this.supervisor.restartCount,
       startedAt: this.supervisor.startedAt,
-      executableName: this.supervisor.executable ? path.basename(this.supervisor.executable) : null,
+      executableName: this.supervisor.executable ? executableBasename(this.supervisor.executable) : null,
       rawPathExposed: false,
       pid: this.supervisor.pid,
       lastExit: this.supervisor.lastExit,

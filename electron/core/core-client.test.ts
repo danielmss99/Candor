@@ -170,16 +170,19 @@ describe("core client process boundary", () => {
   });
 
   it("records a safe failed state when process spawn throws synchronously", async () => {
-    const client = new CoreClient({
-      executablePath: () => "C:\\private\\missing-core.exe",
-      allowedMethods,
-      isDev: false,
-      spawnCore: () => { throw new Error("C:\\private\\missing-core.exe is missing"); },
-    });
+    for (const executablePath of ["C:\\private\\missing-core.exe", "/private/missing-core.exe"]) {
+      const client = new CoreClient({
+        executablePath: () => executablePath,
+        allowedMethods,
+        isDev: false,
+        spawnCore: () => { throw new Error(`${executablePath} is missing`); },
+      });
 
-    await expect(client.call("core.status")).rejects.toMatchObject({ code: "CORE_UNAVAILABLE" });
-    expect(client.snapshot()).toMatchObject({ state: "failed", restartCount: 0 });
-    expect(JSON.stringify(client.rendererSnapshot())).not.toContain("private");
+      await expect(client.call("core.status")).rejects.toMatchObject({ code: "CORE_UNAVAILABLE" });
+      expect(client.snapshot()).toMatchObject({ state: "failed", restartCount: 0 });
+      expect(client.rendererSnapshot()).toMatchObject({ executableName: "missing-core.exe", rawPathExposed: false });
+      expect(JSON.stringify(client.rendererSnapshot())).not.toContain("private");
+    }
   });
 
   it("finalizes an active capture before allowing shutdown", async () => {
