@@ -1,5 +1,8 @@
 # V4 Renderer And GUI Verification
 
+Tracked before/after workspace captures are available in
+[`screenshots/README.md`](screenshots/README.md).
+
 Date: 2026-07-13
 
 Status: passed for the implemented Phase 4 and Phase 5 scope
