@@ -4,6 +4,7 @@ import {
   meetingTabToDetailSection,
   routeToWorkspaceView,
   settingsRouteSection,
+  workspaceViewToRoute,
 } from "./navigation";
 
 describe("typed navigation", () => {
@@ -26,5 +27,13 @@ describe("typed navigation", () => {
     expect(settingsRouteSection("recording")).toEqual({ name: "settings", section: "audio" });
     expect(settingsRouteSection("models")).toEqual({ name: "settings", section: "advanced" });
     expect(settingsRouteSection("privacy")).toEqual({ name: "settings", section: "advanced" });
+  });
+
+  it("requires a selected recording for review and export routes", () => {
+    expect(workspaceViewToRoute("review", "", "summary", "general")).toEqual({ name: "meetings" });
+    expect(workspaceViewToRoute("review", "recording-1", "summary", "general"))
+      .toEqual({ name: "review", recordingId: "recording-1" });
+    expect(workspaceViewToRoute("export", "recording-1", "summary", "general"))
+      .toEqual({ name: "export", recordingId: "recording-1" });
   });
 });

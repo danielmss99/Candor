@@ -26,6 +26,7 @@ import {
   useMeetingWorkspace,
 } from "../features/meetings/useMeetingWorkspace";
 import { shouldShowActivationPrompt } from "../features/licensing/access-policy";
+import { useAppNavigation } from "./navigation";
 import {
   DEFAULT_MODEL,
   asArray,
@@ -44,7 +45,6 @@ import {
   type AiMode,
   type AppView,
   type CompactMeetingPane,
-  type DetailSection,
   type ExportFormat,
   type ExportPaperSize,
   type InstructAssetKind,
@@ -55,8 +55,6 @@ import {
   type MarkedMoment,
   type OnboardingStep,
   type RecapItem,
-  type ReviewSection,
-  type SettingsSection,
 } from "../core/contracts";
 import type { JobKind } from "../state/operation-machines";
 import { ExclusiveActionRegistry } from "../state/request-coordinator";
@@ -67,10 +65,6 @@ export function CandorWorkspace() {
   const client = useMemo(() => (api ? new CandorClient(api) : null), [api]);
   const exclusiveActions = useRef(new ExclusiveActionRegistry());
   const startupLoaded = useRef(false);
-  const [view, setView] = useState<AppView>("meeting");
-  const [detailSection, setDetailSection] = useState<DetailSection>("summary");
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>("general");
-  const [reviewSection, setReviewSection] = useState<ReviewSection>("summary");
   const [libraryFilter, setLibraryFilter] = useState<LibraryFilter>("all");
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep>("activate");
   const [licenseStatus, setLicenseStatus] = useState<JsonObject>({});
@@ -154,6 +148,16 @@ export function CandorWorkspace() {
     search: searchMeetingLibrary,
     updateNotes,
   } = meetingWorkspace;
+  const {
+    view,
+    detailSection,
+    settingsSection,
+    reviewSection,
+    setView,
+    setDetailSection,
+    setSettingsSection,
+    setReviewSection,
+  } = useAppNavigation(selectedRecordingId);
 
   const {
     coreStatus,
@@ -821,7 +825,7 @@ export function CandorWorkspace() {
     setSelectedRecordingId(recordingId);
     setOpenMeetingIds((current) => [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3));
     await loadSelectedRecording(recordingId);
-    setView(target);
+    setView(target, recordingId);
   }
 
   function closeMeetingTab(recordingId: string) {

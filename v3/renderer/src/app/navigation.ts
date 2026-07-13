@@ -1,4 +1,6 @@
+import { useCallback, useState } from "react";
 import type {
+  AppView,
   DetailSection,
   ReviewSection,
   SettingsSection,
@@ -47,4 +49,55 @@ export function settingsRouteSection(section: SettingsSection): AppRoute & { nam
 
 export function reviewRoute(recordingId: string, _section: ReviewSection): AppRoute {
   return { name: "review", recordingId };
+}
+
+export function workspaceViewToRoute(
+  view: AppView,
+  recordingId: string,
+  detailSection: DetailSection,
+  settingsSection: SettingsSection,
+): AppRoute {
+  if (view === "home") return { name: "home" };
+  if (view === "library") return { name: "meetings" };
+  if (view === "meeting") return { name: "live" };
+  if (view === "settings") return settingsRouteSection(settingsSection);
+  if (!recordingId) return { name: "meetings" };
+  if (view === "detail") return { name: "meeting", recordingId, tab: detailSectionToMeetingTab(detailSection) };
+  if (view === "review") return { name: "review", recordingId };
+  return { name: "export", recordingId };
+}
+
+export function useAppNavigation(selectedRecordingId: string) {
+  const [route, setRoute] = useState<AppRoute>({ name: "live" });
+  const [detailSection, setDetailSectionState] = useState<DetailSection>("summary");
+  const [settingsSection, setSettingsSectionState] = useState<SettingsSection>("general");
+  const [reviewSection, setReviewSection] = useState<ReviewSection>("summary");
+
+  const setView = useCallback((view: AppView, recordingId = selectedRecordingId) => {
+    setRoute(workspaceViewToRoute(view, recordingId, detailSection, settingsSection));
+  }, [detailSection, selectedRecordingId, settingsSection]);
+
+  const setDetailSection = useCallback((section: DetailSection) => {
+    setDetailSectionState(section);
+    setRoute((current) => current.name === "meeting"
+      ? { ...current, tab: detailSectionToMeetingTab(section) }
+      : current);
+  }, []);
+
+  const setSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSectionState(section);
+    setRoute((current) => current.name === "settings" ? settingsRouteSection(section) : current);
+  }, []);
+
+  return {
+    route,
+    view: routeToWorkspaceView(route) as AppView,
+    detailSection,
+    settingsSection,
+    reviewSection,
+    setView,
+    setDetailSection,
+    setSettingsSection,
+    setReviewSection,
+  };
 }
