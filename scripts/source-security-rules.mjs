@@ -20,6 +20,7 @@ export const requiredSourcePaths = [
   "electron/ipc/register-ipc.ts",
   "electron/security/input-limits.ts",
   "electron/security/validate-sender.ts",
+  "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
   "electron/window/create-main-window.ts",
   "electron/window/navigation-policy.ts",
@@ -288,6 +289,7 @@ function withSource(input, sourcePath, value) {
 
 export function runSourceSecuritySelfTest(input) {
   const main = sourceText(input, "electron/main.ts");
+  const mainWindow = sourceText(input, "electron/window/create-main-window.ts");
   const preload = sourceText(input, "electron/preload.cts");
   const importer = sourceText(input, "crates/candor-core/src/v2_importer.rs");
   const proofScript = sourceText(input, "scripts/m0-packaged-smoke.mjs");
@@ -301,7 +303,11 @@ export function runSourceSecuritySelfTest(input) {
     },
     {
       name: "sandbox-disabled",
-      input: withSource(input, "electron/main.ts", main.replace("sandbox: true", "sandbox: false")),
+      input: withSource(
+        input,
+        "electron/window/create-main-window.ts",
+        mainWindow.replace("sandbox: true", "sandbox: false"),
+      ),
       expectedFailure: "electron-main:sandbox",
     },
     {

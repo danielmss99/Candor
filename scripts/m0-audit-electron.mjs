@@ -23,6 +23,7 @@ const files = [
   "electron/ipc/register-ipc.ts",
   "electron/security/input-limits.ts",
   "electron/security/validate-sender.ts",
+  "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
   "electron/window/create-main-window.ts",
   "electron/window/navigation-policy.ts",

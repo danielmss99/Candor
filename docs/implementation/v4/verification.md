@@ -242,6 +242,29 @@ Date: 2026-07-12
 `electron/main.ts` decreased from 1,410 to 986 lines. The renderer still receives
 only basenames and custody facts from native import/export operations.
 
+## Phase 2d: Composition Root And Smoke Harness
+
+Date: 2026-07-12
+
+- Moved the packaged runtime, renderer, document, navigation, screenshot, and
+  path-leak proof harness to `electron/smoke/m0-smoke.ts`.
+- `electron/main.ts` now owns only early command-line policy, dependency wiring,
+  IPC registration, window creation, and application lifecycle.
+- The smoke harness receives explicit core, window, license, network, and output
+  dependencies; it no longer creates a second application composition root.
+- Retargeted the sandbox mutation test to the actual window-policy module so the
+  source audit remains non-vacuous after extraction.
+
+| Check | Result |
+|---|---|
+| `npm test` | passed; 14 files and 50 tests |
+| `npm run electron:v3:build-main` | passed |
+| Electron hardening audit | passed |
+| source-security audit | passed; 91 checks and 5 mutation tests |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed after module relocation |
+
+`electron/main.ts` is now 126 lines, below the V4 target of 250 lines.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;

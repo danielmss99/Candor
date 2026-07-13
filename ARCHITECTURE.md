@@ -44,9 +44,10 @@ Prohibited renderer capabilities:
 ### Preload
 
 The preload translates named product operations into allowlisted IPC. Current
-operations are explicit functions even where the underlying transitional core
-channel still uses a method allowlist. V4 replaces that transitional channel
-with domain IPC modules and runtime schemas without widening the renderer.
+operations are explicit functions. Native export, import, licensing, model, and
+shell operations are registered in domain IPC modules and validate the active
+main-frame sender. The transitional core channel remains method-allowlisted
+until Phase 3 maps each preload operation to a named domain channel.
 
 ### Electron Main
 
@@ -82,10 +83,13 @@ diagnostics, or unbounded payloads.
 ## Transport
 
 The child process uses newline-delimited JSON on stdin and stdout. No localhost
-TCP port is opened. The current protocol reports `m0-jsonrpc-stdio-1`, includes a
-version in every response, and enforces a maximum frame size. The V4 protocol
-work adds UUID request IDs, duplicate rejection, method-specific timeouts,
-runtime request and response validation, and a formal handshake migration.
+TCP port is opened. The current protocol reports `m0-jsonrpc-stdio-1`; Electron
+requests include UUID correlation, protocol version, and send time, while the
+compatibility `id` is echoed by Rust. Electron bounds request and response
+frames, validates every response envelope at runtime, rejects unknown or
+duplicate responses, and applies method-specific timeouts. Phase 3 makes the
+additive request metadata mandatory in Rust and adds core-side duplicate-ID
+rejection.
 
 Protocol faults are application states, not console-only errors. Malformed,
 oversized, timed-out, crashed, hung, and incompatible core states must reach the
