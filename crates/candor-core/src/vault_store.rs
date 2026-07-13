@@ -178,10 +178,10 @@ impl VaultStore {
         #[cfg(not(feature = "sqlcipher-vault"))]
         {
             let _ = params;
-            return Err(VaultStoreError::new(
+            Err(VaultStoreError::new(
                 "SQLCIPHER_FEATURE_DISABLED",
                 "candor-core was built without the sqlcipher-vault feature",
-            ));
+            ))
         }
 
         #[cfg(feature = "sqlcipher-vault")]
@@ -219,10 +219,10 @@ impl VaultStore {
     pub fn open_local(&self) -> Result<Value, VaultStoreError> {
         #[cfg(not(feature = "sqlcipher-vault"))]
         {
-            return Err(VaultStoreError::new(
+            Err(VaultStoreError::new(
                 "SQLCIPHER_FEATURE_DISABLED",
                 "candor-core was built without the sqlcipher-vault feature",
-            ));
+            ))
         }
 
         #[cfg(feature = "sqlcipher-vault")]
@@ -234,10 +234,10 @@ impl VaultStore {
     pub fn open_with_os_key_proof(&self) -> Result<Value, VaultStoreError> {
         #[cfg(not(feature = "sqlcipher-vault"))]
         {
-            return Err(VaultStoreError::new(
+            Err(VaultStoreError::new(
                 "SQLCIPHER_FEATURE_DISABLED",
                 "candor-core was built without the sqlcipher-vault feature",
-            ));
+            ))
         }
 
         #[cfg(feature = "sqlcipher-vault")]
@@ -255,10 +255,10 @@ impl VaultStore {
         {
             let _ = correct;
             let _ = wrong;
-            return Err(VaultStoreError::new(
+            Err(VaultStoreError::new(
                 "SQLCIPHER_FEATURE_DISABLED",
                 "candor-core was built without the sqlcipher-vault feature",
-            ));
+            ))
         }
 
         #[cfg(feature = "sqlcipher-vault")]
@@ -286,10 +286,10 @@ impl VaultStore {
     pub fn proof_passphrase_fallback(&self) -> Result<Value, VaultStoreError> {
         #[cfg(not(feature = "sqlcipher-vault"))]
         {
-            return Err(VaultStoreError::new(
+            Err(VaultStoreError::new(
                 "SQLCIPHER_FEATURE_DISABLED",
                 "candor-core was built without the sqlcipher-vault feature",
-            ));
+            ))
         }
 
         #[cfg(feature = "sqlcipher-vault")]
@@ -344,14 +344,14 @@ impl VaultStore {
         #[cfg(not(feature = "sqlcipher-vault"))]
         {
             let _ = summary;
-            return json!({
+            json!({
                 "available": false,
                 "state": "pending-sqlcipher-feature",
                 "indexed": false,
                 "backend": "sqlcipher",
                 "keyMaterialExposedToRenderer": false,
                 "rawPathExposed": false
-            });
+            })
         }
 
         #[cfg(feature = "sqlcipher-vault")]
@@ -382,13 +382,13 @@ impl VaultStore {
     pub fn recording_index_status(&self) -> Value {
         #[cfg(not(feature = "sqlcipher-vault"))]
         {
-            return json!({
+            json!({
                 "available": false,
                 "state": "pending-sqlcipher-feature",
                 "backend": "sqlcipher",
                 "keyMaterialExposedToRenderer": false,
                 "rawPathExposed": false
-            });
+            })
         }
 
         #[cfg(feature = "sqlcipher-vault")]
