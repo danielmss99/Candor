@@ -80,6 +80,24 @@ root, remap repository and home prefixes, stage only the finished binary under
 full artifact audit confirmed that the rebuilt core contains neither the local
 repository path nor `C:/Users/danny`.
 
+## Phase 1c: Legacy Desktop Archive
+
+Date: 2026-07-12
+
+| Check | Result |
+|---|---|
+| Annotated tag `archive/tauri-v2` | created at `b29061334cff9c52654ad0f0528fee179151ed47` and pushed to `origin` |
+| Legacy source removal | removed the former native shell, root renderer, root Vite entry, root TypeScript entry configs, legacy launch scripts, workflow, and stale handover/store files |
+| `npm ci` | passed; 435 packages; 0 known npm vulnerabilities |
+| `npm run m0:ci-contract-smoke` | passed; Electron workflow is sole active workflow and legacy paths are forbidden |
+| `npm run build` | passed after making `v3/renderer/tsconfig.json` self-contained |
+| `npm run v3:verify` | passed; full staged proof chain including v2 importer |
+
+No runtime data directory, vault schema, recording store, or importer source was
+deleted. `crates/candor-core/src/v2_importer.rs` remains active, canonicalizes
+the selected source, constrains referenced audio to that source, copies into the
+managed recording store, and continues to report `originalsUntouched: true`.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;

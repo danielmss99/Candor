@@ -1,7 +1,0 @@
-<!-- For future MSIX packaging only. Tauri v2 currently documents Microsoft Store
-     submission through Win32 EXE/MSI installers. If Candor is wrapped as MSIX,
-     include microphone access in the package manifest capabilities. -->
-<Capabilities>
-  <Capability Name="internetClient" />
-  <DeviceCapability Name="microphone" />
-</Capabilities>

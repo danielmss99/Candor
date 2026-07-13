@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,6 +28,41 @@ const m4LocalInstructPreflightDoc = readFileSync(resolve(repoRoot, "docs", "proo
 const m4RealLocalInstruct = readFileSync(resolve(repoRoot, "scripts", "m4-real-local-instruct-proof.mjs"), "utf8");
 const m4RealLocalInstructDoc = readFileSync(resolve(repoRoot, "docs", "proofs", "M4_REAL_LOCAL_INSTRUCT_PROOF.md"), "utf8");
 const packageJson = readFileSync(resolve(repoRoot, "package.json"), "utf8");
+const v2Importer = readFileSync(
+  resolve(repoRoot, "crates", "candor-core", "src", "v2_importer.rs"),
+  "utf8",
+);
+
+const forbiddenLegacyPaths = [
+  "src-tauri",
+  "src",
+  "scripts/tauri-dev.ps1",
+  "scripts/tauri-release.ps1",
+  ".github/workflows/tauri-build.yml",
+  "vite.config.ts",
+  "tsconfig.json",
+  "tsconfig.node.json",
+  "index.html",
+  "dev.ps1",
+];
+for (const legacyPath of forbiddenLegacyPaths) {
+  if (existsSync(resolve(repoRoot, legacyPath))) {
+    throw new Error(`Legacy desktop path must stay archived: ${legacyPath}`);
+  }
+}
+
+const workflowNames = readdirSync(resolve(repoRoot, ".github", "workflows"))
+  .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .sort();
+if (workflowNames.length !== 1 || workflowNames[0] !== "v3-m0.yml") {
+  throw new Error(`Electron CI must be the sole active workflow: ${workflowNames.join(", ")}`);
+}
+if (packageJson.includes("@tauri-apps/") || packageJson.includes('"tauri')) {
+  throw new Error("Legacy desktop package scripts or dependencies remain active.");
+}
+if (!v2Importer.includes('"originalsUntouched": true') || !v2Importer.includes("fs::canonicalize")) {
+  throw new Error("The path-contained, originals-untouched v2 importer must remain active.");
+}
 
 function requireIncludes(pattern, label) {
   if (!workflow.includes(pattern)) {
