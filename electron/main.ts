@@ -1,61 +1,31 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { CoreClient } from "./core/core-client.js";
 import { objectValue, stringField, type JsonValue } from "./core/json.js";
+import {
+  privateCoreMethods,
+  rendererCoreMethods,
+  rendererCoreTimeoutMs,
+  type CoreResponse,
+} from "./core/protocol.js";
 import { LicenseService } from "./license-service.js";
 import { applyChromiumNetworkPolicy, installSessionHardening, NetworkGuard } from "./security/network-policy.js";
 import { createMainWindow } from "./window/create-main-window.js";
 import { createRendererNavigationPolicy } from "./window/navigation-policy.js";
 
-interface CoreResponse {
-  id: number;
-  protocolVersion: string;
-  ok: boolean;
-  result?: JsonValue;
-  error?: {
-    code: string;
-    message: string;
-  };
-}
-
-type CoreSupervisorLifecycle = "stopped" | "starting" | "running" | "stopping" | "exited" | "failed";
-
-interface CoreSupervisorState {
-  state: CoreSupervisorLifecycle;
-  restartCount: number;
-  startedAt: string | null;
-  executable: string | null;
-  pid: number | null;
-  lastExit: {
-    code: number | null;
-    signal: string | null;
-    at: string;
-    error?: string;
-  } | null;
-  lastHandshake: {
-    ok: boolean;
-    at: string;
-    version?: JsonValue;
-    error?: string;
-  } | null;
-}
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const isDev = !app.isPackaged;
-const expectedCoreProtocolVersion = "m0-jsonrpc-stdio-1";
 const rendererNavigation = createRendererNavigationPolicy({
   isDev,
   electronOutputDir: __dirname,
   configuredDevUrl: process.env.CANDOR_V3_RENDERER_URL,
 });
 const useDevRenderer = rendererNavigation.useDevRenderer;
-const MAX_CORE_STDERR_BYTES = 64 * 1024;
 const smokeOutputPath = process.env.CANDOR_M0_SMOKE_OUT ?? "";
 const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
 const isSmokeMode = smokeOutputPath.length > 0;
@@ -71,97 +41,9 @@ if (isSmokeMode && smokeScaleFactor !== 1) {
 if (isSmokeMode && process.env.CANDOR_V3_DATA_DIR) {
   app.setPath("userData", path.join(process.env.CANDOR_V3_DATA_DIR, "electron-smoke"));
 }
-const rendererCoreMethods = new Set([
-  "core.ping",
-  "core.version",
-  "core.capabilities",
-  "core.status",
-  "vault.openLocal",
-  "vault.status",
-  "privacy.auditSnapshot",
-  "privacy.capabilities",
-  "updates.status",
-  "import.v2.status",
-  "consent.status",
-  "consent.acknowledge",
-  "capture.status",
-  "capture.devices",
-  "capture.startMic",
-  "capture.startSystem",
-  "capture.startMicAndSystem",
-  "capture.stop",
-  "models.status",
-  "models.listLocal",
-  "models.verifyLocal",
-  "ai.status",
-  "ai.askHeuristic",
-  "ai.recapHeuristic",
-  "ai.instructAssetsStatus",
-  "ai.instructStatus",
-  "ai.askInstruct",
-  "ai.recapInstruct",
-  "ai.schedulerStatus",
-  "transcription.status",
-  "transcription.runLocal",
-  "recording.durable.status",
-  "recording.durable.listPage",
-  "recording.durable.read",
-  "recording.durable.replayManifest",
-  "recording.durable.transcriptPage",
-  "recording.privacyReceipt",
-  "recording.durable.readAudioChunk",
-  "recording.durable.search",
-  "recording.notes.read",
-  "recording.notes.save",
-  "retention.status",
-  "export.create",
-]);
-
-const privateCoreMethods = new Set([
-  ...rendererCoreMethods,
-  "core.shutdown",
-  "models.importStart",
-  "models.importChunk",
-  "models.importFinish",
-  "models.importAbort",
-  "ai.instructAssetsImportFromPath",
-  "recording.durable.start",
-  "recording.durable.writeTranscriptSegment",
-  "recording.durable.finish",
-  "import.v2.fromFolder",
-  "import.v2.proofSynthetic",
-]);
-const rendererCoreTimeoutMs = new Map<string, number>([
-  ["ai.askInstruct", 60_000],
-  ["ai.recapInstruct", 60_000],
-  ["models.verifyLocal", 120_000],
-  ["transcription.runLocal", 120_000],
-]);
-
 let mainWindow: BrowserWindow | null = null;
-let core: ChildProcessWithoutNullStreams | null = null;
 let licenseService: LicenseService | null = null;
-let coreHasStarted = false;
-let handshakePromise: Promise<void> | null = null;
-let nextRpcId = 1;
 const networkGuard = new NetworkGuard();
-const pending = new Map<
-  number,
-  {
-    resolve: (value: CoreResponse) => void;
-    reject: (reason: Error) => void;
-    timeout: NodeJS.Timeout;
-  }
->();
-const coreSupervisor: CoreSupervisorState = {
-  state: "stopped",
-  restartCount: 0,
-  startedAt: null,
-  executable: null,
-  pid: null,
-  lastExit: null,
-  lastHandshake: null,
-};
 
 applyChromiumNetworkPolicy(app.commandLine, isSmokeMode);
 
@@ -179,194 +61,20 @@ function corePath(): string {
   return path.join(process.resourcesPath, "bin", coreExecutableName());
 }
 
-function rejectPending(reason: Error): void {
-  for (const entry of pending.values()) {
-    clearTimeout(entry.timeout);
-    entry.reject(reason);
-  }
-  pending.clear();
-}
+const coreClient = new CoreClient({
+  executablePath: corePath,
+  allowedMethods: privateCoreMethods,
+  isDev,
+});
+const callCore = (method: string, params: JsonValue = null, timeoutMs = 5000) =>
+  coreClient.call(method, params, timeoutMs);
+const ensureCoreHandshake = () => coreClient.ensureHandshake();
+const supervisorSnapshot = () => coreClient.snapshot();
+const requestCoreShutdown = () => coreClient.shutdown();
+const exerciseCoreRestartForSmoke = () => coreClient.exerciseRestartForSmoke();
 
 function asErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function noteCoreStart(executable: string): void {
-  if (coreHasStarted) {
-    coreSupervisor.restartCount += 1;
-  }
-  coreHasStarted = true;
-  coreSupervisor.state = "starting";
-  coreSupervisor.startedAt = new Date().toISOString();
-  coreSupervisor.executable = executable;
-  coreSupervisor.pid = null;
-  coreSupervisor.lastExit = null;
-  coreSupervisor.lastHandshake = null;
-}
-
-function supervisorSnapshot(): JsonValue {
-  return {
-    state: coreSupervisor.state,
-    restartCount: coreSupervisor.restartCount,
-    startedAt: coreSupervisor.startedAt,
-    executableName: coreSupervisor.executable ? path.basename(coreSupervisor.executable) : null,
-    rawPathExposed: false,
-    pid: coreSupervisor.pid,
-    lastExit: coreSupervisor.lastExit,
-    lastHandshake: coreSupervisor.lastHandshake,
-  };
-}
-
-function redactCoreDiagnostic(value: string): string {
-  return value
-    .replace(/\b[A-Za-z]:[\\/][^\r\n\t"']+/g, "<path>")
-    .replace(/(?:^|\s)\/(?:Users|home|root|tmp|var|private)\/[^\s"']+/g, " <path>")
-    .replace(/\b(?:sk-(?:live|prod)-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b/g, "<secret>");
-}
-
-function startCore(): void {
-  if (core) return;
-
-  const executable = corePath();
-  noteCoreStart(executable);
-  const child = spawn(executable, [], {
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    env: {
-      ...process.env,
-      CANDOR_CORE_TRANSPORT: "stdio-json-lines",
-      CANDOR_NETWORK_POLICY: "disabled-by-default",
-    },
-  });
-  core = child;
-  coreSupervisor.pid = child.pid ?? null;
-
-  const stdout = createInterface({ input: child.stdout });
-  stdout.on("line", (line) => {
-    let response: CoreResponse;
-    try {
-      response = JSON.parse(line) as CoreResponse;
-    } catch {
-      return;
-    }
-    const entry = pending.get(response.id);
-    if (!entry) return;
-    clearTimeout(entry.timeout);
-    pending.delete(response.id);
-    if (response.protocolVersion !== expectedCoreProtocolVersion || typeof response.ok !== "boolean") {
-      entry.reject(new Error("candor-core returned an invalid versioned response envelope"));
-      return;
-    }
-    entry.resolve(response);
-  });
-
-  let stderrBytesLogged = 0;
-  let stderrSuppressionNoted = false;
-  child.stderr.on("data", (chunk: Buffer) => {
-    if (!isDev) {
-      if (!stderrSuppressionNoted) {
-        console.error("[candor-core] diagnostic output suppressed in packaged build");
-        stderrSuppressionNoted = true;
-      }
-      return;
-    }
-
-    const remaining = MAX_CORE_STDERR_BYTES - stderrBytesLogged;
-    if (remaining > 0) {
-      const boundedChunk = chunk.subarray(0, remaining);
-      stderrBytesLogged += boundedChunk.byteLength;
-      const diagnostic = redactCoreDiagnostic(boundedChunk.toString("utf8")).trim();
-      if (diagnostic) console.error(`[candor-core] ${diagnostic}`);
-    }
-    if (chunk.byteLength > remaining && !stderrSuppressionNoted) {
-      console.error(`[candor-core] further diagnostic output suppressed after ${MAX_CORE_STDERR_BYTES} bytes`);
-      stderrSuppressionNoted = true;
-    }
-  });
-
-  child.on("spawn", () => {
-    if (core === child) {
-      coreSupervisor.state = "running";
-      coreSupervisor.pid = child.pid ?? null;
-    }
-  });
-
-  child.on("error", (error) => {
-    if (core === child) {
-      coreSupervisor.state = "failed";
-      coreSupervisor.lastExit = {
-        code: null,
-        signal: null,
-        at: new Date().toISOString(),
-        error: error.message,
-      };
-    }
-  });
-
-  child.on("exit", (code, signal) => {
-    if (core === child) {
-      core = null;
-      handshakePromise = null;
-      coreSupervisor.pid = null;
-      coreSupervisor.state = coreSupervisor.state === "stopping" ? "stopped" : "exited";
-      coreSupervisor.lastExit = {
-        code,
-        signal,
-        at: new Date().toISOString(),
-      };
-      rejectPending(new Error(`candor-core exited (${code ?? signal ?? "unknown"})`));
-    }
-  });
-}
-
-function callCore(method: string, params: JsonValue = null, timeoutMs = 5000): Promise<CoreResponse> {
-  if (!privateCoreMethods.has(method)) {
-    return Promise.reject(new Error(`IPC method is not allowed: ${method}`));
-  }
-  startCore();
-  if (!core || core.killed || !core.stdin.writable) {
-    return Promise.reject(new Error("candor-core is not available"));
-  }
-
-  const id = nextRpcId++;
-  const payload = JSON.stringify({ id, method, params });
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`candor-core timed out for ${method}`));
-    }, timeoutMs);
-    pending.set(id, { resolve, reject, timeout });
-    core?.stdin.write(`${payload}\n`, "utf8");
-  });
-}
-
-async function ensureCoreHandshake(): Promise<void> {
-  if (core && coreSupervisor.lastHandshake?.ok) return;
-  if (handshakePromise) return handshakePromise;
-
-  handshakePromise = (async () => {
-    try {
-      const response = await callCore("core.version");
-      if (!response.ok) {
-        throw new Error(response.error?.message ?? "candor-core version handshake failed");
-      }
-      coreSupervisor.lastHandshake = {
-        ok: true,
-        at: new Date().toISOString(),
-        version: response.result ?? null,
-      };
-    } catch (error) {
-      handshakePromise = null;
-      coreSupervisor.lastHandshake = {
-        ok: false,
-        at: new Date().toISOString(),
-        error: asErrorMessage(error),
-      };
-      throw error;
-    }
-  })();
-
-  return handshakePromise;
 }
 
 function requireCoreResult(response: CoreResponse, method: string): JsonValue {
@@ -552,54 +260,6 @@ async function writeSmokeResult(payload: JsonValue): Promise<void> {
   if (!smokeOutputPath) return;
   await mkdir(path.dirname(smokeOutputPath), { recursive: true });
   await writeFile(smokeOutputPath, JSON.stringify(payload, null, 2), "utf8");
-}
-
-function requestCoreShutdown(): void {
-  if (!core || core.killed) return;
-  coreSupervisor.state = "stopping";
-  try {
-    // Shutdown is fire-and-forget: process exit is the acknowledgement, so no pending RPC entry is registered.
-    core.stdin.write(JSON.stringify({ id: nextRpcId++, method: "core.shutdown", params: null }) + "\n");
-  } catch {
-    core.kill();
-  }
-}
-
-function waitForCoreExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`candor-core did not exit within ${timeoutMs} ms`));
-    }, timeoutMs);
-    const onExit = () => {
-      clearTimeout(timeout);
-      resolve();
-    };
-    child.once("exit", onExit);
-  });
-}
-
-async function stopCoreForRestart(): Promise<void> {
-  const child = core;
-  if (!child || child.killed) return;
-  requestCoreShutdown();
-  await waitForCoreExit(child, 5000);
-}
-
-async function exerciseCoreRestartForSmoke(): Promise<JsonValue> {
-  const before = supervisorSnapshot();
-  await stopCoreForRestart();
-  await ensureCoreHandshake();
-  const status = await callCore("core.status");
-  return {
-    before,
-    after: supervisorSnapshot(),
-    status: status.result ?? null,
-  };
 }
 
 function delay(ms: number): Promise<void> {

@@ -190,6 +190,33 @@ Date: 2026-07-12
 `electron/main.ts` decreased from 1,909 to 1,750 lines without changing preload,
 vault, recording, importer, or application-data behavior.
 
+## Phase 2b: Rust Core Process Client
+
+Date: 2026-07-12
+
+- Extracted the Rust process supervisor, bounded JSONL parser, request registry,
+  structured core errors, method allowlists, and protocol types.
+- Requests now carry the protocol version, a cryptographically random UUID in
+  both compatibility `id` and typed `requestId` fields, and an ISO timestamp.
+- Responses are runtime-validated; malformed JSON, incompatible envelopes,
+  oversized lines, unknown IDs, duplicate responses, process exits, and timeouts
+  reject pending work instead of silently degrading.
+- The smoke restart checks `capture.status` and refuses to restart an active
+  capture. Timeouts do not kill a core known to be capturing.
+
+| Check | Result |
+|---|---|
+| `npm test` | passed; 11 files and 45 tests |
+| fake-core process tests | passed for UUID correlation, malformed output, active-capture restart denial, and hung request handling |
+| `npm run electron:v3:build-main` | passed |
+| Electron and source-security audits | passed; 80 checks and 5 mutation tests |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed against the real Rust sidecar |
+
+`electron/main.ts` decreased from 1,750 to 1,410 lines. The Rust request parser
+already accepts JSON-valued IDs and ignores additive request metadata, so this
+upgrade remains compatible with the existing core while moving the active
+Electron transport to UUID correlation.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
