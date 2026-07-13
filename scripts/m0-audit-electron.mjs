@@ -87,8 +87,8 @@ const requiredMainPatterns = [
   "core.version",
   "restartCount",
   "candor-shell:supervisorStatus",
+  "rendererCoreOperations",
   "rendererCoreMethods",
-  "rendererCoreTimeoutMs",
   "privateCoreMethods",
   "candor-models:importFromFile",
   "candor-instruct-assets:importFromFile",
@@ -158,9 +158,12 @@ const bannedPatterns = [
   /sandbox:\s*false/,
   /enableRemoteModule:\s*true/,
   /http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions/,
+  /candor-core:call/,
 ];
 
 const bannedPreloadPatterns = [
+  /\bcallCore\b/,
+  /\ballowedMethods\b/,
   /models\.importStart/,
   /models\.importChunk/,
   /models\.importFinish/,

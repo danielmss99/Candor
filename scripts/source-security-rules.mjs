@@ -169,8 +169,8 @@ export function evaluateSourceSecurity(input) {
     ["core-frozen", "core: Object.freeze("],
     ["license-frozen", "license: Object.freeze("],
     ["shell-frozen", "shell: Object.freeze("],
-    ["core-allowlist", "const allowedMethods = new Set(["],
-    ["durable-status", '"recording.durable.status"'],
+    ["named-core-channel", 'ipcRenderer.invoke("candor-core:core-status")'],
+    ["durable-status", 'ipcRenderer.invoke("candor-core:recording-durable-status")'],
   ]) {
     includes(`preload:${id}`, preload, pattern, `preload requires ${id}`);
   }
@@ -182,6 +182,13 @@ export function evaluateSourceSecurity(input) {
     "preload exposes no generic IPC, filesystem, process, or path operation",
   );
   excludes("preload:no-selected-path", preload, /selectedPath|destinationPath/, "renderer never receives selected paths");
+  excludes("preload:no-generic-core-channel", preload, /candor-core:call|\bcallCore\b|\ballowedMethods\b/, "preload uses fixed product channels only");
+  add(
+    "electron-main:no-generic-core-channel",
+    !/candor-core:call/.test(electronRuntimeSource),
+    "electron/ipc/core-ipc.ts",
+    "main registers fixed product channels only",
+  );
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";
   includes(
@@ -291,6 +298,7 @@ export function runSourceSecuritySelfTest(input) {
   const main = sourceText(input, "electron/main.ts");
   const mainWindow = sourceText(input, "electron/window/create-main-window.ts");
   const preload = sourceText(input, "electron/preload.cts");
+  const coreIpc = sourceText(input, "electron/ipc/core-ipc.ts");
   const importer = sourceText(input, "crates/candor-core/src/v2_importer.rs");
   const proofScript = sourceText(input, "scripts/m0-packaged-smoke.mjs");
   const testSecretName = ["api", "Key"].join("");
@@ -314,6 +322,15 @@ export function runSourceSecuritySelfTest(input) {
       name: "generic-preload-capability",
       input: withSource(input, "electron/preload.cts", `${preload}\nconst unsafe = { readFile: () => null };\n`),
       expectedFailure: "preload:no-generic-capabilities",
+    },
+    {
+      name: "generic-core-channel",
+      input: withSource(
+        input,
+        "electron/ipc/core-ipc.ts",
+        `${coreIpc}\nipcMain.handle("candor-core:call", () => null);\n`,
+      ),
+      expectedFailure: "electron-main:no-generic-core-channel",
     },
     {
       name: "hardcoded-secret",
