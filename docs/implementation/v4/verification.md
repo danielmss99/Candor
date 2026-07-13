@@ -441,22 +441,32 @@ Date: 2026-07-12
 Playwright now launches the real Electron shell and verifies the exact preload
 surface, missing Node globals, navigation and popup denial, primary-screen axe
 results, keyboard focus, and 1366 by 768 behavior at 125 and 150 percent display
-scaling. The suite runs on the three-OS CI matrix, with Xvfb on Linux.
+scaling. It also proves that Electron's session policy blocks an external
+request before transport and that the main-process navigation event is actually
+prevented. The suite runs on the three-OS CI matrix, with Xvfb on Linux.
 
 Release packages now receive streamed SHA-256 hashes in `SHA256SUMS`. Verification
 requires an exact package match and a clean committed source tree. The readiness
-audit accepts only the verification-mode path-safe receipt. The manual release
+audit accepts only the verification-mode path-safe receipt. Producer and
+validator both require two-way name, hash, count, and source-manifest agreement,
+including package blockmaps. The manual release
 runbook defines stop conditions and the clean-install, upgrade, long-recording,
 sleep/resume, device, disk-pressure, network-denial, and signing evidence still
 required from real machines.
 
 | Check | Result |
 |---|---|
-| `npm run test:electron` | passed; 4 Electron/axe tests |
-| `npm test` | passed; 33 files and 101 tests |
+| `npm run test:electron:build` | passed; 4 Electron/axe tests |
+| `npm test` | passed; 34 files and 105 tests |
 | `npm run m0:ci-contract-smoke` | passed |
-| `npm run v3:release-checksums:verify` | passed from commit `0a2d03e` |
+| `npm run v3:verify` | passed; 82 Rust tests and the complete staged M0-M5 chain |
+| `npm audit --audit-level=high` | passed; 0 vulnerabilities |
+| `npm run v3:release-checksums:verify` | passed after the final committed release rebuild; proof binds source, manifest, installer, and blockmap |
 | `npm run v3:release-readiness-audit` | checksum gate passed; external capture, cross-OS, and signing gaps remain visible |
+
+Claude's final review, focused re-review, and Codex dispositions are recorded in
+`claude-phase7-final-review.md`, `claude-phase7-fix-rereview.md`, and
+`claude-phase7-review-reconciliation.md`. No Critical or High finding remains.
 
 ## Known Non-Passing Or Unproven Gates
 

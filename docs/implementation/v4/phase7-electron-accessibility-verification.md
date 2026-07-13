@@ -22,13 +22,18 @@ The Electron test verifies:
 - the exact `window.candor` top-level and nested method allowlists;
 - no generic invoke, filesystem, path, or process method;
 - popups are denied;
-- renderer-initiated external navigation leaves the local document loaded.
+- a main-process session request to a resolvable external origin is blocked;
+- renderer-initiated external navigation emits `will-navigate`, is marked
+  `defaultPrevented`, and leaves the local document loaded.
 
 Core startup faults, malformed protocol output, restart denial during capture, close guarding, and navigation policy also remain covered by focused Electron unit tests.
 
 ## Accessibility assertions
 
-`@axe-core/playwright` runs the axe engine inside the real Electron renderer using WCAG 2 A, WCAG 2 AA, WCAG 2.1 A, and WCAG 2.1 AA tags.
+`@axe-core/playwright` runs the axe engine inside the real Electron renderer
+using WCAG 2 A, WCAG 2 AA, WCAG 2.1 A, and WCAG 2.1 AA tags. Legacy injection
+mode is required because Electron exposes one sandboxed document and cannot
+create axe's second browser target; Candor has no iframe surface.
 
 Screens scanned:
 
@@ -73,12 +78,12 @@ Both screenshots were visually inspected for clipping, overlap, and primary-acti
 
 ```text
 npm test -- --run
-  33 files, 101 tests passed
+  34 files, 105 tests passed
 
 npm run electron:v3:typecheck-renderer
   passed
 
-npm run test:electron
+npm run test:electron:build
   4 Playwright Electron tests passed
 
 npm run m3:product-surface-smoke
@@ -96,6 +101,11 @@ Packaged proof:
 ```text
 release-v3/proofs/m0-packaged-runtime-smoke-v4-playwright-win32-x64.json
 ```
+
+Claude's final adversarial review returned **GO WITH REQUIRED FIXES**. The
+two-way release package binding, deterministic navigation observer, and
+session-request probe were corrected and focused re-review confirmed the fixes.
+The complete disposition is in `claude-phase7-review-reconciliation.md`.
 
 ## Remaining manual gates
 
