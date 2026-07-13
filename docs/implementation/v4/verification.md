@@ -217,6 +217,31 @@ already accepts JSON-valued IDs and ignores additive request metadata, so this
 upgrade remains compatible with the existing core while moving the active
 Electron transport to UUID correlation.
 
+## Phase 2c: Native IPC Modules
+
+Date: 2026-07-12
+
+- Split core/shell, report export, model import, local-AI asset import, v2 import,
+  and licensing handlers into focused modules with one registration entrypoint.
+- Every native handler validates that the caller is the active Candor main frame.
+- Added shared input limits and opaque ID validation. File and folder picker
+  results are canonicalized only in Electron main and never returned as paths.
+- Whisper imports accept `.bin`; local instruct models accept `.gguf`; Windows
+  runners accept `.exe`; all imported model assets remain hash-verified by the
+  Rust core before commit.
+- Moved native Word/PDF/Markdown decoding and custody validation into a shared,
+  tested report module.
+
+| Check | Result |
+|---|---|
+| `npm test` | passed; 14 files and 50 tests |
+| `npm run electron:v3:build-main` | passed |
+| Electron and source-security audits | passed; 90 checks and 5 mutation tests |
+| unpacked Electron package plus `npm run m0:packaged-smoke` | passed with sender-frame validation active |
+
+`electron/main.ts` decreased from 1,410 to 986 lines. The renderer still receives
+only basenames and custody facts from native import/export operations.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;
