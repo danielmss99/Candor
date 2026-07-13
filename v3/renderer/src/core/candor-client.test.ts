@@ -72,4 +72,15 @@ describe("CandorClient", () => {
     expect(caught).toBeInstanceOf(CandorClientError);
     expect(caught).toMatchObject({ code: "CORE_REQUEST_FAILED", requestId: "notes.save-1" });
   });
+
+  it("preserves a renderer-safe core error code without trusting raw details", async () => {
+    const client = new CandorClient(coreApi());
+    await expect(client.object("capture.start", async () => {
+      throw new Error("Error invoking remote method: CANDOR_CORE_ERROR:CONSENT_REQUIRED");
+    })).rejects.toMatchObject({
+      code: "CONSENT_REQUIRED",
+      requestId: "capture.start-1",
+      retryable: false,
+    });
+  });
 });

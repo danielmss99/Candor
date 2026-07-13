@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateReleaseChecksums } from "./release-checksum-validation.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -105,11 +106,11 @@ function summarizePayload(payload) {
   if (payload?.proofKind === "v3-source-security-proof") {
     return {
       ok: payload?.ok === true,
-      auditScriptOk: payload?.checks?.auditScript?.ok === true,
+      requiredSourcesOk: payload?.checks?.requiredSources?.ok === true,
       trackedEnvironmentFilesOk: payload?.checks?.trackedEnvironmentFiles?.ok === true,
       ignoredEnvironmentFilesOk: payload?.checks?.ignoredEnvironmentFiles?.ok === true,
-      compileTimeSecretExportOk: payload?.checks?.compileTimeSecretExport?.ok === true,
-      calendarPlaintextFallbacksOk: payload?.checks?.calendarPlaintextFallbacks?.ok === true,
+      electronRustRulesOk: payload?.checks?.electronRustRules?.ok === true,
+      mutationTestsOk: payload?.checks?.mutationTests?.ok === true,
       failures: payload?.failures ?? [],
     };
   }
@@ -162,6 +163,17 @@ function summarizePayload(payload) {
       platform: payload?.platform ?? null,
       extractionAttempted: payload?.currentPlatform?.extractionAttempted === true,
       currentPlatformOk: payload?.currentPlatform?.ok === true,
+      failures: payload?.failures ?? [],
+    };
+  }
+  if (payload?.proofKind === "v3-release-checksums") {
+    return {
+      ok: payload?.ok === true,
+      mode: payload?.mode ?? null,
+      artifactCount: payload?.artifactCount ?? null,
+      gitHead: payload?.git?.head ?? null,
+      gitDirty: payload?.git?.dirty ?? null,
+      sourceManifestHead: payload?.sourceManifest?.gitHead ?? null,
       failures: payload?.failures ?? [],
     };
   }
@@ -248,17 +260,20 @@ function validateSourceSecurity(payload) {
   if (payload?.keyMaterialExposedToRenderer !== false) {
     failures.push("source security proof must not expose key material");
   }
+  if (payload?.checks?.requiredSources?.ok !== true) {
+    failures.push("source security proof must prove required Electron/Rust sources exist");
+  }
   if (payload?.checks?.trackedEnvironmentFiles?.ok !== true) {
     failures.push("source security proof must prove env files are not tracked");
   }
   if (payload?.checks?.ignoredEnvironmentFiles?.ok !== true) {
     failures.push("source security proof must prove local env files are ignored");
   }
-  if (payload?.checks?.compileTimeSecretExport?.ok !== true) {
-    failures.push("source security proof must prove compile-time secret export is absent");
+  if (payload?.checks?.electronRustRules?.ok !== true) {
+    failures.push("source security proof must pass Electron/Rust source rules");
   }
-  if (payload?.checks?.calendarPlaintextFallbacks?.ok !== true) {
-    failures.push("source security proof must prove plaintext calendar fallback is absent");
+  if (payload?.checks?.mutationTests?.ok !== true) {
+    failures.push("source security proof mutation tests must pass");
   }
   if (Array.isArray(payload?.failures) && payload.failures.length > 0) {
     failures.push(`source security proof has ${payload.failures.length} failure(s)`);
@@ -429,7 +444,7 @@ function validateReleaseArtifactSmoke(payload) {
       failures.push("release artifact smoke must include a Windows installer");
     }
     for (const expected of [
-      "Candor v3 M0.exe",
+      "Candor.exe",
       "resources/app.asar",
       "resources/bin/candor-core.exe",
     ]) {
@@ -647,6 +662,7 @@ const gates = [
   fromProof(files, /^v3-source-security-proof-.+\.json$/, "V3 source security proof", validateSourceSecurity),
   fromProof(files, /^v3-updater-policy-proof-.+\.json$/, "V3 updater policy proof", validateUpdaterPolicy),
   fromProof(files, /^v3-release-artifact-smoke-.+\.json$/, "V3 release artifact smoke", validateReleaseArtifactSmoke),
+  fromProof(files, /^v3-release-checksums-.+\.json$/, "V3 release package checksums", validateReleaseChecksums),
   fromProof(files, /^v3-icon-proof-.+\.json$/, "V3 packaged application icon proof", validateIconProof),
   fromProof(files, /^v3-release-signing-proof-.+\.json$/, "V3 signed release and installer proof", validateReleaseSigning),
   fromProof(files, /^m1-real-capture-readiness-.+\.json$/, "M1 real capture readiness", validateRealCaptureReadiness),

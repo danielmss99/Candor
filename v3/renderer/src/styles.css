@@ -477,6 +477,57 @@ p {
   color: var(--error);
 }
 
+.system-alert-stack {
+  display: grid;
+  width: min(100%, 1180px);
+  gap: 8px;
+  margin: 14px auto 0;
+  padding: 0 28px;
+}
+
+.system-alert {
+  display: grid;
+  grid-template-columns: minmax(190px, max-content) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  line-height: 1.4;
+  padding: 10px 12px;
+}
+
+.system-alert strong {
+  font-size: 12px;
+}
+
+.system-alert span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.system-alert.info {
+  border-color: var(--border-focus);
+  background: var(--info-soft);
+}
+
+.system-alert.warning {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.system-alert.error {
+  border-color: var(--error-border);
+  background: var(--error-soft);
+}
+
+.system-alert.error strong {
+  color: var(--error);
+}
+
 .page-view {
   min-height: 100%;
   padding: 18px 28px 16px;
@@ -654,6 +705,28 @@ p {
 .activation-actions button,
 .setup-actions button {
   min-height: 44px;
+}
+
+.activation-actions .text-button {
+  border-color: transparent;
+  background: transparent;
+  color: var(--info);
+  box-shadow: none;
+}
+
+.activation-actions .text-button:hover {
+  background: var(--bg-hover);
+}
+
+.activation-data-access {
+  margin: -4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.core-recovery-card .setup-status-row strong {
+  overflow-wrap: anywhere;
 }
 
 .activation-facts,
@@ -854,6 +927,38 @@ p {
 
 .screen-heading > div {
   min-width: 0;
+}
+
+.screen-heading-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.destructive-button {
+  min-height: 38px;
+  border: 1px solid var(--error-border);
+  background: var(--bg-surface);
+  color: var(--error);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 13px;
+}
+
+.destructive-button:hover:not(:disabled) {
+  border-color: var(--error);
+  background: var(--error-soft);
+}
+
+.destructive-button:active:not(:disabled) {
+  background: var(--danger-deep);
+}
+
+.destructive-button:disabled {
+  border-color: var(--border-subtle);
+  background: var(--bg-disabled);
+  color: var(--text-disabled);
 }
 
 .primary-button,
@@ -1081,6 +1186,21 @@ p {
   gap: 10px;
 }
 
+.status-panel.verified {
+  border-color: var(--success-border);
+}
+
+.status-panel.low {
+  border-color: var(--warning-border);
+  background: var(--warning-soft);
+}
+
+.status-panel.blocking,
+.status-panel.unavailable {
+  border-color: var(--error-border);
+  background: var(--error-soft);
+}
+
 .dashboard-empty {
   grid-column: 1 / -1;
 }
@@ -1119,7 +1239,7 @@ p {
   min-height: 34px;
   border: 1px solid var(--warning);
   background: transparent;
-  color: var(--warning);
+  color: var(--text-primary);
   font-size: 11px;
   padding: 0 12px;
 }
@@ -2273,6 +2393,32 @@ p {
   gap: 8px;
 }
 
+.diagnostic-export details {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--canvas);
+  padding: 12px;
+}
+
+.diagnostic-export summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.diagnostic-export pre {
+  max-height: 320px;
+  margin: 12px 0 0;
+  overflow: auto;
+  color: var(--muted);
+  font-family: ui-monospace, "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .model-choice-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2627,6 +2773,24 @@ p {
 
   .desktop-sidebar {
     padding-inline: 12px;
+  }
+
+  .system-alert-stack {
+    padding-inline: 18px;
+  }
+
+  .system-alert {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .meeting-heading {
+    flex-wrap: wrap;
+  }
+
+  .screen-heading-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 
   .dashboard-actions {
@@ -3146,7 +3310,7 @@ p {
 
 .settings-layout > nav > span {
   margin: 10px 8px 0;
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   font-size: 9px;
   font-weight: 700;
 }

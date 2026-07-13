@@ -115,7 +115,7 @@ Status: **implemented baseline, pending packaged OS proof**
 - [x] Windows runner uses the PowerShell 5.1-compatible
       `ProcessStartInfo.Arguments` API; CI rejects `ArgumentList`, and an actual
       PowerShell 5.1 packaged-smoke launch passed against `final15`.
-- [ ] Elevated Windows firewall proof for `release-v3-design-vetted-final15`
+- [ ] Elevated Windows firewall proof for `release-v3`
       still requires interactive UAC approval.
 
 ## Verification Commands

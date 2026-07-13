@@ -174,9 +174,9 @@ $releaseDirProvided = -not [string]::IsNullOrWhiteSpace($ReleaseDir)
 if ($releaseDirProvided) {
   $resolvedReleaseDir = Resolve-ProofPath $ReleaseDir "release-v3"
   $resolvedAppPath = if ([string]::IsNullOrWhiteSpace($AppPath)) {
-    Join-Path $resolvedReleaseDir "win-unpacked\Candor v3 M0.exe"
+    Join-Path $resolvedReleaseDir "win-unpacked\Candor.exe"
   } else {
-    Resolve-ProofPath $AppPath "release-v3\win-unpacked\Candor v3 M0.exe"
+    Resolve-ProofPath $AppPath "release-v3\win-unpacked\Candor.exe"
   }
   $resolvedCorePath = if ([string]::IsNullOrWhiteSpace($CorePath)) {
     Join-Path $resolvedReleaseDir "win-unpacked\resources\bin\candor-core.exe"
@@ -184,7 +184,7 @@ if ($releaseDirProvided) {
     Resolve-ProofPath $CorePath "release-v3\win-unpacked\resources\bin\candor-core.exe"
   }
 } else {
-  $resolvedAppPath = Resolve-ProofPath $AppPath "release-v3\win-unpacked\Candor v3 M0.exe"
+  $resolvedAppPath = Resolve-ProofPath $AppPath "release-v3\win-unpacked\Candor.exe"
   $resolvedCorePath = Resolve-ProofPath $CorePath "release-v3\win-unpacked\resources\bin\candor-core.exe"
   $resolvedReleaseDir = Split-Path (Split-Path $resolvedAppPath -Parent) -Parent
 }
@@ -195,7 +195,7 @@ $resolvedAppArchivePath = Join-Path $resolvedReleaseDir "win-unpacked\resources\
 $resolvedProofDir = Resolve-ProofPath $ProofDir "release-v3\proofs"
 
 Assert-Directory $resolvedReleaseDir "Release directory"
-Assert-SamePath $resolvedAppPath (Join-Path $resolvedReleaseDir "win-unpacked\Candor v3 M0.exe") "Packaged app"
+Assert-SamePath $resolvedAppPath (Join-Path $resolvedReleaseDir "win-unpacked\Candor.exe") "Packaged app"
 Assert-SamePath $resolvedCorePath (Join-Path $resolvedReleaseDir "win-unpacked\resources\bin\candor-core.exe") "Packaged candor-core sidecar"
 Assert-File $resolvedAppPath "Packaged app"
 Assert-File $resolvedCorePath "Packaged candor-core sidecar"
@@ -231,7 +231,7 @@ if ($ValidateOnly) {
 New-Item -ItemType Directory -Force -Path $resolvedProofDir | Out-Null
 
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
-$ruleGroup = "Candor v3 M0 Network Deny $PID $timestamp"
+$ruleGroup = "Candor Network Deny $PID $timestamp"
 $smokeProofPath = Join-Path $resolvedProofDir "m0-packaged-runtime-smoke-win32-x64.json"
 $networkProofPath = Join-Path $resolvedProofDir "m0-network-deny-windows-$timestamp.json"
 $stdout = ""

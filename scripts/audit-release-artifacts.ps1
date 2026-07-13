@@ -42,30 +42,14 @@ function Get-ArtifactCandidates {
   }
 
   if (-not $hasExplicitScope) {
-    if (-not [string]::IsNullOrWhiteSpace($env:CARGO_TARGET_DIR)) {
-      Add-IfPresent $roots $env:CARGO_TARGET_DIR
-    } else {
-      $canonicalTarget = Join-Path $env:SystemDrive "CandorBuild\target"
-      $canonicalRelease = Join-Path $canonicalTarget "release"
-      if ((Test-Path -LiteralPath (Join-Path $canonicalRelease "candor.exe") -PathType Leaf) -or
-        (Test-Path -LiteralPath (Join-Path $canonicalRelease "bundle") -PathType Container)) {
-        Add-IfPresent $roots $canonicalTarget
-      } else {
-        Add-IfPresent $roots $canonicalTarget
-        Add-IfPresent $roots (Join-Path $repoRootFull "src-tauri\target")
-      }
-    }
+    Add-IfPresent $roots (Join-Path $repoRootFull "release-v3")
   }
 
   $candidateFiles = [System.Collections.Generic.List[string]]::new()
   foreach ($root in ($roots | Select-Object -Unique)) {
-    $releaseRoot = Join-Path $root "release"
-    Add-IfPresent $candidateFiles (Join-Path $releaseRoot "candor.exe")
-    Add-IfPresent $candidateFiles (Join-Path $releaseRoot "candor.pdb")
-
-    $bundleRoot = Join-Path $releaseRoot "bundle"
-    if (Test-Path -LiteralPath $bundleRoot) {
-      Get-ChildItem -LiteralPath $bundleRoot -Recurse -File -Include *.exe,*.msi,*.pdb |
+    if (Test-Path -LiteralPath $root -PathType Container) {
+      Get-ChildItem -LiteralPath $root -Recurse -File |
+        Where-Object { $_.Extension -in @(".exe", ".msi", ".pdb", ".dll", ".node", ".dmg", ".AppImage", ".deb") } |
         ForEach-Object { Add-IfPresent $candidateFiles $_.FullName }
     }
   }
@@ -88,14 +72,6 @@ function Get-ArtifactCandidates {
 
 function Get-DotEnvPatterns {
   $allowed = @{}
-  foreach ($key in @(
-    "VITE_MS_CLIENT_ID",
-    "VITE_GOOGLE_CLIENT_ID",
-    "CANDOR_MS_CLIENT_ID",
-    "CANDOR_GOOGLE_CLIENT_ID"
-  )) {
-    $allowed[$key] = $true
-  }
 
   if (-not [string]::IsNullOrWhiteSpace($env:CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS)) {
     foreach ($key in ($env:CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS -split ",")) {

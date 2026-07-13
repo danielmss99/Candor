@@ -16,6 +16,7 @@ mission:
 - V3 source security proof
 - V3 updater policy proof
 - V3 release artifact smoke
+- V3 release package checksum verification
 - V3 signed release and installer proof
 - M1 real capture readiness
 - M1 consented real capture orchestrator proof
@@ -87,6 +88,21 @@ npm run v3:release-artifact-smoke
 npm run v3:release-signing-proof
 ```
 
+The release checksum gate is produced only after packages are built:
+
+```powershell
+npm run v3:release-artifact-smoke
+npm run m0:artifact-manifest
+npm run v3:release-checksums
+npm run v3:release-checksums:verify
+```
+
+Verification recomputes every top-level release package hash and requires an
+exact match with `release-v3/SHA256SUMS`. The readiness audit accepts only the
+verification-mode receipt from a clean committed source tree, not the
+generation receipt. The receipt must also match the source revision and package
+hashes in the M0 artifact manifest.
+
 Strict mode writes:
 
 ```text
@@ -124,6 +140,9 @@ Current expected gaps include:
   app executable, `app.asar`, and `candor-core.exe` match the unpacked output.
   On macOS and Linux, the DMG, AppImage, or deb payload entries must also
   hash-match the corresponding unpacked app payloads.
+- Release package checksums are proven by
+  `v3-release-checksums-<platform>-<arch>.json` after verification mode confirms
+  that `SHA256SUMS` exactly matches every current top-level release package.
 - M2 real Whisper is proven only when
   `m2-real-whisper-proof-<platform>-<arch>.json`,
   `m2-real-whisper-inputs-<platform>-<arch>.json`, and

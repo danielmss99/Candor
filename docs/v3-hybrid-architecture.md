@@ -1,67 +1,39 @@
-# Candor v3 Hybrid Architecture
+# Candor Electron And Rust Architecture
 
-Candor v3 is a from-scratch local-only desktop app. Electron owns the product
-surface and Rust owns the trusted local core.
+Candor uses Electron for the desktop product surface and Rust for the trusted
+local core.
 
-## M0 Decision Gate
+## M0 Decision Result
 
-M0 exists to prove the riskiest premise before product work continues:
-Electron must run with a Rust sidecar, no unauthorized network traffic, a narrow
-preload allowlist, and packageable binaries on Windows, macOS, and Linux.
+M0 tested the highest-risk premise: Electron could supervise a Rust sidecar,
+retain a narrow sandboxed preload, package on Windows, macOS, and Linux, and run
+under explicit network-deny proof tooling. That gate selected Electron as the
+active shell.
 
-If M0 cannot be proven, stop Electron work and reconsider Tauri or native shells
-while preserving the Rust core design.
+The alternative implementation is archived at `archive/tauri-v2`. It is not an
+active fallback, dependency, workflow, or packaging path. A future shell change
+would preserve the Rust core boundary rather than revive two simultaneous apps.
 
-## Shell/Core Boundary
+## Boundary
 
-- Electron main supervises `candor-core` over stdio JSON-RPC.
+- Electron main supervises `candor-core` over stdio JSONL RPC.
 - The renderer is sandboxed and receives only `window.candor`.
-- The renderer cannot access raw filesystem paths, vault keys, arbitrary process
-  execution, unrestricted networking, or native modules.
-- The core owns audio capture, vault encryption, model verification,
-  transcription, local AI orchestration, exports, and audit logs.
+- The renderer cannot access raw paths, vault keys, arbitrary processes,
+  unrestricted networking, or native modules.
+- Rust owns capture, durable recording, vault state, model verification,
+  transcription, local AI, exports, retention, import, and privacy facts.
 
-## Transport
+## Network Policy
 
-Transport is newline-delimited JSON over stdin/stdout. M0 intentionally avoids
-localhost TCP to prevent open ports, firewall prompts, and other-process access.
+Recording, transcription, local AI, and export are denied network capability.
+Activation and future manual update checks are separate, user-initiated
+capabilities. The product reports capability facts instead of making a blanket
+network claim.
 
-Every core response carries the `m0-jsonrpc-stdio-1` protocol version. Electron
-main rejects an invalid response envelope, and the renderer validates the initial
-handshake before accepting core data. Shared parsers reject malformed types
-visibly. Recording and transcript reads are paged, stale meeting requests are
-ignored, and duplicate writes are excluded by operation scope.
+## Verification
 
-## Capability-Based Network Policy
+Run `npm run v3:verify` before packaging. Release still requires packaged runtime
+smoke, artifact audits, OS network-deny evidence, real hardware and duration
+tests, clean-machine upgrade evidence, and signing.
 
-The Rust core reports a capability matrix rather than a blanket marketing claim:
-
-- recording: denied;
-- transcription: denied;
-- local AI: denied;
-- local licensing: local only unless the user explicitly invokes a future portal;
-- updates: disabled until a separately reviewed manual checker exists.
-
-Every meeting can produce a pathless privacy receipt with capture channels,
-encrypted chunk state, transcript and note facts, model identifiers and hashes,
-local processing history, export history, retention policy, and network facts.
-
-## Renderer Structure
-
-The root coordinates feature-owned views and hooks. UI lives under
-`v3/renderer/src/features`; protocol access and response schemas live under
-`v3/renderer/src/core`; explicit capture and local-job machines plus stale request
-coordination live under `v3/renderer/src/state`.
-
-## Milestone Shape
-
-- M0: Electron risk spike and proof artifacts.
-- M1: SQLCipher vault and durable capture adapters.
-- M2: record, recover, transcribe, replay, search, export.
-- M3: product workspace and consent UX.
-- M4: local AI, starting with heuristics and one small instruct model.
-- M5: importer, signing, release, manual updater.
-
-Run `npm run v3:verify` before packaging to execute the local staged proof stack
-from M0 through M5. M0 exit still requires the stricter packaged proof audit and
-OS-boundary network-deny artifacts on Windows, macOS, and Linux.
+The complete current trust model is in `ARCHITECTURE.md`.

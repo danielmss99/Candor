@@ -8,7 +8,7 @@ type JsonValue =
 
 interface CandorApi {
   core: {
-    ping(echo?: JsonValue): Promise<JsonValue>;
+    ping(): Promise<JsonValue>;
     version(): Promise<JsonValue>;
     capabilities(): Promise<JsonValue>;
     status(): Promise<JsonValue>;
@@ -57,6 +57,7 @@ interface CandorApi {
       language?: string;
       initialPrompt?: string;
     }): Promise<JsonValue>;
+    recordingDurableStatus(): Promise<JsonValue>;
     recordingDurableListPage(offset?: number, limit?: number): Promise<JsonValue>;
     recordingDurableRead(recordingId: string): Promise<JsonValue>;
     recordingDurableReplayManifest(recordingId: string): Promise<JsonValue>;
@@ -64,6 +65,7 @@ interface CandorApi {
     recordingPrivacyReceipt(recordingId: string): Promise<JsonValue>;
     recordingDurableReadAudioChunk(recordingId: string, index: number): Promise<JsonValue>;
     recordingDurableSearch(query: string): Promise<JsonValue>;
+    recordingDelete(recordingId: string): Promise<JsonValue>;
     recordingNotesRead(recordingId: string): Promise<JsonValue>;
     recordingNotesSave(recordingId: string, markdown: string): Promise<JsonValue>;
     retentionStatus(): Promise<JsonValue>;
@@ -92,6 +94,8 @@ interface CandorApi {
     externalNavigationDisabled: boolean;
     networkPolicy: string;
     supervisorStatus(): Promise<JsonValue>;
+    diagnosticsPreview(): Promise<JsonValue>;
+    diagnosticsSaveLocal(): Promise<JsonValue>;
   };
 }
 

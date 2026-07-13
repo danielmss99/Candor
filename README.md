@@ -1,63 +1,133 @@
 # Candor
 
-Desktop meeting recorder with calendar sync.
+Candor is a local-first desktop meeting workspace. It records microphone and
+system audio, creates local transcripts, keeps notes beside the conversation,
+and exports editable meeting reports without cloud AI, a meeting bot, or a
+required account.
 
-## Calendar OAuth (developer setup)
+Windows is the first release target. Windows, macOS, and Linux remain active
+build and verification targets.
 
-End users connect calendars with one click. They never visit Azure or Google Cloud Console.
-Register OAuth apps **once** as the Candor developer, add the client IDs to `.env`, and rebuild.
+## Architecture
 
-### Microsoft (Outlook / Microsoft 365)
-
-1. Open [Microsoft Entra admin center](https://entra.microsoft.com) → **App registrations** → **New registration**
-2. Name: `Candor`
-3. Supported account types: **Accounts in any organizational directory and personal Microsoft accounts**
-4. Redirect URI: platform **Mobile and desktop applications** → `http://localhost:8765/callback`
-5. After creating the app, copy the **Application (client) ID** into `.env` as `VITE_MS_CLIENT_ID`
-6. **Authentication** → Advanced settings → **Allow public client flows**: Yes
-7. **API permissions** → Microsoft Graph delegated: `offline_access`, `User.Read`, `Calendars.ReadWrite`
-
-### Google Calendar
-
-1. Open [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
-2. Enable **Google Calendar API** for your project
-3. **Credentials** → **Create credentials** → **OAuth client ID**
-4. Application type: **Desktop app** (no client secret)
-5. Authorized redirect URI: `http://localhost:8721/oauth/google/callback`
-6. OAuth consent screen: add scope `https://www.googleapis.com/auth/calendar.readwrite`
-7. Copy the client ID into `.env` as `VITE_GOOGLE_CLIENT_ID`
-8. Do not put Google client secrets in `.env` or release-build environment variables
-
-Candor requests calendar write access so users can create, edit, and delete meeting events from inside the app. Calendar changes are user-initiated, and calendar credentials are stored locally in operating-system secret storage where available.
-
-### Build
-
-```bash
-cp .env.example .env   # then fill in client IDs
-npm install
-npm run tauri dev      # development
-npm run tauri build    # release installer
-npm run build:all      # same as build + tauri build
+```text
+React renderer
+  -> sandboxed Electron preload
+  -> Electron main process
+  -> versioned JSONL RPC over stdin/stdout
+  -> Rust candor-core
+  -> local vault, managed audio, and local models
 ```
 
-### CI (GitHub Actions)
+- `electron/` owns application lifecycle, native windows, security policy,
+  file-selection dialogs, licensing, and supervision of the Rust process.
+- `v3/renderer/` owns the React and TypeScript desktop interface.
+- `crates/candor-core/` owns capture, durable recording, vault access,
+  transcription, local AI, exports, retention, and privacy facts.
+- `electron-builder.v3.yml` is the only active packaging configuration.
 
-Every push to `main` runs the [Tauri Desktop Build](.github/workflows/tauri-build.yml) workflow on `windows-latest`: Node frontend build, then a full `npm run tauri build` (including whisper-rs native compile). Installers (`.exe`, `.msi`) are uploaded as artifacts on push runs.
+The renderer has no Node.js access, generic filesystem API, arbitrary process
+execution, raw vault paths, or vault keys. Electron and the Rust core communicate
+through stdio rather than a localhost server.
 
-For a Microsoft Store candidate, run the workflow manually or run `npm run build:store` locally. Store builds use `src-tauri/tauri.store.conf.json`, which switches WebView2 to the offline installer mode required for Store-style packaging.
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the trust boundaries and
+[docs/implementation/v4/implementation-plan.md](docs/implementation/v4/implementation-plan.md)
+for the active consolidation plan.
 
-To download a build: open the repo on GitHub → **Actions** → select the workflow run → scroll to **Artifacts** → download `candor-windows-<commit-sha>`.
+## Local-First Boundary
 
-The first run or a cold cache can take a while because whisper.cpp is compiled from source. Cached Rust dependencies shorten later runs.
+Meeting audio, transcripts, notes, and local AI processing stay on the device.
+The Rust core owns the facts used by privacy receipts and custody language. The
+interface must not claim encryption, local processing, model verification, or
+network isolation unless the current core response proves it.
 
-Set each client ID once as `VITE_MS_CLIENT_ID` / `VITE_GOOGLE_CLIENT_ID` in `.env`. Vite bundles them for the frontend; `src-tauri/build.rs` reads the same file and passes them to Rust at compile time. Restart `npm run tauri dev` after changing `.env`.
+Optional activation and future manual update checks are separate capabilities.
+They must be user-initiated and disclosed independently from recording,
+transcription, and local AI.
 
-Optional public client ID overrides: `CANDOR_MS_CLIENT_ID` and `CANDOR_GOOGLE_CLIENT_ID`. Google client secrets are runtime-only and must not be compiled into release builds.
+## Development
 
-Speech model downloads are SHA-256 checked before use. Set these at build time for release builds:
+Prerequisites:
 
-- `CANDOR_SHA256_TINY_EN=921E4CF8686FDD993DCD081A5DA5B6C365BFDE1162E72B08D75AC75289920B1F`
-- `CANDOR_SHA256_BASE_EN=A03779C86DF3323075F5E796CB2CE5029F00EC8869EEE3FDFB897AFE36C6D002`
-- `CANDOR_SHA256_SMALL_EN=C6138D6D58ECC8322097E0F987C32F1BE8BB0A18532A3F88F734D1BBF9C41E5D`
+- Node.js 22
+- Rust stable
+- platform-native audio and key-storage build dependencies
+- Windows native Perl when building the SQLCipher release core
 
-The local dev script and `.env.example` include all three model hashes.
+Install and launch the Electron development application:
+
+```powershell
+npm ci
+npm run dev
+```
+
+The development launcher builds the debug Rust core, starts Vite on an available
+loopback port, and launches Electron with that exact origin allowlisted. It does
+not open a public network listener.
+
+Common commands:
+
+| Command | Purpose |
+|---|---|
+| `npm run dev` | Launch Electron with the Vite renderer and debug Rust core |
+| `npm run build` | Build the release Rust core, Electron main, and renderer |
+| `npm run start` | Launch already-built local artifacts |
+| `npm run preview` | Build and launch the built renderer in Electron |
+| `npm run dist` | Build installers for the current operating system |
+| `npm test` | Run the Vitest suite |
+| `npm run v3:verify` | Run the staged local proof stack from M0 through M5 |
+| `npm run audit:source` | Run the Electron/Rust source-security audit |
+| `npm run electron:v3:pack` | Produce an unpacked Electron package |
+| `npm run m0:packaged-smoke` | Exercise the packaged application and sidecar |
+
+`npm run start` expects `npm run build` to have completed. Production core
+builds use a stable system build directory and stage only the finished sidecar
+under ignored `build/core-bin/`; this prevents personal checkout paths from
+entering release artifacts.
+
+## Models
+
+Candor does not download models in the background. Local Whisper and instruct
+model assets are imported deliberately, constrained to supported formats, and
+verified against an expected SHA-256 value before use. Whisper and local LLM
+jobs are scheduled by the Rust core so they do not compete for local inference
+resources.
+
+## Data Safety
+
+- Recording chunks are append-only and flushed during capture.
+- Interrupted recordings have deterministic recovery paths.
+- Existing v2 Markdown and managed audio can be imported through the Rust v2
+  importer; source files remain untouched.
+- Licensing failures must not block opening, exporting, or deleting existing
+  recordings.
+- Release and migration claims remain incomplete until their proof artifacts
+  exist. A green local verifier is not a signed, clean-machine release proof.
+
+## Brand And Interface
+
+The production identity is Keep Tab / Soft Signal. The GUI color and component
+sources of truth are:
+
+- `design/brand/CANDOR_PROJECT_BRAND_HANDOFF.md`
+- `design/figma/style-guide.md`
+- `design/figma/token.json`
+- `v3/renderer/src/tokens.css`
+
+The primary product journey is `Record -> Review -> Export`. Normal workflows
+must not require users to understand hashes, runners, schedulers, or vault
+internals.
+
+## Legacy Archive
+
+The former desktop implementation is preserved at the immutable Git tag
+`archive/tauri-v2`, pointing to revision
+`b29061334cff9c52654ad0f0528fee179151ed47`. It is not part of the active build,
+dependency graph, workflow set, or release package.
+
+## Release Status
+
+Candor remains prerelease software. Local verification, packaged smoke, and
+artifact auditing are implemented. Signed installers, clean-machine upgrade
+proof, real long-duration capture, sleep and resume, and device-switch evidence
+remain mandatory release gates.

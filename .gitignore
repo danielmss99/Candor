@@ -12,6 +12,7 @@ dist
 dist-v3
 dist-ssr
 release-v3*/
+build/core-bin/
 *.local
 .env
 crates/*/target

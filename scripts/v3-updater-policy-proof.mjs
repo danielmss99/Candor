@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +24,15 @@ function rel(pathValue) {
 
 function read(relativePath) {
   return readFileSync(join(repoRoot, relativePath), "utf8");
+}
+
+function sourcePaths(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = join(directory, entry.name);
+    if (entry.isDirectory()) return sourcePaths(target);
+    if (!entry.isFile() || !/\.(?:ts|cts)$/.test(entry.name) || /\.test\.ts$/.test(entry.name)) return [];
+    return [target];
+  });
 }
 
 function firstExisting(candidates) {
@@ -51,7 +60,10 @@ const corePath = process.argv[2]
       join(repoRoot, "crates", "candor-core", "target", "release", exe),
     ]);
 
-const mainSource = read("electron/main.ts");
+const mainSource = sourcePaths(join(repoRoot, "electron"))
+  .filter((sourcePath) => !sourcePath.endsWith("preload.cts"))
+  .map((sourcePath) => readFileSync(sourcePath, "utf8"))
+  .join("\n");
 const preloadSource = read("electron/preload.cts");
 const rendererIndex = read("v3/renderer/index.html");
 const updatePolicySource = read("crates/candor-core/src/update_policy.rs");
@@ -85,7 +97,7 @@ const staticChecks = {
   ),
   preloadExposesStatusOnly: staticCheck(
     preloadSource.includes("updateStatus") &&
-      preloadSource.includes('"updates.status"') &&
+      preloadSource.includes('"candor-core:updates-status"') &&
       !preloadSource.includes("updateCheck"),
     "Preload must expose updateStatus without updateCheck",
     failures,

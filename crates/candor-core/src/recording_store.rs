@@ -21,6 +21,10 @@ use serde_json::{json, Value};
 
 const MANIFEST_FILE: &str = "manifest.json";
 const RECORDINGS_DIR: &str = "recordings";
+const QUARANTINE_RECEIPTS_DIR: &str = "recovery/quarantine";
+const DELETION_DATA_DIR: &str = "deletions/data";
+const DELETION_PENDING_DIR: &str = "deletions/pending";
+const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 2;
 const ENCRYPTED_CHUNK_MAGIC: &[u8] = b"CANDORCHUNK1\n";
 const ENCRYPTED_CHUNK_EXT: &str = ".cchunk";
 const PLAINTEXT_CHUNK_EXT: &str = ".raw";
@@ -30,6 +34,10 @@ const MAX_NOTES_MARKDOWN_BYTES: usize = 512 * 1024;
 const MAX_DOCUMENT_EXPORT_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_PAGE_LIMIT: u64 = 50;
 const MAX_PAGE_LIMIT: u64 = 500;
+const LOW_DISK_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const CAPTURE_START_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+const CHUNK_WRITE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
+const MANIFEST_WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
 static NEXT_RECORDING_ID_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -51,6 +59,12 @@ impl RecordingStoreError {
 pub struct RecordingStore {
     root: PathBuf,
     root_kind: &'static str,
+    #[cfg(test)]
+    available_space_override: Option<u64>,
+    #[cfg(test)]
+    fail_space_probe: bool,
+    #[cfg(test)]
+    fail_tombstone_removal: bool,
 }
 
 #[cfg_attr(not(feature = "local-whisper"), allow(dead_code))]
@@ -226,6 +240,12 @@ struct RecordingManifest {
     privacy_events: Vec<PrivacyEvent>,
 }
 
+#[derive(Debug)]
+struct RecordingManifestCollection {
+    items: Vec<(RecordingManifest, PathBuf)>,
+    quarantined: Vec<Value>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct PrivacyEvent {
@@ -253,6 +273,12 @@ impl RecordingStore {
                 return Self {
                     root: PathBuf::from(path),
                     root_kind: "env-override",
+                    #[cfg(test)]
+                    available_space_override: None,
+                    #[cfg(test)]
+                    fail_space_probe: false,
+                    #[cfg(test)]
+                    fail_tombstone_removal: false,
                 };
             }
         }
@@ -260,6 +286,12 @@ impl RecordingStore {
         Self {
             root: default_data_root(),
             root_kind: "local-user-data",
+            #[cfg(test)]
+            available_space_override: None,
+            #[cfg(test)]
+            fail_space_probe: false,
+            #[cfg(test)]
+            fail_tombstone_removal: false,
         }
     }
 
@@ -268,7 +300,28 @@ impl RecordingStore {
         Self {
             root,
             root_kind: "test-root",
+            available_space_override: Some(u64::MAX),
+            fail_space_probe: false,
+            fail_tombstone_removal: false,
         }
+    }
+
+    #[cfg(test)]
+    fn with_available_space(mut self, available_bytes: u64) -> Self {
+        self.available_space_override = Some(available_bytes);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_failed_space_probe(mut self) -> Self {
+        self.fail_space_probe = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_failed_tombstone_removal(mut self) -> Self {
+        self.fail_tombstone_removal = true;
+        self
     }
 
     pub fn status(&self) -> Result<Value, RecordingStoreError> {
@@ -283,6 +336,7 @@ impl RecordingStore {
             0
         };
         let encryption = self.chunk_encryption_status();
+        let storage_health = self.storage_health();
 
         Ok(json!({
             "rootKind": self.root_kind,
@@ -298,8 +352,95 @@ impl RecordingStore {
             "chunkFlushPolicy": "write_all+sync_all-per-chunk",
             "manifestPolicy": "json-manifest-rewritten-after-each-chunk",
             "recordingCount": recording_count,
+            "storageHealth": storage_health,
             "rawPathExposed": false
         }))
+    }
+
+    pub fn storage_health(&self) -> Value {
+        match self.available_space_bytes() {
+            Ok(available_bytes) => {
+                let level = if available_bytes < CAPTURE_START_RESERVE_BYTES {
+                    "blocking"
+                } else if available_bytes < LOW_DISK_THRESHOLD_BYTES {
+                    "low"
+                } else {
+                    "ok"
+                };
+                json!({
+                    "level": level,
+                    "availableBytes": available_bytes,
+                    "lowThresholdBytes": LOW_DISK_THRESHOLD_BYTES,
+                    "captureStartReserveBytes": CAPTURE_START_RESERVE_BYTES,
+                    "chunkWriteReserveBytes": CHUNK_WRITE_RESERVE_BYTES,
+                    "canStartRecording": available_bytes >= CAPTURE_START_RESERVE_BYTES,
+                    "canContinueCapture": available_bytes >= CHUNK_WRITE_RESERVE_BYTES
+                        .saturating_add(MAX_DURABLE_CHUNK_BYTES as u64)
+                        .saturating_add(MANIFEST_WRITE_HEADROOM_BYTES),
+                    "measuredAtMs": now_ms(),
+                    "rawPathExposed": false
+                })
+            }
+            Err(error) => json!({
+                "level": "unavailable",
+                "availableBytes": null,
+                "lowThresholdBytes": LOW_DISK_THRESHOLD_BYTES,
+                "captureStartReserveBytes": CAPTURE_START_RESERVE_BYTES,
+                "chunkWriteReserveBytes": CHUNK_WRITE_RESERVE_BYTES,
+                "canStartRecording": false,
+                "canContinueCapture": false,
+                "errorCode": error.code,
+                "measuredAtMs": now_ms(),
+                "rawPathExposed": false
+            }),
+        }
+    }
+
+    fn available_space_bytes(&self) -> Result<u64, RecordingStoreError> {
+        #[cfg(test)]
+        {
+            if self.fail_space_probe {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_STORAGE_PROBE_FAILED",
+                    "available local storage could not be measured",
+                ));
+            }
+            if let Some(available_bytes) = self.available_space_override {
+                return Ok(available_bytes);
+            }
+        }
+
+        fs::create_dir_all(&self.root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
+        fs2::available_space(&self.root).map_err(|_| {
+            RecordingStoreError::new(
+                "RECORDING_STORAGE_PROBE_FAILED",
+                "available local storage could not be measured",
+            )
+        })
+    }
+
+    fn ensure_capture_start_space(&self) -> Result<(), RecordingStoreError> {
+        let available_bytes = self.available_space_bytes()?;
+        if available_bytes < CAPTURE_START_RESERVE_BYTES {
+            return Err(RecordingStoreError::new(
+                "RECORDING_STORAGE_START_BLOCKED",
+                "free local storage is below the reserve required to start recording",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_chunk_write_space(&self, payload_bytes: usize) -> Result<(), RecordingStoreError> {
+        let required_bytes = CHUNK_WRITE_RESERVE_BYTES
+            .saturating_add(payload_bytes as u64)
+            .saturating_add(MANIFEST_WRITE_HEADROOM_BYTES);
+        if self.available_space_bytes()? < required_bytes {
+            return Err(RecordingStoreError::new(
+                "RECORDING_STORAGE_WRITE_BLOCKED",
+                "free local storage is below the reserve required for another durable chunk",
+            ));
+        }
+        Ok(())
     }
 
     pub fn retention_status(&self) -> Result<Value, RecordingStoreError> {
@@ -332,13 +473,14 @@ impl RecordingStore {
     }
 
     pub fn start(&self, params: StartRecordingParams) -> Result<Value, RecordingStoreError> {
+        self.ensure_capture_start_space()?;
         let recording_id = new_recording_id();
         let dir = self.recording_dir(&recording_id)?;
         fs::create_dir_all(&dir).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
 
         let now = now_ms();
         let manifest = RecordingManifest {
-            schema_version: 2,
+            schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
             recording_id: recording_id.clone(),
             label: params.label,
             state: RecordingState::Recording,
@@ -404,15 +546,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("RECORDING_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("RECORDING_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         manifest.chunks.push(DurableChunk {
             index,
@@ -498,15 +633,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("RECORDING_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("RECORDING_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         manifest.chunks.push(DurableChunk {
             index,
@@ -599,15 +727,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("RECORDING_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("RECORDING_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         let duration_ms = audio_duration_ms(
             bytes.len() as u64,
@@ -655,15 +776,263 @@ impl RecordingStore {
         Ok(recording_summary(&manifest, self.root_kind))
     }
 
+    pub(crate) fn mark_needs_recovery(
+        &self,
+        params: RecordingIdParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let dir = self.recording_dir(&params.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        if manifest.state != RecordingState::Finished {
+            manifest.state = RecordingState::NeedsRecovery;
+            manifest.updated_at_ms = now_ms();
+            write_manifest(&dir, &manifest)?;
+        }
+        Ok(recording_summary(&manifest, self.root_kind))
+    }
+
+    pub fn delete_finished(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let recording_id = params.recording_id;
+        let active_dir = self.recording_dir(&recording_id)?;
+        let tombstone_dir = self.deletion_tombstone_dir(&recording_id)?;
+        let pending_marker = self.deletion_pending_marker(&recording_id)?;
+
+        if active_dir.exists() {
+            if tombstone_dir.exists() {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_TOMBSTONE_CONFLICT",
+                    "active recording and deletion tombstone both exist",
+                ));
+            }
+            let manifest = read_manifest(&active_dir)?;
+            if manifest.state != RecordingState::Finished {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_NOT_FINALIZED",
+                    "only a durably finished recording can be permanently deleted",
+                ));
+            }
+            self.write_deletion_intent(&recording_id, &pending_marker)?;
+            let tombstone_root = self.root.join(DELETION_DATA_DIR);
+            fs::create_dir_all(&tombstone_root)
+                .map_err(io_error("RECORDING_DELETE_TOMBSTONE_CREATE_FAILED"))?;
+            fs::rename(&active_dir, &tombstone_dir)
+                .map_err(io_error("RECORDING_DELETE_RENAME_FAILED"))?;
+        } else if tombstone_dir.exists() {
+            let manifest = read_manifest(&tombstone_dir)?;
+            if manifest.state != RecordingState::Finished {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_NOT_FINALIZED",
+                    "deletion tombstone did not contain a finished recording",
+                ));
+            }
+            if !pending_marker.exists() {
+                self.write_deletion_intent(&recording_id, &pending_marker)?;
+            }
+        } else if !pending_marker.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NOT_FOUND",
+                "recording was not found in the local store",
+            ));
+        }
+
+        self.remove_deletion_tombstone(&recording_id, &tombstone_dir)
+    }
+
+    pub fn complete_deletion_metadata(
+        &self,
+        params: RecordingIdParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let recording_id = params.recording_id;
+        let active_dir = self.recording_dir(&recording_id)?;
+        let tombstone_dir = self.deletion_tombstone_dir(&recording_id)?;
+        if active_dir.exists() || tombstone_dir.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_DELETE_DATA_REMAINS",
+                "deletion metadata cannot be cleared while recording data remains",
+            ));
+        }
+
+        let quarantine_receipt = self
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{recording_id}.json"));
+        if quarantine_receipt.exists() {
+            fs::remove_file(&quarantine_receipt)
+                .map_err(io_error("RECORDING_DELETE_METADATA_CLEANUP_FAILED"))?;
+        }
+        let pending_marker = self.deletion_pending_marker(&recording_id)?;
+        if pending_marker.exists() {
+            fs::remove_file(&pending_marker)
+                .map_err(io_error("RECORDING_DELETE_METADATA_CLEANUP_FAILED"))?;
+        }
+
+        Ok(json!({
+            "recordingId": recording_id,
+            "state": "deleted",
+            "deleted": true,
+            "recordingDataRemoved": true,
+            "metadataCleanupComplete": true,
+            "permanent": true,
+            "rawPathExposed": false
+        }))
+    }
+
+    fn deletion_tombstone_dir(&self, recording_id: &str) -> Result<PathBuf, RecordingStoreError> {
+        validate_id(recording_id)?;
+        Ok(self.root.join(DELETION_DATA_DIR).join(recording_id))
+    }
+
+    fn deletion_pending_marker(&self, recording_id: &str) -> Result<PathBuf, RecordingStoreError> {
+        validate_id(recording_id)?;
+        Ok(self
+            .root
+            .join(DELETION_PENDING_DIR)
+            .join(format!("{recording_id}.json")))
+    }
+
+    fn write_deletion_intent(
+        &self,
+        recording_id: &str,
+        marker_path: &Path,
+    ) -> Result<(), RecordingStoreError> {
+        if marker_path.exists() {
+            return Ok(());
+        }
+        let pending_root = self.root.join(DELETION_PENDING_DIR);
+        fs::create_dir_all(&pending_root)
+            .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+        let temporary_path = pending_root.join(format!("{recording_id}.json.tmp"));
+        let bytes = serde_json::to_vec_pretty(&json!({
+            "intentVersion": 1,
+            "recordingId": recording_id,
+            "confirmedAtMs": now_ms(),
+            "permanent": true,
+            "contentIncluded": false,
+            "rawPathExposed": false
+        }))
+        .map_err(|err| {
+            RecordingStoreError::new("RECORDING_DELETE_INTENT_WRITE_FAILED", err.to_string())
+        })?;
+        {
+            let mut file = File::create(&temporary_path)
+                .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+            file.write_all(&bytes)
+                .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+            file.sync_all()
+                .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))?;
+        }
+        fs::rename(&temporary_path, marker_path)
+            .map_err(io_error("RECORDING_DELETE_INTENT_WRITE_FAILED"))
+    }
+
+    fn remove_deletion_tombstone(
+        &self,
+        recording_id: &str,
+        tombstone_dir: &Path,
+    ) -> Result<Value, RecordingStoreError> {
+        #[cfg(test)]
+        if self.fail_tombstone_removal && tombstone_dir.exists() {
+            return Ok(deletion_incomplete_result(
+                recording_id,
+                "RECORDING_DELETE_REMOVE_FAILED",
+            ));
+        }
+
+        if tombstone_dir.exists() && fs::remove_dir_all(tombstone_dir).is_err() {
+            return Ok(deletion_incomplete_result(
+                recording_id,
+                "RECORDING_DELETE_REMOVE_FAILED",
+            ));
+        }
+        Ok(json!({
+            "recordingId": recording_id,
+            "state": "metadataCleanupPending",
+            "deleted": false,
+            "recordingDataRemoved": true,
+            "activeLibraryRemoved": true,
+            "tombstoneRemoved": true,
+            "metadataCleanupComplete": false,
+            "retryRequired": true,
+            "permanent": true,
+            "rawPathExposed": false
+        }))
+    }
+
+    fn recover_pending_deletions(&self) -> Result<Value, RecordingStoreError> {
+        let pending_root = self.root.join(DELETION_PENDING_DIR);
+        if !pending_root.exists() {
+            return Ok(json!({
+                "completedDeletionIds": [],
+                "completedDeletionCount": 0,
+                "pendingDeletionCount": 0,
+                "rawPathExposed": false
+            }));
+        }
+
+        let mut completed = Vec::new();
+        let mut pending = 0_u64;
+        for entry in fs::read_dir(&pending_root)
+            .map_err(io_error("RECORDING_DELETE_RECOVERY_READ_FAILED"))?
+        {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    pending = pending.saturating_add(1);
+                    continue;
+                }
+            };
+            let Some(recording_id) = entry
+                .path()
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+            else {
+                pending = pending.saturating_add(1);
+                continue;
+            };
+            if validate_id(&recording_id).is_err() {
+                pending = pending.saturating_add(1);
+                continue;
+            }
+            match self.delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            }) {
+                Ok(result)
+                    if result
+                        .get("recordingDataRemoved")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false) =>
+                {
+                    completed.push(recording_id);
+                }
+                _ => pending = pending.saturating_add(1),
+            }
+        }
+
+        Ok(json!({
+            "completedDeletionCount": completed.len(),
+            "completedDeletionIds": completed,
+            "pendingDeletionCount": pending,
+            "rawPathExposed": false
+        }))
+    }
+
     pub fn recover(&self) -> Result<Value, RecordingStoreError> {
+        let deletion_recovery = self.recover_pending_deletions()?;
         let recordings_root = self.recordings_root();
         fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
 
         let mut recovered = Vec::new();
+        let mut quarantined = Vec::new();
         for entry in
             fs::read_dir(&recordings_root).map_err(io_error("RECORDING_STORE_READ_FAILED"))?
         {
-            let entry = entry.map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
             if !entry.path().is_dir() {
                 continue;
             }
@@ -671,21 +1040,24 @@ impl RecordingStore {
             if validate_id(&id).is_err() {
                 continue;
             }
-            let mut manifest = match read_manifest(&entry.path()) {
-                Ok(manifest) => manifest,
-                Err(_) => self.manifest_from_chunks(&id, &entry.path())?,
-            };
-            let scanned_chunks = self.scan_chunks(&id, &entry.path())?;
-            if scanned_chunks.len() > manifest.chunks.len() {
-                manifest.chunks = scanned_chunks;
-            }
-            if manifest.state == RecordingState::Recording {
-                manifest.state = RecordingState::NeedsRecovery;
-            }
-            manifest.updated_at_ms = now_ms();
-            write_manifest(&entry.path(), &manifest)?;
-            if manifest.state == RecordingState::NeedsRecovery {
-                recovered.push(recording_summary(&manifest, self.root_kind));
+            let recovery_result = (|| -> Result<Option<Value>, RecordingStoreError> {
+                let mut manifest = self.load_or_rebuild_manifest(&id, &entry.path())?;
+                let scanned_chunks = self.scan_chunks(&id, &entry.path())?;
+                if scanned_chunks.len() > manifest.chunks.len() {
+                    manifest.chunks = scanned_chunks;
+                }
+                if manifest.state == RecordingState::Recording {
+                    manifest.state = RecordingState::NeedsRecovery;
+                }
+                manifest.updated_at_ms = now_ms();
+                write_manifest(&entry.path(), &manifest)?;
+                Ok((manifest.state == RecordingState::NeedsRecovery)
+                    .then(|| recording_summary(&manifest, self.root_kind)))
+            })();
+            match recovery_result {
+                Ok(Some(summary)) => recovered.push(summary),
+                Ok(None) => {}
+                Err(error) => quarantined.push(self.quarantine_summary(&id, error.code)),
             }
         }
 
@@ -693,12 +1065,22 @@ impl RecordingStore {
             "rootKind": self.root_kind,
             "rawPathExposed": false,
             "recoveredRecordings": recovered,
-            "recoveredCount": recovered.len()
+            "recoveredCount": recovered.len(),
+            "quarantinedRecordings": quarantined,
+            "quarantinedCount": quarantined.len(),
+            "completedDeletionIds": deletion_recovery["completedDeletionIds"],
+            "completedDeletionCount": deletion_recovery["completedDeletionCount"],
+            "pendingDeletionCount": deletion_recovery["pendingDeletionCount"]
         }))
     }
 
     pub fn list(&self) -> Result<Value, RecordingStoreError> {
-        let mut recordings = self.all_recording_summaries()?;
+        let collection = self.collect_recording_manifests()?;
+        let mut recordings = collection
+            .items
+            .into_iter()
+            .map(|(manifest, _dir)| recording_summary(&manifest, self.root_kind))
+            .collect::<Vec<_>>();
         recordings.sort_by_key(|value| {
             std::cmp::Reverse(
                 value
@@ -711,13 +1093,20 @@ impl RecordingStore {
             "rootKind": self.root_kind,
             "rawPathExposed": false,
             "recordingCount": recordings.len(),
-            "recordings": recordings
+            "recordings": recordings,
+            "quarantinedCount": collection.quarantined.len(),
+            "quarantinedRecordings": collection.quarantined
         }))
     }
 
     pub fn list_page(&self, params: RecordingPageParams) -> Result<Value, RecordingStoreError> {
         let (offset, limit) = page_bounds(params.offset, params.limit)?;
-        let mut recordings = self.all_recording_summaries()?;
+        let collection = self.collect_recording_manifests()?;
+        let mut recordings = collection
+            .items
+            .into_iter()
+            .map(|(manifest, _dir)| recording_summary(&manifest, self.root_kind))
+            .collect::<Vec<_>>();
         recordings.sort_by_key(|value| {
             std::cmp::Reverse(
                 value
@@ -739,7 +1128,9 @@ impl RecordingStore {
             "limit": limit,
             "totalCount": total_count,
             "hasMore": offset.saturating_add(page.len()) < total_count,
-            "recordings": page
+            "recordings": page,
+            "quarantinedCount": collection.quarantined.len(),
+            "quarantinedRecordings": collection.quarantined
         }))
     }
 
@@ -1014,15 +1405,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("NOTES_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("NOTES_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("NOTES_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         manifest.chunks.push(DurableChunk {
             index,
@@ -1093,9 +1477,19 @@ impl RecordingStore {
         }
         let query_lower = query.to_ascii_lowercase();
         let mut matches = Vec::new();
+        let collection = self.collect_recording_manifests()?;
+        let mut quarantined_count = collection.quarantined.len() as u64;
 
-        for (manifest, dir) in self.all_recording_manifests()? {
-            for chunk in self.read_manifest_chunks(&manifest, &dir)? {
+        for (manifest, dir) in collection.items {
+            let chunks = match self.read_manifest_chunks(&manifest, &dir) {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    let _ = self.quarantine_summary(&manifest.recording_id, error.code);
+                    quarantined_count = quarantined_count.saturating_add(1);
+                    continue;
+                }
+            };
+            for chunk in chunks {
                 let text = chunk
                     .get("textUtf8")
                     .and_then(Value::as_str)
@@ -1120,6 +1514,7 @@ impl RecordingStore {
             "rawPathExposed": false,
             "query": query,
             "matchCount": matches.len(),
+            "quarantinedCount": quarantined_count,
             "matches": matches
         }))
     }
@@ -1648,7 +2043,12 @@ impl RecordingStore {
                 continue;
             }
             let encrypted = file_name.ends_with(ENCRYPTED_CHUNK_EXT);
-            let index = chunk_index_from_name(&file_name).unwrap_or(chunks.len() as u32);
+            let index = chunk_index_from_name(&file_name).ok_or_else(|| {
+                RecordingStoreError::new(
+                    "RECORDING_CHUNK_NAME_INVALID",
+                    "recording chunk file name did not contain a valid index",
+                )
+            })?;
             let metadata = entry
                 .metadata()
                 .map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
@@ -1681,19 +2081,109 @@ impl RecordingStore {
             });
         }
         chunks.sort_by_key(|chunk| chunk.index);
+        for (expected_index, chunk) in chunks.iter().enumerate() {
+            if chunk.index != expected_index as u32 {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_CHUNK_SEQUENCE_INVALID",
+                    "recording chunk files must be contiguous from zero",
+                ));
+            }
+        }
         Ok(chunks)
     }
 
-    fn all_recording_manifests(
+    fn load_or_rebuild_manifest(
         &self,
-    ) -> Result<Vec<(RecordingManifest, PathBuf)>, RecordingStoreError> {
+        recording_id: &str,
+        dir: &Path,
+    ) -> Result<RecordingManifest, RecordingStoreError> {
+        match read_manifest(dir) {
+            Ok(manifest) => Ok(manifest),
+            Err(error)
+                if matches!(
+                    error.code,
+                    "RECORDING_MANIFEST_SCHEMA_TOO_NEW" | "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED"
+                ) =>
+            {
+                Err(error)
+            }
+            Err(_) => self.manifest_from_chunks(recording_id, dir),
+        }
+    }
+
+    fn quarantine_summary(&self, recording_id: &str, reason_code: &'static str) -> Value {
+        let receipt_persisted = self
+            .write_quarantine_receipt(recording_id, reason_code)
+            .is_ok();
+        json!({
+            "recordingId": recording_id,
+            "reasonCode": reason_code,
+            "receiptPersisted": receipt_persisted,
+            "contentModified": false,
+            "rawPathExposed": false
+        })
+    }
+
+    fn write_quarantine_receipt(
+        &self,
+        recording_id: &str,
+        reason_code: &'static str,
+    ) -> Result<(), RecordingStoreError> {
+        validate_id(recording_id)?;
+        let receipt_root = self.root.join(QUARANTINE_RECEIPTS_DIR);
+        fs::create_dir_all(&receipt_root).map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+        let receipt_path = receipt_root.join(format!("{recording_id}.json"));
+        let temporary_path = receipt_root.join(format!("{recording_id}.json.tmp"));
+        if receipt_path.exists() {
+            let _ = fs::remove_file(&temporary_path);
+            return Ok(());
+        }
+        let receipt = json!({
+            "receiptVersion": 1,
+            "recordingId": recording_id,
+            "reasonCode": reason_code,
+            "detectedAtMs": now_ms(),
+            "contentModified": false,
+            "rawPathExposed": false
+        });
+        let bytes = serde_json::to_vec_pretty(&receipt).map_err(|err| {
+            RecordingStoreError::new("RECORDING_QUARANTINE_WRITE_FAILED", err.to_string())
+        })?;
+        {
+            let mut file = File::create(&temporary_path)
+                .map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+            file.write_all(&bytes)
+                .map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+            file.sync_all()
+                .map_err(io_error("RECORDING_QUARANTINE_WRITE_FAILED"))?;
+        }
+        match fs::rename(&temporary_path, &receipt_path) {
+            Ok(()) => Ok(()),
+            Err(_) if receipt_path.exists() => {
+                let _ = fs::remove_file(&temporary_path);
+                Ok(())
+            }
+            Err(error) => Err(RecordingStoreError::new(
+                "RECORDING_QUARANTINE_WRITE_FAILED",
+                error.to_string(),
+            )),
+        }
+    }
+
+    fn collect_recording_manifests(
+        &self,
+    ) -> Result<RecordingManifestCollection, RecordingStoreError> {
         let recordings_root = self.recordings_root();
         fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
-        let mut manifests = Vec::new();
+        let mut items = Vec::new();
+        let mut quarantined = Vec::new();
         for entry in
             fs::read_dir(&recordings_root).map_err(io_error("RECORDING_STORE_READ_FAILED"))?
         {
-            let entry = entry.map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => continue,
+            };
             if !entry.path().is_dir() {
                 continue;
             }
@@ -1701,13 +2191,19 @@ impl RecordingStore {
             if validate_id(&id).is_err() {
                 continue;
             }
-            let manifest = match read_manifest(&entry.path()) {
-                Ok(manifest) => manifest,
-                Err(_) => self.manifest_from_chunks(&id, &entry.path())?,
-            };
-            manifests.push((manifest, entry.path()));
+            match self.load_or_rebuild_manifest(&id, &entry.path()) {
+                Ok(manifest) => items.push((manifest, entry.path())),
+                Err(error) => quarantined.push(self.quarantine_summary(&id, error.code)),
+            }
         }
-        Ok(manifests)
+        Ok(RecordingManifestCollection { items, quarantined })
+    }
+
+    fn all_recording_manifests(
+        &self,
+    ) -> Result<Vec<(RecordingManifest, PathBuf)>, RecordingStoreError> {
+        self.collect_recording_manifests()
+            .map(|collection| collection.items)
     }
 
     fn all_recording_summaries(&self) -> Result<Vec<Value>, RecordingStoreError> {
@@ -1727,7 +2223,7 @@ impl RecordingStore {
         validate_id(recording_id)?;
         let dir = self.recording_dir(recording_id)?;
         let mut manifest = read_manifest(&dir)?;
-        manifest.schema_version = manifest.schema_version.max(2);
+        manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
         manifest.privacy_events.push(event);
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)
@@ -2137,6 +2633,22 @@ fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> V
     })
 }
 
+fn deletion_incomplete_result(recording_id: &str, error_code: &'static str) -> Value {
+    json!({
+        "recordingId": recording_id,
+        "state": "deletionIncomplete",
+        "deleted": false,
+        "recordingDataRemoved": false,
+        "activeLibraryRemoved": true,
+        "tombstoneRemoved": false,
+        "metadataCleanupComplete": false,
+        "retryRequired": true,
+        "errorCode": error_code,
+        "permanent": true,
+        "rawPathExposed": false
+    })
+}
+
 fn audio_replay_chunks(manifest: &RecordingManifest) -> Vec<Value> {
     let mut chunks = manifest
         .chunks
@@ -2305,13 +2817,19 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
             continue;
         }
         match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(bytes) => match parse_and_validate_manifest(&bytes, dir) {
                 Ok(manifest) => return Ok(manifest),
+                Err(error)
+                    if matches!(
+                        error.code,
+                        "RECORDING_MANIFEST_SCHEMA_TOO_NEW"
+                            | "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED"
+                    ) =>
+                {
+                    return Err(error);
+                }
                 Err(err) => {
-                    last_error = Some(RecordingStoreError::new(
-                        "RECORDING_MANIFEST_PARSE_FAILED",
-                        format!("failed to parse recording manifest: {err}"),
-                    ));
+                    last_error = Some(RecordingStoreError::new(err.code, err.message));
                 }
             },
             Err(err) => {
@@ -2328,6 +2846,122 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
             "recording manifest and recovery copies are missing",
         )
     }))
+}
+
+fn parse_and_validate_manifest(
+    bytes: &[u8],
+    dir: &Path,
+) -> Result<RecordingManifest, RecordingStoreError> {
+    let value: Value = serde_json::from_slice(bytes).map_err(|err| {
+        RecordingStoreError::new(
+            "RECORDING_MANIFEST_PARSE_FAILED",
+            format!("failed to parse recording manifest: {err}"),
+        )
+    })?;
+    let schema_version = value
+        .get("schemaVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| {
+            RecordingStoreError::new(
+                "RECORDING_MANIFEST_SCHEMA_INVALID",
+                "recording manifest schemaVersion must be an unsigned integer",
+            )
+        })?;
+    if schema_version > u64::from(CURRENT_MANIFEST_SCHEMA_VERSION) {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_SCHEMA_TOO_NEW",
+            format!(
+                "recording manifest schema {schema_version} is newer than supported schema {CURRENT_MANIFEST_SCHEMA_VERSION}"
+            ),
+        ));
+    }
+    if schema_version == 0 {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED",
+            "recording manifest schema 0 is unsupported",
+        ));
+    }
+
+    let manifest: RecordingManifest = serde_json::from_value(value).map_err(|err| {
+        RecordingStoreError::new(
+            "RECORDING_MANIFEST_PARSE_FAILED",
+            format!("failed to parse recording manifest: {err}"),
+        )
+    })?;
+    validate_manifest_structure(&manifest, dir)?;
+    Ok(manifest)
+}
+
+fn validate_manifest_structure(
+    manifest: &RecordingManifest,
+    dir: &Path,
+) -> Result<(), RecordingStoreError> {
+    let directory_id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            RecordingStoreError::new(
+                "RECORDING_MANIFEST_ID_MISMATCH",
+                "recording directory did not have a valid opaque identifier",
+            )
+        })?;
+    if manifest.recording_id != directory_id {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_ID_MISMATCH",
+            "recording manifest identifier did not match its directory",
+        ));
+    }
+
+    for (expected_index, chunk) in manifest.chunks.iter().enumerate() {
+        if chunk.index != expected_index as u32 {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_SEQUENCE_INVALID",
+                "recording manifest chunk indices must be contiguous from zero",
+            ));
+        }
+        let file_name = Path::new(&chunk.file_name);
+        if file_name.components().count() != 1
+            || file_name.file_name().and_then(|name| name.to_str())
+                != Some(chunk.file_name.as_str())
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_NAME_INVALID",
+                "recording manifest chunk name was not a local file name",
+            ));
+        }
+        if !dir.join(file_name).is_file() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_MISSING",
+                "recording manifest referenced a missing chunk",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_durable_chunk_file(path: &Path, payload: &[u8]) -> Result<(), RecordingStoreError> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
+    if let Err(error) = file.write_all(payload) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(RecordingStoreError::new(
+            "RECORDING_CHUNK_WRITE_FAILED",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(RecordingStoreError::new(
+            "RECORDING_CHUNK_FLUSH_FAILED",
+            error.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), RecordingStoreError> {
@@ -2781,6 +3415,193 @@ mod tests {
     }
 
     #[test]
+    fn corrupt_recording_is_quarantined_without_hiding_healthy_recordings() {
+        let store = temp_store();
+        let healthy = store
+            .start(StartRecordingParams {
+                label: Some("Healthy".to_string()),
+            })
+            .expect("start healthy recording");
+        let healthy_id = recording_id(&healthy);
+        store
+            .finish(RecordingIdParams {
+                recording_id: healthy_id.clone(),
+            })
+            .expect("finish healthy recording");
+
+        let corrupt_id = "corrupt-recording";
+        let corrupt_dir = store
+            .recording_dir(corrupt_id)
+            .expect("corrupt recording dir");
+        fs::create_dir_all(&corrupt_dir).expect("create corrupt recording");
+        fs::write(corrupt_dir.join(MANIFEST_FILE), b"not-json").expect("write corrupt manifest");
+        fs::write(corrupt_dir.join("chunk-000001.raw"), b"orphaned chunk")
+            .expect("write gapped chunk");
+        let manifest_before = fs::read(corrupt_dir.join(MANIFEST_FILE)).expect("read corrupt data");
+        let chunk_before =
+            fs::read(corrupt_dir.join("chunk-000001.raw")).expect("read corrupt chunk");
+
+        let listed = store.list().expect("list around corrupt recording");
+
+        assert_eq!(listed["recordingCount"], 1);
+        assert_eq!(listed["recordings"][0]["recordingId"], healthy_id);
+        assert_eq!(listed["quarantinedCount"], 1);
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["recordingId"],
+            corrupt_id
+        );
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["reasonCode"],
+            "RECORDING_CHUNK_SEQUENCE_INVALID"
+        );
+        assert_eq!(listed["quarantinedRecordings"][0]["contentModified"], false);
+        assert_eq!(
+            fs::read(corrupt_dir.join(MANIFEST_FILE)).expect("reread corrupt manifest"),
+            manifest_before
+        );
+        assert_eq!(
+            fs::read(corrupt_dir.join("chunk-000001.raw")).expect("reread corrupt chunk"),
+            chunk_before
+        );
+
+        let receipt_path = store
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{corrupt_id}.json"));
+        let receipt: Value =
+            serde_json::from_slice(&fs::read(receipt_path).expect("read quarantine receipt"))
+                .expect("parse quarantine receipt");
+        let receipt_keys = receipt
+            .as_object()
+            .expect("receipt object")
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            receipt_keys,
+            vec![
+                "contentModified",
+                "detectedAtMs",
+                "rawPathExposed",
+                "reasonCode",
+                "receiptVersion",
+                "recordingId",
+            ]
+        );
+
+        let recovered = store.recover().expect("recover around corrupt recording");
+        assert_eq!(recovered["quarantinedCount"], 1);
+        assert_eq!(
+            recovered["quarantinedRecordings"][0]["rawPathExposed"],
+            false
+        );
+    }
+
+    #[test]
+    fn future_manifest_is_left_byte_for_byte_untouched_and_not_rebuilt_from_backup() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Future manifest".to_string()),
+            })
+            .expect("start future recording");
+        let recording_id = recording_id(&started);
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("future recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        fs::copy(&manifest_path, dir.join("manifest.json.bak"))
+            .expect("preserve current-schema backup");
+        let mut future: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read current manifest"))
+                .expect("parse current manifest");
+        future["schemaVersion"] = json!(99);
+        future["futureOnly"] = json!({ "mustSurvive": true });
+        let future_bytes = serde_json::to_vec_pretty(&future).expect("serialize future manifest");
+        fs::write(&manifest_path, &future_bytes).expect("write future manifest");
+
+        let read_error = store
+            .read(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("future manifest must fail closed");
+        assert_eq!(read_error.code, "RECORDING_MANIFEST_SCHEMA_TOO_NEW");
+
+        let listed = store.list().expect("list around future manifest");
+        assert_eq!(listed["recordingCount"], 0);
+        assert_eq!(listed["quarantinedCount"], 1);
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["reasonCode"],
+            "RECORDING_MANIFEST_SCHEMA_TOO_NEW"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread future manifest"),
+            future_bytes
+        );
+
+        let recovered = store.recover().expect("recover around future manifest");
+        assert_eq!(recovered["recoveredCount"], 0);
+        assert_eq!(recovered["quarantinedCount"], 1);
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread future manifest after recovery"),
+            future_bytes
+        );
+    }
+
+    #[test]
+    fn unsupported_schema_zero_manifest_is_untouched_and_not_rebuilt_from_backup() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Unsupported manifest".to_string()),
+            })
+            .expect("start unsupported recording");
+        let recording_id = recording_id(&started);
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("unsupported recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        fs::copy(&manifest_path, dir.join("manifest.json.bak")).expect("preserve supported backup");
+        let mut unsupported: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read current manifest"))
+                .expect("parse current manifest");
+        unsupported["schemaVersion"] = json!(0);
+        unsupported["unsupportedOnly"] = json!({ "mustSurvive": true });
+        let unsupported_bytes =
+            serde_json::to_vec_pretty(&unsupported).expect("serialize unsupported manifest");
+        fs::write(&manifest_path, &unsupported_bytes).expect("write unsupported manifest");
+
+        let read_error = store
+            .read(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("unsupported manifest must fail closed");
+        assert_eq!(read_error.code, "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED");
+
+        let listed = store.list().expect("list around unsupported manifest");
+        assert_eq!(listed["recordingCount"], 0);
+        assert_eq!(listed["quarantinedCount"], 1);
+        assert_eq!(
+            listed["quarantinedRecordings"][0]["reasonCode"],
+            "RECORDING_MANIFEST_SCHEMA_UNSUPPORTED"
+        );
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread unsupported manifest"),
+            unsupported_bytes
+        );
+
+        let recovered = store
+            .recover()
+            .expect("recover around unsupported manifest");
+        assert_eq!(recovered["recoveredCount"], 0);
+        assert_eq!(recovered["quarantinedCount"], 1);
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread unsupported manifest after recovery"),
+            unsupported_bytes
+        );
+    }
+
+    #[test]
     fn unsafe_recording_ids_are_denied() {
         let store = temp_store();
         let error = store
@@ -2789,6 +3610,167 @@ mod tests {
             })
             .expect_err("unsafe id should fail");
         assert_eq!(error.code, "RECORDING_ID_INVALID");
+    }
+
+    #[test]
+    fn finished_recording_delete_uses_tombstone_and_clears_content_free_metadata() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Delete me".to_string()),
+            })
+            .expect("start recording to delete");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "private meeting content".to_string(),
+            })
+            .expect("write recording to delete");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording to delete");
+        store
+            .write_quarantine_receipt(&recording_id, "TEST_RECEIPT")
+            .expect("seed quarantine metadata");
+        let active_dir = store
+            .recording_dir(&recording_id)
+            .expect("active recording dir");
+        let marker = store
+            .deletion_pending_marker(&recording_id)
+            .expect("pending marker");
+
+        let removed = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("remove recording data");
+
+        assert_eq!(removed["state"], "metadataCleanupPending");
+        assert_eq!(removed["recordingDataRemoved"], true);
+        assert!(!active_dir.exists());
+        assert!(marker.is_file());
+        assert_eq!(
+            store.list().expect("list after delete")["recordingCount"],
+            0
+        );
+
+        let completed = store
+            .complete_deletion_metadata(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("complete delete metadata");
+        assert_eq!(completed["state"], "deleted");
+        assert_eq!(completed["deleted"], true);
+        assert!(!marker.exists());
+        assert!(!store
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{recording_id}.json"))
+            .exists());
+    }
+
+    #[test]
+    fn deletion_rejects_recording_and_recovery_states() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start active recording");
+        let recording_id = recording_id(&started);
+
+        let active_error = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("active recording delete must fail");
+        assert_eq!(active_error.code, "RECORDING_DELETE_NOT_FINALIZED");
+        store
+            .mark_needs_recovery(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("mark recording for recovery");
+        let recovery_error = store
+            .delete_finished(RecordingIdParams { recording_id })
+            .expect_err("recovery recording delete must fail");
+        assert_eq!(recovery_error.code, "RECORDING_DELETE_NOT_FINALIZED");
+    }
+
+    #[test]
+    fn incomplete_tombstone_removal_is_resumed_on_recovery() {
+        let root = temp_store().root;
+        let store = RecordingStore::with_root(root.clone());
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Interrupted delete".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let failing_store = RecordingStore::with_root(root.clone()).with_failed_tombstone_removal();
+
+        let incomplete = failing_store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("return structured incomplete deletion");
+
+        assert_eq!(incomplete["state"], "deletionIncomplete");
+        assert_eq!(incomplete["retryRequired"], true);
+        assert!(failing_store
+            .deletion_tombstone_dir(&recording_id)
+            .expect("tombstone path")
+            .exists());
+        assert_eq!(
+            failing_store.list().expect("list after rename")["recordingCount"],
+            0
+        );
+
+        let recovery_store = RecordingStore::with_root(root);
+        let recovery = recovery_store.recover().expect("resume deletion");
+        assert_eq!(recovery["completedDeletionCount"], 1);
+        assert_eq!(recovery["completedDeletionIds"][0], recording_id);
+        assert_eq!(recovery["pendingDeletionCount"], 0);
+        assert!(!recovery_store
+            .deletion_tombstone_dir(&recording_id)
+            .expect("tombstone path")
+            .exists());
+    }
+
+    #[test]
+    fn synced_delete_intent_resumes_a_crash_before_the_rename() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Pre-rename crash".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let marker = store
+            .deletion_pending_marker(&recording_id)
+            .expect("pending marker");
+        store
+            .write_deletion_intent(&recording_id, &marker)
+            .expect("write confirmed deletion intent");
+
+        let recovery = store.recover().expect("resume pre-rename deletion");
+
+        assert_eq!(recovery["completedDeletionIds"][0], recording_id);
+        assert!(!store
+            .recording_dir(&recording_id)
+            .expect("active dir")
+            .exists());
     }
 
     #[test]
@@ -2860,6 +3842,85 @@ mod tests {
             .as_str()
             .expect("markdown")
             .contains("Focus on the core platform refresh."));
+    }
+
+    #[test]
+    fn search_skips_unreadable_recording_content_and_returns_healthy_matches() {
+        let store = temp_store();
+        let healthy = store
+            .start(StartRecordingParams {
+                label: Some("Healthy search".to_string()),
+            })
+            .expect("start healthy search recording");
+        let healthy_id = recording_id(&healthy);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: healthy_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "platform decision".to_string(),
+            })
+            .expect("write healthy search chunk");
+        store
+            .finish(RecordingIdParams {
+                recording_id: healthy_id.clone(),
+            })
+            .expect("finish healthy search recording");
+
+        let unreadable_id = "unreadable-content";
+        let unreadable_dir = store
+            .recording_dir(unreadable_id)
+            .expect("unreadable recording dir");
+        fs::create_dir_all(&unreadable_dir).expect("create unreadable recording");
+        let chunk_name = "chunk-000000.raw";
+        fs::write(unreadable_dir.join(chunk_name), [0xff, 0xfe])
+            .expect("write invalid UTF-8 chunk");
+        let now = now_ms();
+        write_manifest(
+            &unreadable_dir,
+            &RecordingManifest {
+                schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
+                recording_id: unreadable_id.to_string(),
+                label: Some("Unreadable".to_string()),
+                state: RecordingState::Finished,
+                created_at_ms: now,
+                updated_at_ms: now,
+                chunks: vec![DurableChunk {
+                    index: 0,
+                    kind: DurableChunkKind::TranscriptText,
+                    file_name: chunk_name.to_string(),
+                    channel: "mic".to_string(),
+                    bytes: 2,
+                    stored_bytes: 2,
+                    encrypted: false,
+                    cipher: None,
+                    speaker: None,
+                    confidence: None,
+                    sample_rate_hz: None,
+                    channel_count: None,
+                    bits_per_sample: None,
+                    start_ms: None,
+                    duration_ms: None,
+                    created_at_ms: now,
+                }],
+                privacy_events: Vec::new(),
+            },
+        )
+        .expect("write unreadable manifest");
+
+        let searched = store
+            .search(SearchRecordingsParams {
+                query: "platform".to_string(),
+            })
+            .expect("search around unreadable content");
+
+        assert_eq!(searched["matchCount"], 1);
+        assert_eq!(searched["matches"][0]["recordingId"], healthy_id);
+        assert_eq!(searched["quarantinedCount"], 1);
+        assert!(store
+            .root
+            .join(QUARANTINE_RECEIPTS_DIR)
+            .join(format!("{unreadable_id}.json"))
+            .is_file());
     }
 
     #[test]
@@ -3330,6 +4391,119 @@ mod tests {
         assert_eq!(error.code, "RECORDING_CHUNK_CREATE_FAILED");
         let manifest = read_manifest(&dir).expect("read unchanged manifest");
         assert!(manifest.chunks.is_empty());
+    }
+
+    #[test]
+    fn storage_health_is_pathless_and_distinguishes_ok_low_blocking_and_unavailable() {
+        let root = temp_store().root;
+        let ok = RecordingStore::with_root(root.join("ok"))
+            .with_available_space(LOW_DISK_THRESHOLD_BYTES);
+        let low = RecordingStore::with_root(root.join("low"))
+            .with_available_space(CAPTURE_START_RESERVE_BYTES);
+        let blocking = RecordingStore::with_root(root.join("blocking"))
+            .with_available_space(CAPTURE_START_RESERVE_BYTES - 1);
+        let unavailable =
+            RecordingStore::with_root(root.join("unavailable")).with_failed_space_probe();
+
+        assert_eq!(ok.storage_health()["level"], "ok");
+        assert_eq!(ok.storage_health()["canStartRecording"], true);
+        assert_eq!(low.storage_health()["level"], "low");
+        assert_eq!(low.storage_health()["canStartRecording"], true);
+        assert_eq!(blocking.storage_health()["level"], "blocking");
+        assert_eq!(blocking.storage_health()["canStartRecording"], false);
+        assert_eq!(blocking.storage_health()["rawPathExposed"], false);
+        assert_eq!(unavailable.storage_health()["level"], "unavailable");
+        assert_eq!(unavailable.storage_health()["canStartRecording"], false);
+        assert_eq!(
+            unavailable.storage_health()["errorCode"],
+            "RECORDING_STORAGE_PROBE_FAILED"
+        );
+    }
+
+    #[test]
+    fn filesystem_space_probe_reads_the_temporary_volume_without_paths() {
+        let root = env::temp_dir().join(format!("candor-storage-probe-{}", new_recording_id()));
+        let store = RecordingStore {
+            root: root.clone(),
+            root_kind: "test-root",
+            available_space_override: None,
+            fail_space_probe: false,
+            fail_tombstone_removal: false,
+        };
+
+        let health = store.storage_health();
+
+        assert_ne!(health["level"], "unavailable");
+        assert!(health["availableBytes"].as_u64().is_some());
+        assert_eq!(health["rawPathExposed"], false);
+        assert!(health.get("path").is_none());
+        fs::remove_dir_all(root).expect("remove temporary storage probe root");
+    }
+
+    #[test]
+    fn capture_start_is_blocked_below_reserve_without_creating_a_recording() {
+        let store = temp_store().with_available_space(CAPTURE_START_RESERVE_BYTES - 1);
+
+        let error = store
+            .start(StartRecordingParams {
+                label: Some("must not start".to_string()),
+            })
+            .expect_err("low storage must block capture start");
+
+        assert_eq!(error.code, "RECORDING_STORAGE_START_BLOCKED");
+        assert!(!store.recordings_root().exists());
+    }
+
+    #[test]
+    fn blocked_chunk_write_preserves_the_last_committed_manifest() {
+        let root = temp_store().root;
+        let healthy_store =
+            RecordingStore::with_root(root.clone()).with_available_space(LOW_DISK_THRESHOLD_BYTES);
+        let started = healthy_store
+            .start(StartRecordingParams {
+                label: Some("storage boundary".to_string()),
+            })
+            .expect("start before storage pressure");
+        let recording_id = recording_id(&started);
+        let dir = healthy_store
+            .recording_dir(&recording_id)
+            .expect("recording dir");
+        let manifest_before = fs::read(dir.join(MANIFEST_FILE)).expect("read committed manifest");
+        let pressured_store =
+            RecordingStore::with_root(root).with_available_space(CHUNK_WRITE_RESERVE_BYTES);
+
+        let error = pressured_store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "must not be partially committed".to_string(),
+            })
+            .expect_err("chunk must stop before storage reserve");
+
+        assert_eq!(error.code, "RECORDING_STORAGE_WRITE_BLOCKED");
+        assert_eq!(
+            fs::read(dir.join(MANIFEST_FILE)).expect("reread committed manifest"),
+            manifest_before
+        );
+        assert!(!dir.join("chunk-000000.raw").exists());
+        assert!(!dir.join("chunk-000000.cchunk").exists());
+        let manifest = read_manifest(&dir).expect("read preserved manifest");
+        assert_eq!(manifest.state, RecordingState::Recording);
+        assert!(manifest.chunks.is_empty());
+    }
+
+    #[test]
+    fn failed_space_probe_blocks_start_without_exposing_a_path() {
+        let store = temp_store().with_failed_space_probe();
+        let health = store.storage_health();
+
+        let error = store
+            .start(StartRecordingParams { label: None })
+            .expect_err("unknown storage must fail closed");
+
+        assert_eq!(error.code, "RECORDING_STORAGE_PROBE_FAILED");
+        assert_eq!(health["rawPathExposed"], false);
+        assert!(health.get("path").is_none());
     }
 
     #[test]

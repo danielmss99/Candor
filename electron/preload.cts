@@ -8,144 +8,95 @@ type JsonValue =
   | JsonValue[]
   | { [key: string]: JsonValue };
 
-const allowedMethods = new Set([
-  "core.ping",
-  "core.version",
-  "core.capabilities",
-  "core.status",
-  "vault.openLocal",
-  "vault.status",
-  "privacy.auditSnapshot",
-  "privacy.capabilities",
-  "updates.status",
-  "import.v2.status",
-  "consent.status",
-  "consent.acknowledge",
-  "capture.status",
-  "capture.devices",
-  "capture.startMic",
-  "capture.startSystem",
-  "capture.startMicAndSystem",
-  "capture.stop",
-  "models.status",
-  "models.listLocal",
-  "models.verifyLocal",
-  "ai.status",
-  "ai.askHeuristic",
-  "ai.recapHeuristic",
-  "ai.instructAssetsStatus",
-  "ai.instructStatus",
-  "ai.askInstruct",
-  "ai.recapInstruct",
-  "ai.schedulerStatus",
-  "transcription.status",
-  "transcription.runLocal",
-  "recording.durable.listPage",
-  "recording.durable.read",
-  "recording.durable.replayManifest",
-  "recording.durable.transcriptPage",
-  "recording.privacyReceipt",
-  "recording.durable.readAudioChunk",
-  "recording.durable.search",
-  "recording.notes.read",
-  "recording.notes.save",
-  "retention.status",
-  "export.create",
-]);
-
-async function callCore(method: string, params: JsonValue = null): Promise<JsonValue> {
-  if (!allowedMethods.has(method)) {
-    throw new Error(`Method is not exposed to the renderer: ${method}`);
-  }
-  return (await ipcRenderer.invoke("candor-core:call", method, params)) as JsonValue;
-}
-
 contextBridge.exposeInMainWorld("candor", {
   core: Object.freeze({
-    ping: (echo?: JsonValue) => callCore("core.ping", echo ?? null),
-    version: () => callCore("core.version"),
-    capabilities: () => callCore("core.capabilities"),
-    status: () => callCore("core.status"),
-    vaultOpenLocal: () => callCore("vault.openLocal"),
-    vaultStatus: () => callCore("vault.status"),
-    privacyAuditSnapshot: () => callCore("privacy.auditSnapshot"),
-    privacyCapabilities: () => callCore("privacy.capabilities"),
-    updateStatus: () => callCore("updates.status"),
-    v2ImportStatus: () => callCore("import.v2.status"),
+    ping: () => ipcRenderer.invoke("candor-core:core-ping") as Promise<JsonValue>,
+    version: () => ipcRenderer.invoke("candor-core:core-version") as Promise<JsonValue>,
+    capabilities: () => ipcRenderer.invoke("candor-core:core-capabilities") as Promise<JsonValue>,
+    status: () => ipcRenderer.invoke("candor-core:core-status") as Promise<JsonValue>,
+    vaultOpenLocal: () => ipcRenderer.invoke("candor-core:vault-open-local") as Promise<JsonValue>,
+    vaultStatus: () => ipcRenderer.invoke("candor-core:vault-status") as Promise<JsonValue>,
+    privacyAuditSnapshot: () => ipcRenderer.invoke("candor-core:privacy-audit-snapshot") as Promise<JsonValue>,
+    privacyCapabilities: () => ipcRenderer.invoke("candor-core:privacy-capabilities") as Promise<JsonValue>,
+    updateStatus: () => ipcRenderer.invoke("candor-core:updates-status") as Promise<JsonValue>,
+    v2ImportStatus: () => ipcRenderer.invoke("candor-core:v2-import-status") as Promise<JsonValue>,
     v2ImportFromFolder: () =>
       ipcRenderer.invoke("candor-import:v2FromFolder") as Promise<JsonValue>,
-    consentStatus: () => callCore("consent.status"),
+    consentStatus: () => ipcRenderer.invoke("candor-core:consent-status") as Promise<JsonValue>,
     consentAcknowledge: (params: { items: string[] }) =>
-      callCore("consent.acknowledge", params),
-    captureStatus: () => callCore("capture.status"),
-    captureDevices: () => callCore("capture.devices"),
+      ipcRenderer.invoke("candor-core:consent-acknowledge", params) as Promise<JsonValue>,
+    captureStatus: () => ipcRenderer.invoke("candor-core:capture-status") as Promise<JsonValue>,
+    captureDevices: () => ipcRenderer.invoke("candor-core:capture-devices") as Promise<JsonValue>,
     captureStartMic: (params?: { label?: string; deviceId?: string; chunkMs?: number }) =>
-      callCore("capture.startMic", params ?? {}),
+      ipcRenderer.invoke("candor-core:capture-start-mic", params ?? {}) as Promise<JsonValue>,
     captureStartSystem: (params?: { label?: string; deviceId?: string; chunkMs?: number }) =>
-      callCore("capture.startSystem", params ?? {}),
+      ipcRenderer.invoke("candor-core:capture-start-system", params ?? {}) as Promise<JsonValue>,
     captureStartMicAndSystem: (params?: {
       label?: string;
       micDeviceId?: string;
       systemDeviceId?: string;
       chunkMs?: number;
-    }) => callCore("capture.startMicAndSystem", params ?? {}),
-    captureStop: () => callCore("capture.stop"),
-    modelsStatus: () => callCore("models.status"),
-    modelsListLocal: () => callCore("models.listLocal"),
+    }) => ipcRenderer.invoke("candor-core:capture-start-mic-and-system", params ?? {}) as Promise<JsonValue>,
+    captureStop: () => ipcRenderer.invoke("candor-core:capture-stop") as Promise<JsonValue>,
+    modelsStatus: () => ipcRenderer.invoke("candor-core:models-status") as Promise<JsonValue>,
+    modelsListLocal: () => ipcRenderer.invoke("candor-core:models-list-local") as Promise<JsonValue>,
     modelsVerifyLocal: (params?: { modelId?: string }) =>
-      callCore("models.verifyLocal", params ?? {}),
-    aiStatus: () => callCore("ai.status"),
+      ipcRenderer.invoke("candor-core:models-verify-local", params ?? {}) as Promise<JsonValue>,
+    aiStatus: () => ipcRenderer.invoke("candor-core:ai-status") as Promise<JsonValue>,
     aiAskHeuristic: (recordingId: string, question: string) =>
-      callCore("ai.askHeuristic", { recordingId, question }),
+      ipcRenderer.invoke("candor-core:ai-ask-heuristic", { recordingId, question }) as Promise<JsonValue>,
     aiRecapHeuristic: (recordingId: string) =>
-      callCore("ai.recapHeuristic", { recordingId }),
-    aiInstructAssetsStatus: () => callCore("ai.instructAssetsStatus"),
+      ipcRenderer.invoke("candor-core:ai-recap-heuristic", { recordingId }) as Promise<JsonValue>,
+    aiInstructAssetsStatus: () => ipcRenderer.invoke("candor-core:ai-instruct-assets-status") as Promise<JsonValue>,
     aiInstructAssetImportFromFile: (params: {
       assetKind: "runner" | "model";
       expectedSha256: string;
       replace?: boolean;
     }) => ipcRenderer.invoke("candor-instruct-assets:importFromFile", params) as Promise<JsonValue>,
-    aiInstructStatus: () => callCore("ai.instructStatus"),
+    aiInstructStatus: () => ipcRenderer.invoke("candor-core:ai-instruct-status") as Promise<JsonValue>,
     aiAskInstruct: (recordingId: string, question: string, maxTokens?: number) =>
-      callCore(
-        "ai.askInstruct",
+      ipcRenderer.invoke(
+        "candor-core:ai-ask-instruct",
         maxTokens === undefined ? { recordingId, question } : { recordingId, question, maxTokens },
-      ),
+      ) as Promise<JsonValue>,
     aiRecapInstruct: (recordingId: string, maxTokens?: number) =>
-      callCore(
-        "ai.recapInstruct",
+      ipcRenderer.invoke(
+        "candor-core:ai-recap-instruct",
         maxTokens === undefined ? { recordingId } : { recordingId, maxTokens },
-      ),
-    aiSchedulerStatus: () => callCore("ai.schedulerStatus"),
+      ) as Promise<JsonValue>,
+    aiSchedulerStatus: () => ipcRenderer.invoke("candor-core:ai-scheduler-status") as Promise<JsonValue>,
     modelsImportFromFile: (params: { modelId: string; replace?: boolean }) =>
       ipcRenderer.invoke("candor-models:importFromFile", params) as Promise<JsonValue>,
-    transcriptionStatus: () => callCore("transcription.status"),
+    transcriptionStatus: () => ipcRenderer.invoke("candor-core:transcription-status") as Promise<JsonValue>,
     transcriptionRunLocal: (params: {
       recordingId: string;
       channel?: string;
       modelId?: string;
       language?: string;
       initialPrompt?: string;
-    }) => callCore("transcription.runLocal", params),
+    }) => ipcRenderer.invoke("candor-core:transcription-run-local", params) as Promise<JsonValue>,
+    recordingDurableStatus: () => ipcRenderer.invoke("candor-core:recording-durable-status") as Promise<JsonValue>,
     recordingDurableListPage: (offset = 0, limit = 50) =>
-      callCore("recording.durable.listPage", { offset, limit }),
+      ipcRenderer.invoke("candor-core:recording-durable-list-page", { offset, limit }) as Promise<JsonValue>,
     recordingDurableRead: (recordingId: string) =>
-      callCore("recording.durable.read", { recordingId }),
+      ipcRenderer.invoke("candor-core:recording-durable-read", { recordingId }) as Promise<JsonValue>,
     recordingDurableReplayManifest: (recordingId: string) =>
-      callCore("recording.durable.replayManifest", { recordingId }),
-    recordingDurableTranscriptPage: (recordingId: string, offset = 0, limit = 200) =>
-      callCore("recording.durable.transcriptPage", { recordingId, offset, limit }),
+      ipcRenderer.invoke("candor-core:recording-durable-replay-manifest", { recordingId }) as Promise<JsonValue>,
+    recordingDurableTranscriptPage: (recordingId: string, offset = 0, limit = 100) =>
+      ipcRenderer.invoke("candor-core:recording-durable-transcript-page", { recordingId, offset, limit }) as Promise<JsonValue>,
     recordingPrivacyReceipt: (recordingId: string) =>
-      callCore("recording.privacyReceipt", { recordingId }),
+      ipcRenderer.invoke("candor-core:recording-privacy-receipt", { recordingId }) as Promise<JsonValue>,
     recordingDurableReadAudioChunk: (recordingId: string, index: number) =>
-      callCore("recording.durable.readAudioChunk", { recordingId, index }),
+      ipcRenderer.invoke("candor-core:recording-durable-read-audio-chunk", { recordingId, index }) as Promise<JsonValue>,
     recordingDurableSearch: (query: string) =>
-      callCore("recording.durable.search", { query }),
+      ipcRenderer.invoke("candor-core:recording-durable-search", { query }) as Promise<JsonValue>,
+    recordingDelete: (recordingId: string) =>
+      ipcRenderer.invoke("candor-recording:delete", { recordingId }) as Promise<JsonValue>,
     recordingNotesRead: (recordingId: string) =>
-      callCore("recording.notes.read", { recordingId }),
+      ipcRenderer.invoke("candor-core:recording-notes-read", { recordingId }) as Promise<JsonValue>,
     recordingNotesSave: (recordingId: string, markdown: string) =>
-      callCore("recording.notes.save", { recordingId, markdown }),
-    retentionStatus: () => callCore("retention.status"),
+      ipcRenderer.invoke("candor-core:recording-notes-save", { recordingId, markdown }) as Promise<JsonValue>,
+    retentionStatus: () => ipcRenderer.invoke("candor-core:retention-status") as Promise<JsonValue>,
     exportCreate: (params: {
       recordingId: string;
       format?: "markdown" | "docx" | "pdf" | "wav";
@@ -153,7 +104,7 @@ contextBridge.exposeInMainWorld("candor", {
       report?: JsonValue;
       options?: JsonValue;
     }) =>
-      callCore("export.create", params),
+      ipcRenderer.invoke("candor-core:export-create", params) as Promise<JsonValue>,
     exportSaveLocal: (params: {
       recordingId: string;
       format: "markdown" | "docx" | "pdf";
@@ -173,5 +124,7 @@ contextBridge.exposeInMainWorld("candor", {
     externalNavigationDisabled: true,
     networkPolicy: "disabled-by-default",
     supervisorStatus: () => ipcRenderer.invoke("candor-shell:supervisorStatus") as Promise<JsonValue>,
+    diagnosticsPreview: () => ipcRenderer.invoke("candor-diagnostics:preview") as Promise<JsonValue>,
+    diagnosticsSaveLocal: () => ipcRenderer.invoke("candor-diagnostics:saveLocal") as Promise<JsonValue>,
   }),
 });

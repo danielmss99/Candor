@@ -8,7 +8,7 @@ the stock Electron icon.
 ## Commands
 
     npm run v3:icons:check
-    npm run v3:icon-proof -- --release-dir release-v3-design-vetted-final15
+    npm run v3:icon-proof -- --release-dir release-v3
 
 ## Evidence
 

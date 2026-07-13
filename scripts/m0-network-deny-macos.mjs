@@ -41,8 +41,8 @@ function runCommand(command, args, options = {}) {
 
 function defaultExecutableCandidates() {
   return [
-    join(repoRoot, "release-v3", "mac", "Candor v3 M0.app", "Contents", "MacOS", "Candor v3 M0"),
-    join(repoRoot, "release-v3", "mac-arm64", "Candor v3 M0.app", "Contents", "MacOS", "Candor v3 M0"),
+    join(repoRoot, "release-v3", "mac", "Candor.app", "Contents", "MacOS", "Candor"),
+    join(repoRoot, "release-v3", "mac-arm64", "Candor.app", "Contents", "MacOS", "Candor"),
   ];
 }
 
@@ -159,27 +159,31 @@ function processTreeSnapshot(rootPid) {
 
 function isCandorProcessName(name) {
   const normalized = String(name ?? "").trim().toLowerCase();
-  return normalized === "candor-core" || normalized.startsWith("candor v3 m0");
+  return (
+    normalized === "candor" ||
+    normalized === "candor-core" ||
+    normalized.startsWith("candor helper")
+  );
 }
 
 function runPacketParserSelfTest() {
   const parsed = parsePktapPacket(
-    "00:00:00.000000 (en0, proc Candor v3 M0 Helper (Renderer):77619, out, so) IP 10.0.0.1.1 > 1.1.1.1.443",
+    "00:00:00.000000 (en0, proc Candor Helper (Renderer):77619, out, so) IP 10.0.0.1.1 > 1.1.1.1.443",
   );
   if (
-    parsed.processName !== "Candor v3 M0 Helper (Renderer)" ||
+    parsed.processName !== "Candor Helper (Renderer)" ||
     parsed.pid !== 77619 ||
     parsed.direction !== "out"
   ) {
     throw new Error("macOS PKTAP packet parser self-test failed");
   }
   const delegated = parsePktapPacket(
-    "00:00:00.000000 (proc mDNSResponder:184, eproc Candor v3 M0:77620, out) IP 10.0.0.1.1 > 1.1.1.1.53",
+    "00:00:00.000000 (proc mDNSResponder:184, eproc Candor:77620, out) IP 10.0.0.1.1 > 1.1.1.1.53",
   );
   if (
     delegated.processName !== "mDNSResponder" ||
     delegated.pid !== 184 ||
-    delegated.effectiveProcessName !== "Candor v3 M0" ||
+    delegated.effectiveProcessName !== "Candor" ||
     delegated.effectivePid !== 77620
   ) {
     throw new Error("macOS PKTAP effective-process parser self-test failed");

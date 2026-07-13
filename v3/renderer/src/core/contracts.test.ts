@@ -38,6 +38,31 @@ describe("versioned Candor contracts", () => {
     })).toThrow("audioDurationMs");
   });
 
+  it("preserves pathless quarantine facts from the core", () => {
+    const page = parseRecordingPage({
+      offset: 0,
+      limit: 50,
+      totalCount: 0,
+      hasMore: false,
+      recordings: [],
+      quarantinedCount: 1,
+      quarantinedRecordings: [{
+        recordingId: "rec-damaged",
+        reasonCode: "future-manifest-schema",
+        receiptPersisted: true,
+        contentModified: false,
+      }],
+    });
+
+    expect(page.quarantinedCount).toBe(1);
+    expect(page.quarantinedRecordings).toEqual([{
+      recordingId: "rec-damaged",
+      reasonCode: "future-manifest-schema",
+      receiptPersisted: true,
+      contentModified: false,
+    }]);
+  });
+
   it("rejects malformed transcript arrays", () => {
     expect(() => parseTranscriptPage({
       recordingId: "rec-1",

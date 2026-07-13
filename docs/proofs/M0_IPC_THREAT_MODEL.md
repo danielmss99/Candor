@@ -10,8 +10,10 @@ unexpected values, attempt unknown methods, or try to navigate/network out.
 ## Boundary
 
 - Renderer can access only `window.candor`.
-- Preload exposes a fixed method allowlist.
-- Electron main repeats the allowlist check before touching `candor-core`.
+- Preload exposes fixed named product functions backed by dedicated IPC
+  channels. It has no generic channel or Rust method selector.
+- Electron main owns the immutable channel-to-method map and validates every
+  payload with a method-specific runtime contract before touching `candor-core`.
 - Rust core has its own allowlist and returns `METHOD_NOT_ALLOWED` for unknown
   methods.
 - Preload exposes a separate frozen `window.candor.license` surface with only
@@ -34,10 +36,13 @@ unexpected values, attempt unknown methods, or try to navigate/network out.
   the core. The privacy receipt exposes facts but no raw paths or key material.
 - The renderer may call `privacy.capabilities` to obtain the core-owned network
   capability matrix. It cannot change policy or add a network endpoint.
-- Every core response includes the `m0-jsonrpc-stdio-1` protocol version.
-  Electron main rejects an invalid envelope. The typed renderer client verifies
-  the handshake once, assigns a request identity, and rejects malformed response
-  fields instead of silently coercing them into reassuring defaults.
+- Production requests include the `m0-jsonrpc-stdio-1` protocol version, the
+  same cryptographically random UUIDv4 in `id` and `requestId`, and an ISO UTC
+  timestamp. Rust validates all metadata and rejects partial, incompatible,
+  mismatched, invalid, or duplicate IDs. Every versioned response echoes both
+  IDs and the protocol version. Electron rejects mismatched IDs and malformed
+  success or failure envelopes. The handshake also validates core version,
+  schema version, capabilities, build target, and enabled features.
 - The renderer may call `exportSaveLocal` with a recording id, one of the three
   report formats, bounded structured report data, and bounded document options.
   Electron main owns the native save dialog and is the only layer that receives
@@ -122,13 +127,21 @@ unexpected values, attempt unknown methods, or try to navigate/network out.
 Electron main starts `candor-core`, tracks pending RPC calls, times calls out,
 rejects pending calls on process exit, and sends `core.shutdown` before quit.
 Startup is not considered healthy until Electron main completes a `core.version`
-handshake and records the expected `m0-jsonrpc-stdio-1` protocol version in the
-sidecar supervisor state.
+handshake and validates the complete typed handshake in the sidecar supervisor
+state.
+
+Rust reads stdin with a bounded frame reader rather than `BufRead::lines()`.
+Frames are capped at 4,000,000 bytes before allocation can grow beyond the
+boundary. Oversized frames are drained through the next newline, receive one
+`RPC_FRAME_TOO_LARGE` response, and do not desynchronize the following request.
+A bounded recent-ID registry rejects duplicate requests without unbounded memory
+growth.
 
 The supervisor state tracks lifecycle state, executable path, PID, restart
-count, last exit, and last handshake. The renderer can read only this structured
-status through `window.candor.shell.supervisorStatus()`. It cannot request a
-restart, access the raw process object, execute arbitrary commands, or call
+count, last exit, and last handshake internally. The renderer-safe supervisor
+view omits PID, complete paths, and protocol-fault text. Renderer-facing
+`core.status` also omits the core PID. The renderer cannot request a restart,
+access the raw process object, execute arbitrary commands, or call
 `core.shutdown`.
 
 ## Packaged Runtime Proof
@@ -173,6 +186,7 @@ and verifies these fail-closed cases:
   alive
 
 Rust unit tests cover the same malformed, oversized, and empty-frame behavior.
-Post-M0 should add sustained randomized fuzzing and compromised-renderer IPC
-tests around Electron main, but malformed core frames are now part of the M0
-verification gate.
+They also cover complete and partial versioned envelopes, protocol mismatch,
+duplicate request IDs, the full handshake, and recovery after an oversized
+frame. Post-M0 should still add sustained randomized fuzzing and
+compromised-renderer IPC tests around Electron main.

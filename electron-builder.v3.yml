@@ -1,5 +1,5 @@
 appId: com.candor.v3
-productName: Candor v3 M0
+productName: Candor
 directories:
   output: release-v3
   buildResources: build
@@ -8,7 +8,7 @@ files:
   - dist-v3/renderer/**/*
   - package.json
 extraResources:
-  - from: crates/candor-core/target/release
+  - from: build/core-bin
     to: bin
     filter:
       - candor-core

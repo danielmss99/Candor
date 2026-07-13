@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isReleaseArtifactName, isUnsafeReleaseArtifactName, releaseArtifactKind } from "./release-artifacts.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -74,18 +75,18 @@ function ciProvenance() {
 function packagedFiles() {
   if (process.platform === "win32") {
     return {
-      appExecutable: join(releaseDir, "win-unpacked", "Candor v3 M0.exe"),
+      appExecutable: join(releaseDir, "win-unpacked", "Candor.exe"),
       coreExecutable: join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe"),
       appArchive: join(releaseDir, "win-unpacked", "resources", "app.asar"),
     };
   }
   if (process.platform === "darwin") {
     const appRoot = firstExisting([
-      join(releaseDir, "mac", "Candor v3 M0.app"),
-      join(releaseDir, "mac-arm64", "Candor v3 M0.app"),
+      join(releaseDir, "mac", "Candor.app"),
+      join(releaseDir, "mac-arm64", "Candor.app"),
     ]);
     return {
-      appExecutable: join(appRoot, "Contents", "MacOS", "Candor v3 M0"),
+      appExecutable: join(appRoot, "Contents", "MacOS", "Candor"),
       coreExecutable: join(appRoot, "Contents", "Resources", "bin", "candor-core"),
       appArchive: join(appRoot, "Contents", "Resources", "app.asar"),
     };
@@ -93,7 +94,7 @@ function packagedFiles() {
   return {
     appExecutable: firstExisting([
       join(releaseDir, "linux-unpacked", "candor"),
-      join(releaseDir, "linux-unpacked", "Candor v3 M0"),
+      join(releaseDir, "linux-unpacked", "Candor"),
     ]),
     coreExecutable: join(releaseDir, "linux-unpacked", "resources", "bin", "candor-core"),
     appArchive: join(releaseDir, "linux-unpacked", "resources", "app.asar"),
@@ -103,34 +104,20 @@ function packagedFiles() {
 function releaseArtifactFiles() {
   const outputDir = releaseDir;
   if (!existsSync(outputDir)) return [];
-  return readdirSync(outputDir, { withFileTypes: true })
-    .filter((entry) => entry.isFile())
+  const entries = readdirSync(outputDir, { withFileTypes: true });
+  if (entries.some((entry) => entry.isFile() && isUnsafeReleaseArtifactName(entry.name))) {
+    throw new Error("release package names cannot contain path separators or line breaks");
+  }
+  return entries
+    .filter((entry) => entry.isFile() && isReleaseArtifactName(entry.name))
     .map((entry) => join(outputDir, entry.name))
-    .filter((path) => {
-      const name = path.split(/[\\/]/).at(-1) ?? "";
-      if (process.platform === "win32") {
-        return /\.exe$/i.test(name) && !/.__uninstaller\.exe$/i.test(name);
-      }
-      if (process.platform === "darwin") {
-        return /\.dmg$/i.test(name);
-      }
-      return /\.AppImage$/i.test(name) || /\.deb$/i.test(name);
-    });
+    .sort((left, right) => left.localeCompare(right));
 }
 
 function expectedReleaseArtifactKinds() {
   if (process.platform === "win32") return ["windows-installer"];
   if (process.platform === "darwin") return ["macos-dmg"];
   return ["linux-appimage", "linux-deb"];
-}
-
-function releaseArtifactKind(path) {
-  const name = path.split(/[\\/]/).at(-1) ?? "";
-  if (/\.AppImage$/i.test(name)) return "linux-appimage";
-  if (/\.deb$/i.test(name)) return "linux-deb";
-  if (/\.dmg$/i.test(name)) return "macos-dmg";
-  if (/\.exe$/i.test(name)) return "windows-installer";
-  return "unknown";
 }
 
 const proofDir = asPath(argValue("--proof-dir", "release-v3/proofs"));
@@ -159,6 +146,8 @@ const proofScripts = [
   "scripts/m0-network-deny-macos.mjs",
   "scripts/m0-verify.ps1",
   "scripts/v3-release-readiness-audit.mjs",
+  "scripts/release-artifacts.mjs",
+  "scripts/release-checksum-validation.mjs",
   "scripts/v3-release-artifact-smoke.mjs",
   "scripts/v3-release-signing-proof.mjs",
   "scripts/v3-source-security-proof.mjs",
@@ -301,7 +290,7 @@ const sourceFiles = [
 
 const packaged = packagedFiles();
 const releaseArtifacts = releaseArtifactFiles().map((path) => ({
-  kind: releaseArtifactKind(path),
+  kind: releaseArtifactKind(basename(path)),
   ...fileEntry(path),
 }));
 const manifest = {

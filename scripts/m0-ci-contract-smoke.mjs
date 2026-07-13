@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +16,9 @@ const electronBuilder = readFileSync(resolve(repoRoot, "electron-builder.v3.yml"
 const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "utf8");
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
+const releaseChecksums = readFileSync(resolve(repoRoot, "scripts", "v3-release-checksums.mjs"), "utf8");
+const releaseArtifacts = readFileSync(resolve(repoRoot, "scripts", "release-artifacts.mjs"), "utf8");
+const releaseChecksumValidation = readFileSync(resolve(repoRoot, "scripts", "release-checksum-validation.mjs"), "utf8");
 const packagedSmoke = readFileSync(resolve(repoRoot, "scripts", "m0-packaged-smoke.mjs"), "utf8");
 const releaseArtifactSmoke = readFileSync(resolve(repoRoot, "scripts", "v3-release-artifact-smoke.mjs"), "utf8");
 const transcriptionProofAudit = readFileSync(resolve(repoRoot, "scripts", "m2-transcription-proof-audit.mjs"), "utf8");
@@ -28,6 +31,41 @@ const m4LocalInstructPreflightDoc = readFileSync(resolve(repoRoot, "docs", "proo
 const m4RealLocalInstruct = readFileSync(resolve(repoRoot, "scripts", "m4-real-local-instruct-proof.mjs"), "utf8");
 const m4RealLocalInstructDoc = readFileSync(resolve(repoRoot, "docs", "proofs", "M4_REAL_LOCAL_INSTRUCT_PROOF.md"), "utf8");
 const packageJson = readFileSync(resolve(repoRoot, "package.json"), "utf8");
+const v2Importer = readFileSync(
+  resolve(repoRoot, "crates", "candor-core", "src", "v2_importer.rs"),
+  "utf8",
+);
+
+const forbiddenLegacyPaths = [
+  "src-tauri",
+  "src",
+  "scripts/tauri-dev.ps1",
+  "scripts/tauri-release.ps1",
+  ".github/workflows/tauri-build.yml",
+  "vite.config.ts",
+  "tsconfig.json",
+  "tsconfig.node.json",
+  "index.html",
+  "dev.ps1",
+];
+for (const legacyPath of forbiddenLegacyPaths) {
+  if (existsSync(resolve(repoRoot, legacyPath))) {
+    throw new Error(`Legacy desktop path must stay archived: ${legacyPath}`);
+  }
+}
+
+const workflowNames = readdirSync(resolve(repoRoot, ".github", "workflows"))
+  .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+  .sort();
+if (workflowNames.length !== 1 || workflowNames[0] !== "v3-m0.yml") {
+  throw new Error(`Electron CI must be the sole active workflow: ${workflowNames.join(", ")}`);
+}
+if (packageJson.includes("@tauri-apps/") || packageJson.includes('"tauri')) {
+  throw new Error("Legacy desktop package scripts or dependencies remain active.");
+}
+if (!v2Importer.includes('"originalsUntouched": true') || !v2Importer.includes("fs::canonicalize")) {
+  throw new Error("The path-contained, originals-untouched v2 importer must remain active.");
+}
 
 function requireIncludes(pattern, label) {
   if (!workflow.includes(pattern)) {
@@ -95,8 +133,12 @@ const requiredPatterns = [
   ["sudo chmod 4755 release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox setuid mode"],
   ["stat -c '%u:%g:%a' release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox ownership and mode assertion"],
   ["npm run v3:release-artifact-smoke", "release artifact contents smoke"],
+  ["name: Record release artifact provenance", "pre-checksum artifact provenance step"],
+  ["npm run v3:release-checksums && npm run v3:release-checksums:verify", "release checksum generation and verification"],
   ["npm run m0:packaged-smoke", "packaged smoke"],
   ["xvfb-run -a npm run m0:packaged-smoke", "Linux packaged smoke display wrapper"],
+  ["npm run test:electron", "Electron integration and accessibility tests"],
+  ["xvfb-run -a npm run test:electron", "Linux Electron integration and accessibility display wrapper"],
   ["npm run m0:network-deny:windows -- -ValidateOnly", "Windows proof validation"],
   ["npm run m0:network-deny:windows", "Windows network-deny proof"],
   ["npm run m0:network-deny:macos -- --validate-only", "macOS proof validation"],
@@ -234,6 +276,16 @@ for (const [contents, pattern, label] of [
   [releaseReadinessAudit, "release signing proof must show a signed macOS app bundle", "release readiness macOS app signing validator"],
   [releaseArtifactSmoke, "releaseGaps", "M0 structural package proof keeps release signing gaps explicit"],
   [releaseArtifactSmoke, "strictFailures", "strict artifact smoke promotes release gaps to failures"],
+  [releaseChecksums, 'proofKind: "v3-release-checksums"', "release checksum proof kind"],
+  [releaseChecksums, "SHA256SUMS", "release checksum manifest"],
+  [releaseChecksums, "networkAttempted: false", "release checksum network denial evidence"],
+  [releaseChecksums, "rawPathExposed: false", "release checksum path redaction evidence"],
+  [releaseChecksums, "tracked source tree must be clean", "release checksum clean-source enforcement"],
+  [releaseChecksums, "bindArtifactManifest", "release checksum artifact-manifest binding"],
+  [releaseArtifacts, "release-blockmap", "release artifact blockmap classification"],
+  [releaseArtifacts, "update-metadata", "release artifact update metadata classification"],
+  [releaseChecksumValidation, "total artifact count does not match manifest artifact count", "release checksum two-way count validation"],
+  [releaseChecksumValidation, "package names must be unique", "release checksum duplicate-name rejection"],
   [goalAudit, "proofKind: \"v3-goal-audit\"", "goal audit proof kind"],
   [goalAudit, "coordination.subagent_alignment", "goal audit subagent alignment requirement"],
   [goalAudit, "missionComplete", "goal audit mission completion field"],
@@ -332,6 +384,16 @@ requireOrder(
   "npm run electron:v3:dist",
   "npm run v3:release-artifact-smoke",
   "package before release artifact smoke",
+);
+requireOrder(
+  "npm run v3:release-artifact-smoke",
+  "name: Record release artifact provenance",
+  "artifact smoke before package provenance",
+);
+requireOrder(
+  "name: Record release artifact provenance",
+  "npm run v3:release-checksums && npm run v3:release-checksums:verify",
+  "package provenance before checksum verification",
 );
 requireOrder(
   "npm run v3:release-artifact-smoke",

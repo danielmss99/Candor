@@ -73,6 +73,48 @@ function numberValue(value, fallback = Number.NaN) {
   return typeof value === "number" ? value : fallback;
 }
 
+function classifyAbsolutePath(value) {
+  if (/(?:^|[^A-Za-z0-9+.-])[A-Za-z]:[\\/]/.test(value)) return "windows-absolute-path";
+  if (/\\\\[^\\\s]+[\\/]/.test(value)) return "windows-unc-path";
+  if (/file:\/\//i.test(value)) return "file-url";
+  if (/(?:^|[\s("'=])\/(?:Users|home|root|tmp|var|private|etc|usr|opt|Applications)(?:\/|$)/.test(value)) {
+    return "posix-absolute-path";
+  }
+  return null;
+}
+
+function rendererFacingPathFindings(payload) {
+  const findings = [];
+  const visit = (candidate, field) => {
+    if (typeof candidate === "string") {
+      const kind = classifyAbsolutePath(candidate);
+      if (kind && findings.length < 20) findings.push({ field, kind });
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      candidate.forEach((child, index) => visit(child, `${field}[${index}]`));
+      return;
+    }
+    if (candidate && typeof candidate === "object") {
+      Object.entries(candidate).forEach(([key, child]) => visit(child, `${field}.${key}`));
+    }
+  };
+
+  visit(
+    {
+      rendererBridge: payload?.rendererBridge,
+      rendererIsolationProbe: payload?.rendererIsolationProbe,
+      rendererVisualState: payload?.rendererVisualState,
+      licenseFixture: payload?.licenseFixture,
+      networkBlockProbe: payload?.networkBlockProbe,
+      designFixture: payload?.designFixture,
+      documentExportFixture: payload?.documentExportFixture,
+    },
+    "$renderer",
+  );
+  return findings;
+}
+
 function validateSourceProvenance(payload, label, failures) {
   requireField(validGitHead(payload?.git?.head), `${label} git head must be recorded`, failures);
   requireField(typeof payload?.git?.dirty === "boolean", `${label} git dirty flag must be recorded`, failures);
@@ -126,7 +168,7 @@ function validateWindowsReleaseIdentity(payload, failures) {
     appArchive: payload?.appArchivePath,
   };
   const expectedPaths = {
-    appExecutable: `${releaseDir}/win-unpacked/candor v3 m0.exe`,
+    appExecutable: `${releaseDir}/win-unpacked/candor.exe`,
     coreExecutable: `${releaseDir}/win-unpacked/resources/bin/candor-core.exe`,
     appArchive: `${releaseDir}/win-unpacked/resources/app.asar`,
   };
@@ -336,6 +378,32 @@ function validateSmokeProof(payload) {
     failures,
   );
   requireField(
+    payload?.rendererIsolationProbe?.invalidInputErrorSafe === true &&
+      payload?.rendererIsolationProbe?.invalidInputErrorCode === "INVALID_RENDERER_INPUT",
+    "renderer isolation probe must receive pathless structured input errors",
+    failures,
+  );
+  const measuredRendererPathFindings = rendererFacingPathFindings(payload);
+  requireField(
+    payload?.rendererPathAudit?.ok === true &&
+      numberValue(payload?.rendererPathAudit?.scannedStrings, 0) > 0 &&
+      Array.isArray(payload?.rendererPathAudit?.findings) &&
+      payload.rendererPathAudit.findings.length === 0,
+    "renderer path audit must report a successful measured scan",
+    failures,
+  );
+  requireField(
+    measuredRendererPathFindings.length === 0,
+    "renderer-facing smoke payloads must contain no absolute paths",
+    failures,
+  );
+  requireField(
+    payload?.rendererBridge?.supervisorStatus?.rawPathExposed === false &&
+      !Object.prototype.hasOwnProperty.call(payload?.rendererBridge?.supervisorStatus ?? {}, "executable"),
+    "renderer supervisor status must omit the core executable path",
+    failures,
+  );
+  requireField(
     payload?.rendererBridge?.status?.sidecarTransport === "stdio-json-lines",
     "renderer status must report stdio-json-lines",
     failures,
@@ -427,8 +495,9 @@ function validateSmokeProof(payload) {
     failures,
   );
   requireField(
-    payload?.rendererBridge?.supervisorStatus?.pid === payload?.rendererBridge?.status?.pid,
-    "renderer supervisor PID must match renderer status PID",
+    payload?.rendererBridge?.supervisorStatus?.pid === undefined &&
+      payload?.rendererBridge?.status?.pid === undefined,
+    "renderer status must omit process identifiers",
     failures,
   );
   requireField(
@@ -592,13 +661,19 @@ function validateSmokeProof(payload) {
     failures,
   );
   requireField(
+    payload?.networkBlockProbe?.renderer?.fileNavigation?.attempted === true &&
+      payload?.networkBlockProbe?.renderer?.fileNavigation?.stayedInApp === true,
+    "network block probe must prove arbitrary local file navigation denial",
+    failures,
+  );
+  requireField(
     payload?.networkBlockProbe?.renderer?.externalAllowedDelta === 0,
     "renderer network block probe must allow zero external requests",
     failures,
   );
   requireField(
     numberValue(payload?.networkBlockProbe?.renderer?.deniedWindowOpenDelta) >= 1 &&
-      numberValue(payload?.networkBlockProbe?.renderer?.deniedNavigationDelta) >= 1,
+      numberValue(payload?.networkBlockProbe?.renderer?.deniedNavigationDelta) >= 2,
     "renderer network block probe must increment denial counters",
     failures,
   );
@@ -768,8 +843,8 @@ function minimalValidSmokeProof() {
     sidecarTransport: "stdio-json-lines",
     protocolVersion: expectedProtocolVersion,
     networkPolicy: "disabled-by-default",
-    pid: 200,
   };
+  const mainStatus = { ...status, pid: 200 };
   return {
     ok: true,
     proofKind: "m0-packaged-runtime-smoke",
@@ -800,16 +875,23 @@ function minimalValidSmokeProof() {
       nodeProcessAvailable: false,
       ipcRendererAvailable: false,
       electronGlobalAvailable: false,
+      invalidInputErrorSafe: true,
+      invalidInputErrorCode: "INVALID_RENDERER_INPUT",
       rawPathExposed: false,
       keyMaterialExposedToRenderer: false,
+    },
+    rendererPathAudit: {
+      ok: true,
+      scannedStrings: 12,
+      findings: [],
     },
     rendererBridge: {
       preloadBridgePresent: true,
       supervisorStatus: {
         state: "running",
         restartCount: 1,
-        pid: 200,
         lastHandshake: handshake,
+        rawPathExposed: false,
       },
       status,
       capabilities: {
@@ -852,7 +934,7 @@ function minimalValidSmokeProof() {
       },
     },
     mainRpc: {
-      status,
+      status: mainStatus,
     },
     sidecarSupervisor: {
       state: "running",
@@ -875,7 +957,7 @@ function minimalValidSmokeProof() {
       externalAllowedRequests: 0,
       blockedRequests: 1,
       deniedWindowOpenRequests: 1,
-      deniedNavigationRequests: 1,
+      deniedNavigationRequests: 2,
     },
     networkBlockProbe: {
       renderer: {
@@ -889,7 +971,7 @@ function minimalValidSmokeProof() {
           blockedRequests: 0,
           externalAllowedRequests: 0,
           deniedWindowOpenRequests: 1,
-          deniedNavigationRequests: 1,
+          deniedNavigationRequests: 2,
         },
         fetch: {
           attempted: true,
@@ -903,10 +985,14 @@ function minimalValidSmokeProof() {
           attempted: true,
           stayedInApp: true,
         },
+        fileNavigation: {
+          attempted: true,
+          stayedInApp: true,
+        },
         externalAllowedDelta: 0,
         blockedDelta: 0,
         deniedWindowOpenDelta: 1,
-        deniedNavigationDelta: 1,
+        deniedNavigationDelta: 2,
       },
       sessionGuard: {
         before: {
@@ -1067,7 +1153,7 @@ function minimalValidReleaseArtifactSmokeProof() {
       },
       requiredEntries: [
         {
-          extractedPath: "Candor v3 M0.exe",
+          extractedPath: "Candor.exe",
           exists: true,
           hashMatchesUnpacked: true,
         },
@@ -1195,6 +1281,21 @@ function runSelfTest() {
     },
     "renderer isolation probe must find zero private core bridge methods",
   );
+  assertSelfTestFailure(
+    "renderer supervisor exposes executable path",
+    (payload) => {
+      payload.rendererBridge.supervisorStatus.executable = "C:\\Users\\example\\candor-core.exe";
+    },
+    "renderer-facing smoke payloads must contain no absolute paths",
+  );
+  assertSelfTestFailure(
+    "arbitrary local file navigation not measured",
+    (payload) => {
+      delete payload.networkBlockProbe.renderer.fileNavigation;
+      payload.networkBlockProbe.renderer.deniedNavigationDelta = 1;
+    },
+    "network block probe must prove arbitrary local file navigation denial",
+  );
 
   assertSelfTestFailure(
     "missing sidecar supervisor",
@@ -1307,7 +1408,7 @@ function runSelfTest() {
   );
 
   const windowsReleaseDir = "C:\\Candor";
-  const windowsAppPath = `${windowsReleaseDir}\\win-unpacked\\Candor v3 M0.exe`;
+  const windowsAppPath = `${windowsReleaseDir}\\win-unpacked\\Candor.exe`;
   const windowsCorePath = `${windowsReleaseDir}\\win-unpacked\\resources\\bin\\candor-core.exe`;
   const windowsAppArchivePath = `${windowsReleaseDir}\\win-unpacked\\resources\\app.asar`;
   const validWindowsSmoke = cloneJson(validSmoke);
@@ -1354,7 +1455,7 @@ function runSelfTest() {
   assertSelfTest(validWindowsNetworkFailures.length === 0, "valid Windows network proof should pass");
 
   const mixedWindowsSmoke = cloneJson(validWindowsSmoke);
-  mixedWindowsSmoke.executable = "C:\\OlderCandor\\win-unpacked\\Candor v3 M0.exe";
+  mixedWindowsSmoke.executable = "C:\\OlderCandor\\win-unpacked\\Candor.exe";
   const mixedWindowsReleaseFailures = [];
   validateWindowsReleaseIdentity(
     { ...validWindowsReleaseFields, smokeProof: mixedWindowsSmoke },
@@ -1452,7 +1553,7 @@ function runSelfTest() {
     proofKind: "m0-network-deny-windows",
     prerequisiteFailure: "administrator-required",
     error: "Run this script from an elevated PowerShell session so it can create and remove temporary firewall rules.",
-    appPath: "C:\\Candor\\Candor v3 M0.exe",
+    appPath: "C:\\Candor\\Candor.exe",
     corePath: "C:\\Candor\\resources\\bin\\candor-core.exe",
     temporaryFirewallRules: [],
     observedTcpConnections: [],
@@ -1515,7 +1616,7 @@ function runSelfTest() {
       applicationBaselinePacketCount: 0,
       denyProbeCounted: true,
       denyProbePacketCount: 1,
-      observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor v3 M0" }],
+      observedProcesses: [{ pid: 2000, ppid: 1999, uid: 501, gid: 62000, command: "Candor" }],
       processIdentityMismatches: [],
       observedPacketCount: 0,
       packetsWithoutProcessMetadata: [],
@@ -1565,7 +1666,7 @@ function runSelfTest() {
   const escapedIdentityManagedMacosProof = cloneJson(validManagedMacosProof);
   escapedIdentityManagedMacosProof.executionIdentity.processTreeComplete = false;
   escapedIdentityManagedMacosProof.packetAttribution.processIdentityMismatches = [
-    { pid: 2001, uid: 501, gid: 20, command: "Candor v3 M0 Helper" },
+    { pid: 2001, uid: 501, gid: 20, command: "Candor Helper" },
   ];
   const escapedIdentityManagedMacosFailures = validateNetworkProof(
     "macos",
@@ -1909,7 +2010,7 @@ function validateReleaseArtifactSmokeProof(osName, payload) {
   }
   if (osName === "windows") {
     requireField(payload?.currentPlatform?.installer?.exists === true, "Windows installer must exist", failures);
-    for (const expected of ["Candor v3 M0.exe", "resources/app.asar", "resources/bin/candor-core.exe"]) {
+    for (const expected of ["Candor.exe", "resources/app.asar", "resources/bin/candor-core.exe"]) {
       const entry = entries.find((candidate) => candidate?.extractedPath === expected);
       requireField(Boolean(entry), `Windows installer payload must include ${expected}`, failures);
       if (entry) {

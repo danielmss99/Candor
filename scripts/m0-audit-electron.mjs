@@ -8,6 +8,30 @@ const repoRoot = path.resolve(__dirname, "..");
 
 const files = [
   "electron/main.ts",
+  "electron/core/json.ts",
+  "electron/core/core-client.ts",
+  "electron/core/core-errors.ts",
+  "electron/core/protocol.ts",
+  "electron/core/renderer-boundary.ts",
+  "electron/core/request-registry.ts",
+  "electron/diagnostics/diagnostic-report.ts",
+  "electron/export/local-report.ts",
+  "electron/ipc/core-ipc.ts",
+  "electron/ipc/diagnostics-ipc.ts",
+  "electron/ipc/export-ipc.ts",
+  "electron/ipc/import-ipc.ts",
+  "electron/ipc/ipc-types.ts",
+  "electron/ipc/licensing-ipc.ts",
+  "electron/ipc/models-ipc.ts",
+  "electron/ipc/register-ipc.ts",
+  "electron/security/input-limits.ts",
+  "electron/security/validate-core-input.ts",
+  "electron/security/validate-sender.ts",
+  "electron/smoke/m0-smoke.ts",
+  "electron/security/network-policy.ts",
+  "electron/window/create-main-window.ts",
+  "electron/window/capture-close-guard.ts",
+  "electron/window/navigation-policy.ts",
   "electron/preload.cts",
   "v3/renderer/index.html",
   "vite.v3.config.ts",
@@ -23,6 +47,26 @@ const requiredMainPatterns = [
   "setPermissionCheckHandler",
   "setWindowOpenHandler",
   "will-navigate",
+  "rendererFileUrl",
+  "fileNavigation",
+  "MAX_CORE_STDERR_BYTES",
+  "diagnostic output suppressed in packaged build",
+  "rendererPathAudit",
+  "randomUUID",
+  "MAX_CORE_RESPONSE_LINE_BYTES",
+  "duplicate core request id",
+  "CORE_PROTOCOL_MISMATCH",
+  "CORE_CAPTURE_ACTIVE",
+  "CORE_CAPTURE_FINALIZE_TIMEOUT",
+  "installCaptureCloseGuard",
+  "finalizeCaptureForClose",
+  "Stop, save, and quit",
+  "validateIpcSender",
+  "validateRendererCoreParams",
+  "rendererSafeCoreError",
+  "rendererSnapshot",
+  "senderMatchesMainFrame",
+  "realpath",
   "disable-background-networking",
   "disable-component-update",
   "networkBlockProbe",
@@ -37,7 +81,8 @@ const requiredMainPatterns = [
   "captureSettledSmokePage",
   "forcedWindowRepaint",
   "warmupCapture",
-  "rendererOnboardingScreenshots",
+  "rendererEntryState",
+  "rendererEntryScreenshots",
   "rendererScreenshot",
   "runRendererIsolationProbe",
   "forbiddenGlobalsPresent",
@@ -55,8 +100,13 @@ const requiredMainPatterns = [
   "core.version",
   "restartCount",
   "candor-shell:supervisorStatus",
+  "candor-diagnostics:preview",
+  "candor-diagnostics:saveLocal",
+  "metadata-only-no-user-content",
+  "userContentIncluded: false",
+  "rawPathsIncluded: false",
+  "rendererCoreOperations",
   "rendererCoreMethods",
-  "rendererCoreTimeoutMs",
   "privateCoreMethods",
   "candor-models:importFromFile",
   "candor-instruct-assets:importFromFile",
@@ -126,9 +176,12 @@ const bannedPatterns = [
   /sandbox:\s*false/,
   /enableRemoteModule:\s*true/,
   /http:\/\/127\.0\.0\.1:\d+\/v1\/chat\/completions/,
+  /candor-core:call/,
 ];
 
 const bannedPreloadPatterns = [
+  /\bcallCore\b/,
+  /\ballowedMethods\b/,
   /models\.importStart/,
   /models\.importChunk/,
   /models\.importFinish/,
@@ -155,9 +208,13 @@ const requiredPackagedSmokePatterns = [
 const contents = Object.fromEntries(
   files.map((file) => [file, readFileSync(path.join(repoRoot, file), "utf8")]),
 );
+const electronRuntimeSource = Object.entries(contents)
+  .filter(([file]) => file.startsWith("electron/") && file !== "electron/preload.cts")
+  .map(([, content]) => content)
+  .join("\n");
 
 for (const pattern of requiredMainPatterns) {
-  if (!contents["electron/main.ts"].includes(pattern)) {
+  if (!electronRuntimeSource.includes(pattern)) {
     throw new Error(`Electron hardening pattern missing: ${pattern}`);
   }
 }

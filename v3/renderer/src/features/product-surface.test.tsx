@@ -4,6 +4,7 @@ import { DesktopShell } from "../components/DesktopShell";
 import { PrivacyReceipt } from "./privacy/PrivacyReceipt";
 import { SettingsView } from "./settings/SettingsView";
 import { LiveMeetingView } from "./meeting/LiveMeetingView";
+import { MeetingDetailView } from "./detail/MeetingDetailView";
 import type { MeetingPrivacyReceipt, NetworkCapabilities } from "../core/contracts";
 
 const network: NetworkCapabilities = {
@@ -33,10 +34,11 @@ describe("simplified product surface", () => {
     const markup = renderToStaticMarkup(
       <DesktopShell view="library" recordings={[]} openMeetingIds={[]} selectedRecordingId="" activeCapture={false} combinedCaptureAvailable={false} busy={false} notice="" error="" onHome={vi.fn()} onStartRecording={vi.fn()} onNavigate={vi.fn()} onOpenRecording={vi.fn()} onCloseMeeting={vi.fn()} onDismissNotice={vi.fn()} onDismissError={vi.fn()}><div>Content</div></DesktopShell>,
     );
-    expect(markup).toContain("Current meeting");
+    expect(markup).toContain("Home");
     expect(markup).toContain("Meetings");
-    expect(markup).toContain("Exports");
     expect(markup).toContain("Settings");
+    expect(markup).not.toContain("Current meeting");
+    expect(markup).not.toContain("Exports");
     expect(markup).not.toContain("Custody proof");
     expect(markup).not.toContain("AI models");
   });
@@ -56,6 +58,16 @@ describe("simplified product surface", () => {
     );
     expect((markup.match(/class="session-tab"/g) ?? []).length).toBe(3);
     expect(markup).toContain("+2");
+  });
+
+  it("keeps recovery conditions visible and blocks only new recording starts", () => {
+    const markup = renderToStaticMarkup(
+      <DesktopShell view="home" recordings={[]} openMeetingIds={[]} selectedRecordingId="" activeCapture={false} combinedCaptureAvailable={false} busy notice="" error="" persistentAlerts={[{ id: "storage-blocking", severity: "error", title: "New recordings blocked by low storage", message: "400 MiB available. Free local space before recording again." }]} onHome={vi.fn()} onStartRecording={vi.fn()} onNavigate={vi.fn()} onOpenRecording={vi.fn()} onCloseMeeting={vi.fn()} onDismissNotice={vi.fn()} onDismissError={vi.fn()}><div>Existing meeting access remains available</div></DesktopShell>,
+    );
+    expect(markup).toContain("Local system status");
+    expect(markup).toContain("New recordings blocked by low storage");
+    expect(markup).toContain("Existing meeting access remains available");
+    expect(markup).toMatch(/class="record-action sidebar-record-action"[^>]*disabled/);
   });
 
   it("renders a pathless, core-backed privacy receipt", () => {
@@ -91,13 +103,17 @@ describe("simplified product surface", () => {
       privacyReceipt: receipt,
       networkCapabilities: network,
       custodyItems: [] as Array<[string, string]>,
-      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenDiagnostics: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(),
+      diagnosticPreview: null,
+      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);
     expect(basicMarkup).not.toContain("Privacy and diagnostics");
     expect(advancedMarkup).toContain("Privacy and diagnostics");
     expect(advancedMarkup).toContain("Local AI");
+    const privacyMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="privacy" advancedOpen diagnosticPreview={{ contentPolicy: "metadata-only-no-user-content" }} />);
+    expect(privacyMarkup).toContain("Safe diagnostic report");
+    expect(privacyMarkup).toContain("Inspect exact report");
   });
 
   it("provides compact Transcript, Notes, and AI panes without splitting the meeting workflow", () => {
@@ -109,5 +125,14 @@ describe("simplified product surface", () => {
     expect(markup).toContain("Notes");
     expect(markup).toContain(">AI<");
     expect(markup).toContain("Review meeting");
+  });
+
+  it("offers permanent deletion only for a finished local meeting", () => {
+    const markup = renderToStaticMarkup(
+      <MeetingDetailView title="Finished meeting" selectedRecording={{ recordingId: "rec-1", label: "Finished meeting", state: "finished", audioDurationMs: 10, audioChunkCount: 1, transcriptSegmentCount: 1, updatedAtMs: 2 }} selectedRecordingId="rec-1" detailSection="summary" transcriptContent={<div />} transcriptTotalCount={1} notesMarkdown="" notesDirty={false} recap={null} askQuestion="" askAnswer={null} aiModeStatus="Fast local" privacyReceipt={receipt} networkCapabilities={network} busy={false} onDetailSectionChange={vi.fn()} onReview={vi.fn()} onDelete={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAskQuestionChange={vi.fn()} onAsk={vi.fn()} />,
+    );
+    expect(markup).toContain("Delete meeting");
+    expect(markup).toContain("Review report");
+    expect(markup).not.toMatch(/class="destructive-button"[^>]*disabled/);
   });
 });

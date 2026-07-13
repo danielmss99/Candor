@@ -1,54 +1,64 @@
 # Candor Release Checklist
 
-Use this before publishing a Windows installer on the website or submitting a package to Microsoft Store.
+Use this before publishing any installer. Execute the hardware, upgrade,
+network-denial, and signing gates with
+[`docs/testing/MANUAL_RELEASE_PROOF_RUNBOOK.md`](testing/MANUAL_RELEASE_PROOF_RUNBOOK.md).
 
-## Release Gate
+## Source And Tests
 
-- [ ] `npm run build` passes.
-- [ ] `npm run audit:source` passes.
-- [ ] `cargo build` passes in `src-tauri`.
-- [ ] `npm run tauri:release` creates website installers.
-- [ ] `npm run build:store` creates a Store candidate installer.
-- [ ] `npm run audit:release` passes on the executable and installers before anything is shared.
-- [ ] Release artifacts contain no `C:\Users\...`, local repo paths, or unapproved `.env` values.
-- [ ] `CANDOR_RELEASE_ALLOWED_EMBEDDED_KEYS` is used only for additional public `.env` values intended to ship.
-- [ ] PDB files are removed from public release output, or audited and retained privately for debugging only.
-- [ ] Installer has been tested on a clean Windows machine.
-- [ ] Recording starts and stops from a fresh install.
-- [ ] First Whisper model download succeeds and has a useful error state if blocked.
-- [ ] Microphone permission denial has a readable recovery message.
-- [ ] Calendar connect/disconnect has been tested for Microsoft, Google, and iCloud.
-- [ ] Notes save to the expected local folder.
-- [ ] Uninstall removes the app without deleting user notes.
+- [ ] `npm ci` reports no unresolved high-severity npm vulnerability.
+- [ ] `npm test` passes.
+- [ ] `npm run v3:verify` passes.
+- [ ] `npm run audit:source` passes with its mutation suite.
+- [ ] Rust tests, formatter, and lints pass for release features.
+- [ ] No unresolved high-severity dependency advisory remains.
 
-## Website Distribution
+## Package
 
-- [ ] Windows code signing certificate is purchased and configured.
-- [ ] Installer and executable are signed.
-- [ ] WebView2 is bundled with the offline installer and displayed to the user if it must install.
-- [ ] Installer does not silently download WebView2 from a PowerShell custom action.
-- [ ] Download page explains that transcription runs locally.
-- [ ] Download page links to privacy policy, terms, support, and GitHub source.
-- [ ] SHA-256 checksum is published beside the installer.
-- [ ] A rollback installer for the previous stable release is retained.
+- [ ] `npm run dist` creates the current-OS Electron artifacts.
+- [ ] `npm run v3:release-artifact-smoke:strict` passes.
+- [ ] `npm run m0:packaged-smoke` passes.
+- [ ] `npm run m0:artifact-manifest` records final hashes.
+- [ ] `npm run audit:release` finds no profile path, checkout path, or secret.
+- [ ] `npm run v3:release-checksums:verify` matches every release package.
+- [ ] The renderer has no Node.js globals and exposes the exact preload surface.
+- [ ] Navigation, popups, webviews, and unauthorized network attempts are blocked.
 
-## Microsoft Store Distribution
+## Data And Reliability
 
-- [ ] Microsoft Partner Center developer account is active.
-- [ ] Store app identity matches `com.candor.app`.
-- [ ] Store package is built with `npm run build:store`.
-- [ ] Store listing screenshots are current.
-- [ ] Store description avoids unsupported claims.
-- [ ] Privacy policy URL is live.
-- [ ] Support URL or support email is live.
-- [ ] Age rating and app category are complete.
-- [ ] Release notes are written.
+- [ ] Existing recordings open, export, and delete with license services offline.
+- [ ] v2 import leaves source files untouched.
+- [ ] Interrupted capture recovers within one flushed chunk.
+- [ ] Low-disk and disk-full states are actionable.
+- [ ] Failed migration preserves a verified backup and restores the old schema.
+- [ ] Corrupt records are quarantined without hiding the healthy library.
+- [ ] Uninstall does not delete the user vault or recordings without explicit
+  user choice.
 
-## Rollback Triggers
+## Real Device Matrix
 
-- Installer fails on a clean supported Windows machine.
-- App opens but cannot create the local notes folder.
-- Recording starts but cannot stop cleanly.
-- Whisper model download fails without a recovery path.
-- Calendar auth loops or stores unusable credentials.
-- Users report lost transcript or note data.
+- [ ] Fresh Windows install starts and records microphone audio.
+- [ ] System-audio consent and capture work on supported Windows hardware.
+- [ ] 5-, 30-, 60-, and 180-minute recordings pass.
+- [ ] Sleep and resume behavior is verified.
+- [ ] Microphone and output-device switching is verified.
+- [ ] Permission denial and recovery are understandable.
+- [ ] 1366 by 768 at 125 and 150 percent scaling is usable.
+- [ ] Keyboard-only and accessibility checks pass.
+
+## Signing And Distribution
+
+- [ ] Windows executable, sidecar, and installer have valid Authenticode
+  signatures.
+- [ ] macOS app and DMG are signed, notarized, stapled, and Gatekeeper-accepted.
+- [ ] Linux package signatures or checksums meet the selected distribution policy.
+- [ ] SHA-256 checksums are published for final artifacts.
+- [ ] A clean-machine install and upgrade from the previous release pass.
+- [ ] A rollback installer is retained.
+- [ ] Privacy, terms, support, and third-party notices are current.
+
+## Stop Conditions
+
+Do not publish when migration rollback, capture recovery, data access under
+license failure, artifact identity, signing, or clean-machine behavior is
+unverified.

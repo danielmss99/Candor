@@ -1,4 +1,4 @@
-name: Candor v3 M0
+name: Candor Electron Verification
 
 on:
   push:
@@ -112,6 +112,12 @@ jobs:
       - name: Smoke release artifact contents
         run: npm run v3:release-artifact-smoke
 
+      - name: Record release artifact provenance
+        run: npm run m0:artifact-manifest
+
+      - name: Generate and verify release checksums
+        run: npm run v3:release-checksums && npm run v3:release-checksums:verify
+
       - name: Smoke packaged M0 app
         if: runner.os != 'Linux'
         run: npm run m0:packaged-smoke
@@ -119,6 +125,14 @@ jobs:
       - name: Smoke packaged M0 app (Linux)
         if: runner.os == 'Linux'
         run: xvfb-run -a npm run m0:packaged-smoke
+
+      - name: Run Electron integration and accessibility tests
+        if: runner.os != 'Linux'
+        run: npm run test:electron
+
+      - name: Run Electron integration and accessibility tests (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:electron
 
       - name: Validate Windows network proof runner
         if: runner.os == 'Windows'

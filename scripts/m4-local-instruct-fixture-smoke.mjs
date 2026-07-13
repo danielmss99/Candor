@@ -29,7 +29,19 @@ const proofPath = path.join(
 );
 const dataDir = mkdtempSync(path.join(tmpdir(), "candor-v3-m4-instruct-fixture-data-"));
 const fixtureDir = mkdtempSync(path.join(tmpdir(), "candor-v3-m4-instruct-fixture-bin-"));
-const electronMainSource = readFileSync(path.join(repoRoot, "electron", "main.ts"), "utf8");
+function electronRuntimeSourcePaths(directory) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) return electronRuntimeSourcePaths(target);
+    if (!entry.isFile() || !/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) return [];
+    return [target];
+  });
+}
+
+const electronMainSource = electronRuntimeSourcePaths(path.join(repoRoot, "electron"))
+  .filter((file) => !file.endsWith("preload.cts"))
+  .map((file) => readFileSync(file, "utf8"))
+  .join("\n");
 const preloadSource = readFileSync(path.join(repoRoot, "electron", "preload.cts"), "utf8");
 const apiTypesSource = readFileSync(
   path.join(repoRoot, "v3", "renderer", "src", "candor-api.d.ts"),
@@ -83,13 +95,16 @@ function requireSource(source, pattern, label) {
 }
 
 function verifyRendererSurface() {
-  for (const method of ["ai.instructStatus", "ai.recapInstruct", "ai.askInstruct"]) {
+  for (const [method, channel] of [
+    ["ai.instructStatus", "candor-core:ai-instruct-status"],
+    ["ai.recapInstruct", "candor-core:ai-recap-instruct"],
+    ["ai.askInstruct", "candor-core:ai-ask-instruct"],
+  ]) {
     requireSource(electronMainSource, `\"${method}\"`, "Electron renderer allowlist");
-    requireSource(preloadSource, `\"${method}\"`, "preload allowlist");
+    requireSource(preloadSource, `\"${channel}\"`, "preload named channel");
   }
-  requireSource(electronMainSource, "rendererCoreTimeoutMs", "Electron bounded timeout map");
-  requireSource(electronMainSource, '["ai.askInstruct", 60_000]', "Electron Ask timeout");
-  requireSource(electronMainSource, '["ai.recapInstruct", 60_000]', "Electron recap timeout");
+  requireSource(electronMainSource, 'operation("candor-core:ai-ask-instruct", "ai.askInstruct", 60_000)', "Electron Ask timeout");
+  requireSource(electronMainSource, 'operation("candor-core:ai-recap-instruct", "ai.recapInstruct", 60_000)', "Electron recap timeout");
   for (const apiMethod of ["aiInstructStatus", "aiRecapInstruct", "aiAskInstruct"]) {
     requireSource(preloadSource, apiMethod, "preload bridge");
     requireSource(apiTypesSource, apiMethod, "renderer API types");

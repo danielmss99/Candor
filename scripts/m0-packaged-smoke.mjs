@@ -24,7 +24,7 @@ const minimumSmokeScreenshotHeight = 600;
 
 function defaultExecutableCandidates() {
   if (process.platform === "win32") {
-    return [join(repoRoot, "release-v3", "win-unpacked", "Candor v3 M0.exe")];
+    return [join(repoRoot, "release-v3", "win-unpacked", "Candor.exe")];
   }
   if (process.platform === "darwin") {
     return [
@@ -32,25 +32,25 @@ function defaultExecutableCandidates() {
         repoRoot,
         "release-v3",
         "mac",
-        "Candor v3 M0.app",
+        "Candor.app",
         "Contents",
         "MacOS",
-        "Candor v3 M0",
+        "Candor",
       ),
       join(
         repoRoot,
         "release-v3",
         "mac-arm64",
-        "Candor v3 M0.app",
+        "Candor.app",
         "Contents",
         "MacOS",
-        "Candor v3 M0",
+        "Candor",
       ),
     ];
   }
   return [
     join(repoRoot, "release-v3", "linux-unpacked", "candor"),
-    join(repoRoot, "release-v3", "linux-unpacked", "Candor v3 M0"),
+    join(repoRoot, "release-v3", "linux-unpacked", "Candor"),
   ];
 }
 
@@ -281,6 +281,20 @@ function assertSmokePayload(payload) {
     throw new Error("Renderer isolation probe did not find the Candor bridge.");
   }
   if (
+    payload.rendererPathAudit?.ok !== true ||
+    Number(payload.rendererPathAudit?.scannedStrings ?? 0) < 1 ||
+    !Array.isArray(payload.rendererPathAudit?.findings) ||
+    payload.rendererPathAudit.findings.length !== 0
+  ) {
+    throw new Error("Packaged smoke did not prove a clean measured scan of renderer-facing paths.");
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(payload.rendererBridge?.supervisorStatus ?? {}, "executable") ||
+    payload.rendererBridge?.supervisorStatus?.rawPathExposed !== false
+  ) {
+    throw new Error("Renderer supervisor status exposed the core executable path.");
+  }
+  if (
     payload.rendererIsolationProbe?.coreFrozen !== true ||
     payload.rendererIsolationProbe?.licenseFrozen !== true ||
     payload.rendererIsolationProbe?.shellFrozen !== true
@@ -307,6 +321,12 @@ function assertSmokePayload(payload) {
   if ((payload.rendererIsolationProbe?.forbiddenShellKeysPresent ?? []).length !== 0) {
     throw new Error("Renderer isolation probe found private shell methods on the preload bridge.");
   }
+  if (
+    payload.rendererIsolationProbe?.invalidInputErrorSafe !== true ||
+    payload.rendererIsolationProbe?.invalidInputErrorCode !== "INVALID_RENDERER_INPUT"
+  ) {
+    throw new Error("Renderer isolation probe did not receive a pathless structured input error.");
+  }
   if (!payload.rendererIsolationProbe?.coreKeys?.includes("transcriptionRunLocal")) {
     throw new Error("Renderer isolation probe did not find the typed transcription command.");
   }
@@ -324,6 +344,11 @@ function assertSmokePayload(payload) {
   if (payload.rendererIsolationProbe?.shellKeys?.includes("openExternal")) {
     throw new Error("Renderer isolation probe found an exposed external navigation command.");
   }
+  for (const key of ["diagnosticsPreview", "diagnosticsSaveLocal"]) {
+    if (!payload.rendererIsolationProbe?.shellKeys?.includes(key)) {
+      throw new Error(`Renderer isolation probe did not find the exact diagnostic command: ${key}.`);
+    }
+  }
   for (const key of ["status", "activate", "startTrial", "deactivateDevice", "portalInfo"]) {
     if (!payload.rendererIsolationProbe?.licenseKeys?.includes(key)) {
       throw new Error(`Renderer isolation probe did not find the typed license command: ${key}.`);
@@ -338,6 +363,21 @@ function assertSmokePayload(payload) {
   if (payload.rendererBridge?.status?.sidecarTransport !== "stdio-json-lines") {
     throw new Error("Renderer did not receive stdio sidecar status.");
   }
+  const diagnosticText = JSON.stringify(payload.rendererBridge?.diagnosticPreview ?? null);
+  if (
+    payload.rendererBridge?.diagnosticPreview?.contentPolicy !== "metadata-only-no-user-content" ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.userContentIncluded !== false ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.rawPathsIncluded !== false ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.processIdsIncluded !== false ||
+    payload.rendererBridge?.diagnosticPreview?.privacy?.secretsIncluded !== false ||
+    diagnosticText.includes('"pid"') ||
+    diagnosticText.includes('"transcript"') ||
+    diagnosticText.includes('"notes"') ||
+    diagnosticText.includes('"prompt"') ||
+    diagnosticText.includes('"output"')
+  ) {
+    throw new Error("Packaged diagnostic preview included non-allowlisted or user-content fields.");
+  }
   if (
     payload.rendererScreenshot?.captured !== true ||
     payload.rendererScreenshot?.forcedWindowRepaint !== true ||
@@ -348,7 +388,11 @@ function assertSmokePayload(payload) {
   ) {
     throw new Error("Packaged smoke did not capture a nontrivial renderer screenshot.");
   }
-  if (payload.rendererScreenshot?.notificationDismissed !== true) {
+  if (
+    payload.localNoticeExercise?.triggered !== true ||
+    payload.localNoticeExercise?.notificationVisible !== true ||
+    payload.rendererScreenshot?.notificationDismissed !== true
+  ) {
     throw new Error("Packaged renderer did not exercise the dismissible local notification control.");
   }
   const requestedWidth = Number(payload.requestedViewport?.width ?? 0);
@@ -367,24 +411,31 @@ function assertSmokePayload(payload) {
   ) {
     throw new Error("Packaged smoke screenshot did not reflect the requested desktop viewport.");
   }
-  const onboardingScreenshots = Array.isArray(payload.rendererOnboardingScreenshots)
-    ? payload.rendererOnboardingScreenshots
-    : [];
-  for (const view of ["activation", "onboarding"]) {
-    const screenshot = onboardingScreenshots.find((entry) => entry?.currentView === view);
-    if (
-      screenshot?.captured !== true ||
-      screenshot?.forcedWindowRepaint !== true ||
-      screenshot?.warmupCapture !== true ||
-      screenshot?.bytes < 10_000 ||
-      screenshot?.width < minimumSmokeScreenshotWidth ||
-      screenshot?.height < minimumSmokeScreenshotHeight ||
-      screenshot?.bodyTextCharacters < 150
-    ) {
-      throw new Error(`Packaged renderer did not capture the ${view} first-run view.`);
-    }
+  if (
+    payload.rendererEntryState?.currentView !== "meeting" ||
+    payload.rendererEntryState?.activationVisible !== false ||
+    payload.rendererEntryState?.onboardingVisible !== false ||
+    payload.rendererEntryState?.transcriptVisible !== true ||
+    payload.rendererEntryState?.notesVisible !== true
+  ) {
+    throw new Error("Packaged renderer did not preserve existing local data access without activation.");
   }
-  const expectedViews = ["home", "library", "detail", "review", "export", "settings", "proof"];
+  const entryScreenshots = Array.isArray(payload.rendererEntryScreenshots)
+    ? payload.rendererEntryScreenshots
+    : [];
+  const entryScreenshot = entryScreenshots.find((entry) => entry?.currentView === "meeting");
+  if (
+    entryScreenshot?.captured !== true ||
+    entryScreenshot?.forcedWindowRepaint !== true ||
+    entryScreenshot?.warmupCapture !== true ||
+    entryScreenshot?.bytes < 10_000 ||
+    entryScreenshot?.width < minimumSmokeScreenshotWidth ||
+    entryScreenshot?.height < minimumSmokeScreenshotHeight ||
+    entryScreenshot?.bodyTextCharacters < 150
+  ) {
+    throw new Error("Packaged renderer did not capture the local data access entry view.");
+  }
+  const expectedViews = ["home", "library", "detail", "review", "export", "settings", "advanced"];
   const viewScreenshots = Array.isArray(payload.rendererViewScreenshots)
     ? payload.rendererViewScreenshots
     : [];
@@ -398,13 +449,20 @@ function assertSmokePayload(payload) {
       screenshot?.width < minimumSmokeScreenshotWidth ||
       screenshot?.height < minimumSmokeScreenshotHeight ||
       screenshot?.navigation?.clicked !== true ||
-      screenshot?.navigation?.currentView !== view ||
+      screenshot?.navigation?.currentView !== (view === "advanced" ? "settings" : view) ||
       screenshot?.navigation?.bodyTextCharacters < 150
     ) {
       throw new Error(`Packaged renderer did not capture the ${view} design view.`);
     }
   }
   const exportView = viewScreenshots.find((entry) => entry?.view === "export");
+  const advancedView = viewScreenshots.find((entry) => entry?.view === "advanced");
+  if (
+    advancedView?.navigation?.diagnosticPreviewVisible !== true ||
+    advancedView?.navigation?.diagnosticSaveVisible !== true
+  ) {
+    throw new Error("Packaged Advanced Settings did not expose the inspectable safe diagnostic report.");
+  }
   const exportFormats = Array.isArray(exportView?.navigation?.exportFormats)
     ? exportView.navigation.exportFormats
     : [];
@@ -456,13 +514,13 @@ function assertSmokePayload(payload) {
     throw new Error("Packaged document proof leaked document payload bytes into the smoke receipt.");
   }
   if (
-    payload.licenseFixture?.state !== "trial" ||
-    payload.licenseFixture?.activationSource !== "local-trial" ||
+    payload.licenseFixture?.state !== "inactive" ||
+    payload.licenseFixture?.activationSource !== "none" ||
     payload.licenseFixture?.persistentAccountRequired !== false ||
     payload.licenseFixture?.localOnly !== true ||
     payload.licenseFixture?.rawPathExposed !== false ||
     payload.licenseFixture?.keyMaterialExposedToRenderer !== false ||
-    payload.rendererBridge?.licenseStatus?.state !== "trial" ||
+    payload.rendererBridge?.licenseStatus?.state !== "inactive" ||
     payload.rendererBridge?.licensePortalInfo?.requiresSignInForNormalUse !== false
   ) {
     throw new Error("Packaged renderer did not prove the isolated local license and no-account contract.");
@@ -724,12 +782,18 @@ function assertSmokePayload(payload) {
   if (rendererProbe?.navigation?.attempted !== true || rendererProbe?.navigation?.stayedInApp !== true) {
     throw new Error("Packaged smoke did not prove external navigation denial.");
   }
+  if (
+    rendererProbe?.fileNavigation?.attempted !== true ||
+    rendererProbe?.fileNavigation?.stayedInApp !== true
+  ) {
+    throw new Error("Packaged smoke did not prove arbitrary local file navigation denial.");
+  }
   if (rendererProbe?.externalAllowedDelta !== 0) {
     throw new Error("Renderer network-denial probe allowed an external request.");
   }
   if (
     Number(rendererProbe?.deniedWindowOpenDelta ?? 0) < 1 ||
-    Number(rendererProbe?.deniedNavigationDelta ?? 0) < 1
+    Number(rendererProbe?.deniedNavigationDelta ?? 0) < 2
   ) {
     throw new Error("Renderer network-denial probe did not increment navigation denial counters.");
   }
@@ -844,7 +908,7 @@ const rendererViewScreenshotEvidence = payload.rendererViewScreenshots.map((entr
     visualEvidence,
   };
 });
-const rendererOnboardingScreenshotEvidence = payload.rendererOnboardingScreenshots.map((entry) => {
+const rendererEntryScreenshotEvidence = payload.rendererEntryScreenshots.map((entry) => {
   if (!existsSync(entry.path)) {
     throw new Error(`Packaged app smoke did not write ${entry.currentView} screenshot: ${entry.path}`);
   }
@@ -887,7 +951,7 @@ writeFileSync(
       packagedArtifacts,
       rendererScreenshotVisualEvidence,
       rendererViewScreenshotEvidence,
-      rendererOnboardingScreenshotEvidence,
+      rendererEntryScreenshotEvidence,
       proofWrittenAt: new Date().toISOString(),
     },
     null,

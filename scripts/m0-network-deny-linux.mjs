@@ -26,7 +26,7 @@ function commandExists(command) {
 function defaultExecutableCandidates() {
   return [
     join(repoRoot, "release-v3", "linux-unpacked", "candor"),
-    join(repoRoot, "release-v3", "linux-unpacked", "Candor v3 M0"),
+    join(repoRoot, "release-v3", "linux-unpacked", "Candor"),
   ];
 }
 
