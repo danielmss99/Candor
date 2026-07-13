@@ -55,6 +55,38 @@ implemented and recorded in `claude-macos-proof-review-reconciliation.md`.
 Claude then reviewed the complete reconciled diff and again returned `approve`
 with no required defects.
 
+The next hosted Windows run exposed a fixed 5-second smoke-client RPC budget
+while `capture.proofInterruptedSerializedWriter` performed eight durable
+encrypted chunk writes. The 20-second replacement is limited to the two
+demonstrated durable smoke clients and remains a bounded per-request test timer.
+It does not change Electron, Rust protocol, or product timeouts.
+
+Verification for the durable smoke budget:
+
+- `npm run m1:capture-crash-smoke`: 6 consecutive passes.
+- `npm run m2:local-library-smoke`: 6 consecutive passes.
+- Claude review: `approve`, no required defects.
+
+The first complete local rerun then found an independent fault-harness issue:
+the 200 ms timeout intended for a hung ordinary request was also applied to its
+startup handshake. The failure reproduced in isolation. The test now gives the
+handshake 2 seconds while retaining the 200 ms target-request timeout.
+
+- `npx vitest run electron/test-core/controllable-core.test.ts`: 10 consecutive
+  runs passed, 12 tests per run.
+- Claude follow-up review of the complete final diff: `approve`, no required
+  defects.
+- Hosted run `29279169255`: Ubuntu, macOS, and dependency audit passed. macOS
+  passed the final hardened network proof. Windows failed only on the superseded
+  5-second durable smoke budget, so the combined audit lacked a complete Windows
+  proof set.
+- Final `npm run v3:verify`: passed with 87 Rust tests, 40 Vitest files, 134
+  Vitest tests, and every M0 through M5 stage passing.
+- Final `npm run test:electron`: 5 tests passed, including the exact preload
+  surface, sandbox, keyboard workflow, axe checks, 125 and 150 percent scaling,
+  and the 100-image GUI evidence matrix.
+- Final Node syntax checks and `git diff --check`: passed.
+
 ## Independent review
 
 Claude Code reviewed the implementation and returned six findings. Codex fixed

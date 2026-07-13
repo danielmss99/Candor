@@ -29,13 +29,13 @@ function spawnHarness(mode: string): ChildProcessWithoutNullStreams {
   return child;
 }
 
-function clientFor(mode: string, timeoutMs = 2_000): CoreClient {
+function clientFor(mode: string, timeoutMs = 2_000, handshakeTimeoutMs = timeoutMs): CoreClient {
   return new CoreClient({
     executablePath: () => process.execPath,
     allowedMethods,
     isDev: false,
     spawnCore: () => spawnHarness(mode),
-    timeoutMsForTesting: () => timeoutMs,
+    timeoutMsForTesting: (method) => method === "core.version" ? handshakeTimeoutMs : timeoutMs,
     maxResponseLineBytesForTesting: mode === "oversized-line" ? 1_024 : undefined,
   });
 }
@@ -57,7 +57,7 @@ describe("controllable core fault harness", () => {
   });
 
   it("bounds an ordinary request that hangs before responding", async () => {
-    const client = clientFor("hang-before-response", 200);
+    const client = clientFor("hang-before-response", 200, 2_000);
     await client.ensureHandshake();
     await expect(client.call("core.status")).rejects.toThrow("timed out");
   });

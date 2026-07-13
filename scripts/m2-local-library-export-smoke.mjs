@@ -14,6 +14,7 @@ const exe = process.platform === "win32" ? "candor-core.exe" : "candor-core";
 const corePath = process.argv[2]
   ? path.resolve(process.argv[2])
   : path.join(repoRoot, "crates", "candor-core", "target", "debug", exe);
+const smokeRpcTimeoutMs = 20_000;
 
 if (!existsSync(corePath)) {
   throw new Error(`candor-core debug binary not found: ${corePath}`);
@@ -64,8 +65,8 @@ function call(method, params = null) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`timeout waiting for ${method}`));
-    }, 5000);
+      reject(new Error(`timeout waiting for ${method} after ${smokeRpcTimeoutMs} ms`));
+    }, smokeRpcTimeoutMs);
     pending.set(id, {
       resolve: (value) => {
         clearTimeout(timeout);
