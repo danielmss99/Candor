@@ -22,12 +22,11 @@ const remapFlags = [
   `--remap-path-prefix=${repoRoot}=<workspace>`,
   `--remap-path-prefix=${homedir()}=<home>`,
 ];
-if (env.CARGO_ENCODED_RUSTFLAGS) {
-  env.CARGO_ENCODED_RUSTFLAGS = `${env.CARGO_ENCODED_RUSTFLAGS}\u001f${remapFlags.join("\u001f")}`;
-} else {
-  const quoted = remapFlags.map((flag) => (flag.includes(" ") ? `"${flag}"` : flag));
-  env.RUSTFLAGS = [env.RUSTFLAGS, ...quoted].filter(Boolean).join(" ");
+if (env.RUSTFLAGS && !env.CARGO_ENCODED_RUSTFLAGS) {
+  throw new Error("Production core builds require CARGO_ENCODED_RUSTFLAGS when custom Rust flags are present.");
 }
+env.CARGO_ENCODED_RUSTFLAGS = [env.CARGO_ENCODED_RUSTFLAGS, ...remapFlags].filter(Boolean).join("\u001f");
+delete env.RUSTFLAGS;
 
 const child = spawn(
   process.execPath,

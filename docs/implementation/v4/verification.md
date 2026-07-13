@@ -118,6 +118,38 @@ this consolidation could redirect OS application-data and key-storage identity,
 which would risk making existing local data appear missing. Product display
 names changed without changing that persistence identity.
 
+## Claude Phase 1 Implementation Gate
+
+Date: 2026-07-12
+
+- Request: `docs/implementation/v4/claude-phase1-review-request.md`
+- Review: `docs/implementation/v4/claude-phase1-implementation-review.md`
+- Verdict: **Go** with no data-loss, existing-data-access, or active Tauri-path
+  regression.
+
+| Validated finding | Disposition and evidence |
+|---|---|
+| Production allowed any `file:` navigation | Fixed. Production accepts only the packaged renderer document. Packaged smoke separately attempts an arbitrary local file and records two denied navigations. |
+| Core stderr was unbounded | Fixed. Packaged content is suppressed. Development diagnostics are redacted and capped at 64 KiB per core process. |
+| Supervisor exposed an absolute executable path | Fixed. Renderer receives only `executableName`; independent recursive proof scanning found zero absolute paths. |
+| Secret audit excluded most scripts | Fixed. All tracked `scripts/` files are scanned, and the mutation test injects a synthetic credential into a proof script. |
+| `rawPathExposed` was self-declared | Fixed for M0 renderer evidence. The smoke recursively scanned 302 renderer-facing strings with zero findings, and the proof auditor independently recomputes the scan. |
+| Shutdown response is intentionally untracked | Documented. Process exit is the fire-and-forget shutdown acknowledgement. |
+| Rust remap flags could split on spaces | Fixed. Release builds use `CARGO_ENCODED_RUSTFLAGS` exclusively. |
+
+The smoke initially caught its own raw local-file probe URL in diagnostic
+samples. Navigation diagnostics now retain only the denial category, never the
+target URL. A second negative run exposed a false positive where `https:/` was
+misread as a Windows drive; the matcher now requires a valid drive boundary and
+still detects paths embedded inside longer diagnostic strings.
+
+Deferred to later planned phases:
+
+- warn when unpackaged `--start` uses a stale staged core;
+- remove `style-src 'unsafe-inline'` when renderer styling allows it;
+- namespace the stable release-core target for concurrent local worktrees;
+- add the substitute-core 2 MiB stderr stress test during process extraction.
+
 ## Known Non-Passing Or Unproven Gates
 
 - signed production prerelease;

@@ -281,6 +281,20 @@ function assertSmokePayload(payload) {
     throw new Error("Renderer isolation probe did not find the Candor bridge.");
   }
   if (
+    payload.rendererPathAudit?.ok !== true ||
+    Number(payload.rendererPathAudit?.scannedStrings ?? 0) < 1 ||
+    !Array.isArray(payload.rendererPathAudit?.findings) ||
+    payload.rendererPathAudit.findings.length !== 0
+  ) {
+    throw new Error("Packaged smoke did not prove a clean measured scan of renderer-facing paths.");
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(payload.rendererBridge?.supervisorStatus ?? {}, "executable") ||
+    payload.rendererBridge?.supervisorStatus?.rawPathExposed !== false
+  ) {
+    throw new Error("Renderer supervisor status exposed the core executable path.");
+  }
+  if (
     payload.rendererIsolationProbe?.coreFrozen !== true ||
     payload.rendererIsolationProbe?.licenseFrozen !== true ||
     payload.rendererIsolationProbe?.shellFrozen !== true
@@ -724,12 +738,18 @@ function assertSmokePayload(payload) {
   if (rendererProbe?.navigation?.attempted !== true || rendererProbe?.navigation?.stayedInApp !== true) {
     throw new Error("Packaged smoke did not prove external navigation denial.");
   }
+  if (
+    rendererProbe?.fileNavigation?.attempted !== true ||
+    rendererProbe?.fileNavigation?.stayedInApp !== true
+  ) {
+    throw new Error("Packaged smoke did not prove arbitrary local file navigation denial.");
+  }
   if (rendererProbe?.externalAllowedDelta !== 0) {
     throw new Error("Renderer network-denial probe allowed an external request.");
   }
   if (
     Number(rendererProbe?.deniedWindowOpenDelta ?? 0) < 1 ||
-    Number(rendererProbe?.deniedNavigationDelta ?? 0) < 1
+    Number(rendererProbe?.deniedNavigationDelta ?? 0) < 2
   ) {
     throw new Error("Renderer network-denial probe did not increment navigation denial counters.");
   }

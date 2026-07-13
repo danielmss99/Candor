@@ -32,11 +32,7 @@ function toRepoPath(repoRoot, absolutePath) {
 }
 
 function isActiveSource(pathValue) {
-  return (
-    /^(electron|v3\/renderer\/src|crates\/candor-core\/src)\//.test(pathValue) ||
-    pathValue === "scripts/electron-dev.mjs" ||
-    pathValue === "scripts/build-release-core.mjs"
-  );
+  return /^(electron|v3\/renderer\/src|crates\/candor-core\/src|scripts)\//.test(pathValue);
 }
 
 export function collectSourceSecurityInput(repoRoot) {
@@ -47,8 +43,7 @@ export function collectSourceSecurityInput(repoRoot) {
     "electron",
     "v3/renderer/src",
     "crates/candor-core/src",
-    "scripts/build-release-core.mjs",
-    "scripts/electron-dev.mjs",
+    "scripts",
   ]).filter(isActiveSource);
   const sourcePaths = new Set([...requiredSourcePaths, ...trackedActivePaths]);
   const sources = Object.fromEntries(
@@ -129,7 +124,7 @@ export function evaluateSourceSecurity(input) {
       `electron-main:${id}`,
       count >= 2,
       main,
-      `both BrowserWindow configurations require ${id}; observed ${count}`,
+      `all BrowserWindow configurations require ${id}; observed ${count}`,
     );
   }
   excludes("electron-main:no-node-integration", main, /nodeIntegration\s*:\s*true/, "Node.js stays disabled");
@@ -268,6 +263,9 @@ export function runSourceSecuritySelfTest(input) {
   const main = sourceText(input, "electron/main.ts");
   const preload = sourceText(input, "electron/preload.cts");
   const importer = sourceText(input, "crates/candor-core/src/v2_importer.rs");
+  const proofScript = sourceText(input, "scripts/m0-packaged-smoke.mjs");
+  const testSecretName = ["api", "Key"].join("");
+  const testSecret = ["sk", "prod", "1234567890abcdefgh"].join("-");
   const cases = [
     {
       name: "missing-required-source",
@@ -286,7 +284,11 @@ export function runSourceSecuritySelfTest(input) {
     },
     {
       name: "hardcoded-secret",
-      input: withSource(input, "electron/main.ts", `${main}\nconst apiKey = "sk-prod-1234567890abcdefgh";\n`),
+      input: withSource(
+        input,
+        "scripts/m0-packaged-smoke.mjs",
+        `${proofScript}\nconst ${testSecretName} = "${testSecret}";\n`,
+      ),
       expectedFailure: "active-source:no-hardcoded-secrets",
     },
     {

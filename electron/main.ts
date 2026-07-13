@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, stat, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import path from "node:path";
 import { LicenseService } from "./license-service.js";
 
@@ -60,6 +60,9 @@ if (configuredRendererDevUrl && !isLoopbackHttpUrl(configuredRendererDevUrl)) {
 const useDevRenderer = isDev && configuredRendererDevUrl.length > 0;
 const rendererDevUrl = configuredRendererDevUrl || "http://127.0.0.1:5173";
 const rendererDevEndpoint = new URL(rendererDevUrl);
+const rendererFilePath = path.join(__dirname, "..", "renderer", "index.html");
+const rendererFileUrl = pathToFileURL(rendererFilePath).href;
+const MAX_CORE_STDERR_BYTES = 64 * 1024;
 const smokeOutputPath = process.env.CANDOR_M0_SMOKE_OUT ?? "";
 const smokeScreenshotPath = process.env.CANDOR_M0_SMOKE_SCREENSHOT ?? "";
 const isSmokeMode = smokeOutputPath.length > 0;
@@ -267,11 +270,19 @@ function supervisorSnapshot(): JsonValue {
     state: coreSupervisor.state,
     restartCount: coreSupervisor.restartCount,
     startedAt: coreSupervisor.startedAt,
-    executable: coreSupervisor.executable,
+    executableName: coreSupervisor.executable ? path.basename(coreSupervisor.executable) : null,
+    rawPathExposed: false,
     pid: coreSupervisor.pid,
     lastExit: coreSupervisor.lastExit,
     lastHandshake: coreSupervisor.lastHandshake,
   };
+}
+
+function redactCoreDiagnostic(value: string): string {
+  return value
+    .replace(/\b[A-Za-z]:[\\/][^\r\n\t"']+/g, "<path>")
+    .replace(/(?:^|\s)\/(?:Users|home|root|tmp|var|private)\/[^\s"']+/g, " <path>")
+    .replace(/\b(?:sk-(?:live|prod)-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b/g, "<secret>");
 }
 
 function startCore(): void {
@@ -310,8 +321,28 @@ function startCore(): void {
     entry.resolve(response);
   });
 
+  let stderrBytesLogged = 0;
+  let stderrSuppressionNoted = false;
   child.stderr.on("data", (chunk: Buffer) => {
-    console.error(`[candor-core] ${chunk.toString("utf8").trim()}`);
+    if (!isDev) {
+      if (!stderrSuppressionNoted) {
+        console.error("[candor-core] diagnostic output suppressed in packaged build");
+        stderrSuppressionNoted = true;
+      }
+      return;
+    }
+
+    const remaining = MAX_CORE_STDERR_BYTES - stderrBytesLogged;
+    if (remaining > 0) {
+      const boundedChunk = chunk.subarray(0, remaining);
+      stderrBytesLogged += boundedChunk.byteLength;
+      const diagnostic = redactCoreDiagnostic(boundedChunk.toString("utf8")).trim();
+      if (diagnostic) console.error(`[candor-core] ${diagnostic}`);
+    }
+    if (chunk.byteLength > remaining && !stderrSuppressionNoted) {
+      console.error(`[candor-core] further diagnostic output suppressed after ${MAX_CORE_STDERR_BYTES} bytes`);
+      stderrSuppressionNoted = true;
+    }
   });
 
   child.on("spawn", () => {
@@ -598,16 +629,20 @@ function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     networkGuard.deniedWindowOpenRequests += 1;
     if (networkGuard.deniedNavigationSamples.length < 5) {
-      networkGuard.deniedNavigationSamples.push(`window-open:${details.url}`);
+      const category = details.url.startsWith("file:") ? "local-file" : "external";
+      networkGuard.deniedNavigationSamples.push(`window-open-denied:${category}`);
     }
     return { action: "deny" };
   });
   mainWindow.webContents.on("will-navigate", (event, targetUrl) => {
-    const allowed = useDevRenderer ? isRendererDevNavigation(targetUrl) : targetUrl.startsWith("file:");
+    const allowed = useDevRenderer
+      ? isRendererDevNavigation(targetUrl)
+      : targetUrl === rendererFileUrl || targetUrl.startsWith(`${rendererFileUrl}#`);
     if (!allowed) {
       networkGuard.deniedNavigationRequests += 1;
       if (networkGuard.deniedNavigationSamples.length < 5) {
-        networkGuard.deniedNavigationSamples.push(`navigate:${targetUrl}`);
+        const category = targetUrl.startsWith("file:") ? "local-file" : "external";
+        networkGuard.deniedNavigationSamples.push(`navigation-denied:${category}`);
       }
       event.preventDefault();
     }
@@ -621,7 +656,7 @@ function createWindow(options: { smoke?: boolean } = {}): BrowserWindow {
   if (useDevRenderer) {
     void mainWindow.loadURL(rendererDevUrl);
   } else {
-    void mainWindow.loadFile(path.join(__dirname, "..", "renderer", "index.html"));
+    void mainWindow.loadFile(rendererFilePath);
   }
   mainWindow.once("ready-to-show", () => {
     if (!options.smoke) mainWindow?.show();
@@ -682,6 +717,7 @@ function requestCoreShutdown(): void {
   if (!core || core.killed) return;
   coreSupervisor.state = "stopping";
   try {
+    // Shutdown is fire-and-forget: process exit is the acknowledgement, so no pending RPC entry is registered.
     core.stdin.write(JSON.stringify({ id: nextRpcId++, method: "core.shutdown", params: null }) + "\n");
   } catch {
     core.kill();
@@ -1076,6 +1112,44 @@ function snapshotDelta(before: JsonValue, after: JsonValue, field: string): numb
   return numberSnapshotField(after, field) - numberSnapshotField(before, field);
 }
 
+function classifyAbsolutePath(value: string): string | null {
+  if (/(?:^|[^A-Za-z0-9+.-])[A-Za-z]:[\\/]/.test(value)) return "windows-absolute-path";
+  if (/\\\\[^\\\s]+[\\/]/.test(value)) return "windows-unc-path";
+  if (/file:\/\//i.test(value)) return "file-url";
+  if (/(?:^|[\s("'=])\/(?:Users|home|root|tmp|var|private|etc|usr|opt|Applications)(?:\/|$)/.test(value)) {
+    return "posix-absolute-path";
+  }
+  return null;
+}
+
+function auditRendererFacingPaths(value: JsonValue): JsonValue {
+  const findings: JsonValue[] = [];
+  let scannedStrings = 0;
+
+  const visit = (candidate: JsonValue, field: string): void => {
+    if (typeof candidate === "string") {
+      scannedStrings += 1;
+      const kind = classifyAbsolutePath(candidate);
+      if (kind && findings.length < 20) findings.push({ field, kind });
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      candidate.forEach((child, index) => visit(child, `${field}[${index}]`));
+      return;
+    }
+    if (candidate && typeof candidate === "object") {
+      for (const [key, child] of Object.entries(candidate)) visit(child, `${field}.${key}`);
+    }
+  };
+
+  visit(value, "$renderer");
+  return {
+    ok: findings.length === 0,
+    scannedStrings,
+    findings,
+  };
+}
+
 async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<JsonValue> {
   return (await windowRef.webContents.executeJavaScript(
     `
@@ -1122,7 +1196,6 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
           nodeProcessAvailable: typeof root.process !== "undefined",
           ipcRendererAvailable: typeof root.ipcRenderer !== "undefined",
           electronGlobalAvailable: typeof root.electron !== "undefined",
-          rawPathExposed: false,
           keyMaterialExposedToRenderer: false
         };
       })()
@@ -1164,6 +1237,14 @@ async function runNetworkBlockProbe(windowRef: BrowserWindow): Promise<JsonValue
   );
   await delay(250);
   const navigationAfter = windowRef.webContents.getURL();
+  const localFileProbeUrl = process.platform === "win32" ? "file:///C:/Windows/win.ini" : "file:///etc/hosts";
+  const fileNavigationBefore = windowRef.webContents.getURL();
+  await windowRef.webContents.executeJavaScript(
+    `window.location.assign(${JSON.stringify(localFileProbeUrl)}); true`,
+    true,
+  );
+  await delay(250);
+  const fileNavigationAfter = windowRef.webContents.getURL();
   const afterRenderer = networkGuardSnapshot();
 
   const sessionProbeBefore = networkGuardSnapshot();
@@ -1206,9 +1287,11 @@ async function runNetworkBlockProbe(windowRef: BrowserWindow): Promise<JsonValue
         windowOpen,
         navigation: {
           attempted: true,
-          beforeUrl: navigationBefore,
-          afterUrl: navigationAfter,
           stayedInApp: navigationAfter === navigationBefore,
+        },
+        fileNavigation: {
+          attempted: true,
+          stayedInApp: fileNavigationAfter === fileNavigationBefore,
         },
         externalAllowedDelta: snapshotDelta(before, afterRenderer, "externalAllowedRequests"),
         blockedDelta: snapshotDelta(before, afterRenderer, "blockedRequests"),
@@ -1226,7 +1309,6 @@ async function runNetworkBlockProbe(windowRef: BrowserWindow): Promise<JsonValue
         ),
         blockedDelta: snapshotDelta(sessionProbeBefore, sessionProbeAfter, "blockedRequests"),
       },
-      rawPathExposed: false,
     };
   } finally {
     sessionProbeWindow.destroy();
@@ -1400,6 +1482,27 @@ async function runM0Smoke(): Promise<void> {
       windowRef.hide();
     }
     const mainStatus = await callCore("core.status");
+    const rendererPathAudit = auditRendererFacingPaths({
+      rendererBridge,
+      rendererIsolationProbe,
+      rendererVisualState,
+      licenseFixture,
+      networkBlockProbe,
+      designFixture,
+      documentExportFixture,
+    });
+    const rawPathExposed = objectValue(rendererPathAudit).ok !== true;
+    if (rawPathExposed) {
+      throw new Error("Renderer-facing smoke payload exposed an absolute local path.");
+    }
+    const rendererIsolationEvidence: JsonValue = {
+      ...objectValue(rendererIsolationProbe),
+      rawPathExposed,
+    };
+    const networkBlockEvidence: JsonValue = {
+      ...objectValue(networkBlockProbe),
+      rawPathExposed,
+    };
     await writeSmokeResult({
       ok: true,
       mode: "m0-packaged-runtime-smoke",
@@ -1419,7 +1522,8 @@ async function runM0Smoke(): Promise<void> {
       },
       sidecarSupervisor: supervisorSnapshot(),
       restartExercise,
-      rendererIsolationProbe,
+      rendererIsolationProbe: rendererIsolationEvidence,
+      rendererPathAudit,
       rendererVisualState,
       rendererScreenshot,
       rendererOnboardingScreenshots,
@@ -1427,7 +1531,7 @@ async function runM0Smoke(): Promise<void> {
       designFixture,
       documentExportFixture,
       licenseFixture,
-      networkBlockProbe,
+      networkBlockProbe: networkBlockEvidence,
       sessionNetworkGuard: networkGuardSnapshot(),
     });
     requestCoreShutdown();

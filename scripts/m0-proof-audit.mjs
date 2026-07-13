@@ -73,6 +73,48 @@ function numberValue(value, fallback = Number.NaN) {
   return typeof value === "number" ? value : fallback;
 }
 
+function classifyAbsolutePath(value) {
+  if (/(?:^|[^A-Za-z0-9+.-])[A-Za-z]:[\\/]/.test(value)) return "windows-absolute-path";
+  if (/\\\\[^\\\s]+[\\/]/.test(value)) return "windows-unc-path";
+  if (/file:\/\//i.test(value)) return "file-url";
+  if (/(?:^|[\s("'=])\/(?:Users|home|root|tmp|var|private|etc|usr|opt|Applications)(?:\/|$)/.test(value)) {
+    return "posix-absolute-path";
+  }
+  return null;
+}
+
+function rendererFacingPathFindings(payload) {
+  const findings = [];
+  const visit = (candidate, field) => {
+    if (typeof candidate === "string") {
+      const kind = classifyAbsolutePath(candidate);
+      if (kind && findings.length < 20) findings.push({ field, kind });
+      return;
+    }
+    if (Array.isArray(candidate)) {
+      candidate.forEach((child, index) => visit(child, `${field}[${index}]`));
+      return;
+    }
+    if (candidate && typeof candidate === "object") {
+      Object.entries(candidate).forEach(([key, child]) => visit(child, `${field}.${key}`));
+    }
+  };
+
+  visit(
+    {
+      rendererBridge: payload?.rendererBridge,
+      rendererIsolationProbe: payload?.rendererIsolationProbe,
+      rendererVisualState: payload?.rendererVisualState,
+      licenseFixture: payload?.licenseFixture,
+      networkBlockProbe: payload?.networkBlockProbe,
+      designFixture: payload?.designFixture,
+      documentExportFixture: payload?.documentExportFixture,
+    },
+    "$renderer",
+  );
+  return findings;
+}
+
 function validateSourceProvenance(payload, label, failures) {
   requireField(validGitHead(payload?.git?.head), `${label} git head must be recorded`, failures);
   requireField(typeof payload?.git?.dirty === "boolean", `${label} git dirty flag must be recorded`, failures);
@@ -335,6 +377,26 @@ function validateSmokeProof(payload) {
     "renderer isolation probe must not expose raw paths or key material",
     failures,
   );
+  const measuredRendererPathFindings = rendererFacingPathFindings(payload);
+  requireField(
+    payload?.rendererPathAudit?.ok === true &&
+      numberValue(payload?.rendererPathAudit?.scannedStrings, 0) > 0 &&
+      Array.isArray(payload?.rendererPathAudit?.findings) &&
+      payload.rendererPathAudit.findings.length === 0,
+    "renderer path audit must report a successful measured scan",
+    failures,
+  );
+  requireField(
+    measuredRendererPathFindings.length === 0,
+    "renderer-facing smoke payloads must contain no absolute paths",
+    failures,
+  );
+  requireField(
+    payload?.rendererBridge?.supervisorStatus?.rawPathExposed === false &&
+      !Object.prototype.hasOwnProperty.call(payload?.rendererBridge?.supervisorStatus ?? {}, "executable"),
+    "renderer supervisor status must omit the core executable path",
+    failures,
+  );
   requireField(
     payload?.rendererBridge?.status?.sidecarTransport === "stdio-json-lines",
     "renderer status must report stdio-json-lines",
@@ -592,13 +654,19 @@ function validateSmokeProof(payload) {
     failures,
   );
   requireField(
+    payload?.networkBlockProbe?.renderer?.fileNavigation?.attempted === true &&
+      payload?.networkBlockProbe?.renderer?.fileNavigation?.stayedInApp === true,
+    "network block probe must prove arbitrary local file navigation denial",
+    failures,
+  );
+  requireField(
     payload?.networkBlockProbe?.renderer?.externalAllowedDelta === 0,
     "renderer network block probe must allow zero external requests",
     failures,
   );
   requireField(
     numberValue(payload?.networkBlockProbe?.renderer?.deniedWindowOpenDelta) >= 1 &&
-      numberValue(payload?.networkBlockProbe?.renderer?.deniedNavigationDelta) >= 1,
+      numberValue(payload?.networkBlockProbe?.renderer?.deniedNavigationDelta) >= 2,
     "renderer network block probe must increment denial counters",
     failures,
   );
@@ -803,6 +871,11 @@ function minimalValidSmokeProof() {
       rawPathExposed: false,
       keyMaterialExposedToRenderer: false,
     },
+    rendererPathAudit: {
+      ok: true,
+      scannedStrings: 12,
+      findings: [],
+    },
     rendererBridge: {
       preloadBridgePresent: true,
       supervisorStatus: {
@@ -810,6 +883,7 @@ function minimalValidSmokeProof() {
         restartCount: 1,
         pid: 200,
         lastHandshake: handshake,
+        rawPathExposed: false,
       },
       status,
       capabilities: {
@@ -875,7 +949,7 @@ function minimalValidSmokeProof() {
       externalAllowedRequests: 0,
       blockedRequests: 1,
       deniedWindowOpenRequests: 1,
-      deniedNavigationRequests: 1,
+      deniedNavigationRequests: 2,
     },
     networkBlockProbe: {
       renderer: {
@@ -889,7 +963,7 @@ function minimalValidSmokeProof() {
           blockedRequests: 0,
           externalAllowedRequests: 0,
           deniedWindowOpenRequests: 1,
-          deniedNavigationRequests: 1,
+          deniedNavigationRequests: 2,
         },
         fetch: {
           attempted: true,
@@ -903,10 +977,14 @@ function minimalValidSmokeProof() {
           attempted: true,
           stayedInApp: true,
         },
+        fileNavigation: {
+          attempted: true,
+          stayedInApp: true,
+        },
         externalAllowedDelta: 0,
         blockedDelta: 0,
         deniedWindowOpenDelta: 1,
-        deniedNavigationDelta: 1,
+        deniedNavigationDelta: 2,
       },
       sessionGuard: {
         before: {
@@ -1194,6 +1272,21 @@ function runSelfTest() {
       payload.rendererIsolationProbe.forbiddenCoreKeysPresent = ["modelsImportStart"];
     },
     "renderer isolation probe must find zero private core bridge methods",
+  );
+  assertSelfTestFailure(
+    "renderer supervisor exposes executable path",
+    (payload) => {
+      payload.rendererBridge.supervisorStatus.executable = "C:\\Users\\example\\candor-core.exe";
+    },
+    "renderer-facing smoke payloads must contain no absolute paths",
+  );
+  assertSelfTestFailure(
+    "arbitrary local file navigation not measured",
+    (payload) => {
+      delete payload.networkBlockProbe.renderer.fileNavigation;
+      payload.networkBlockProbe.renderer.deniedNavigationDelta = 1;
+    },
+    "network block probe must prove arbitrary local file navigation denial",
   );
 
   assertSelfTestFailure(
