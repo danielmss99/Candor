@@ -11,9 +11,10 @@ interface ActivationGateProps {
   onLicenseKeyBlur: () => void;
   onActivate: () => void;
   onStartTrial: () => void;
+  onContinueLocal: () => void;
 }
 
-export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, licenseBusy, licenseStatus, onLicenseKeyChange, onLicenseEmailChange, onLicenseKeyBlur, onActivate, onStartTrial }: ActivationGateProps) {
+export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, licenseBusy, licenseStatus, onLicenseKeyChange, onLicenseEmailChange, onLicenseKeyBlur, onActivate, onStartTrial, onContinueLocal }: ActivationGateProps) {
   return (
     <main className="activation-shell" data-view="activation" aria-label="Candor activation onboarding">
       <section className="activation-hero">
@@ -25,7 +26,8 @@ export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, li
           <header><h2>Activate License</h2><p>Enter your purchase key, or start a local trial while production licensing is connected.</p></header>
           <label className="activation-field" htmlFor="candor-license-key"><span>License key <em>required for activation</em></span><input id="candor-license-key" value={licenseKey} onBlur={onLicenseKeyBlur} onChange={(event) => onLicenseKeyChange(event.target.value)} aria-invalid={licenseKeyInvalid} aria-describedby="candor-license-key-help" autoCapitalize="characters" autoCorrect="off" spellCheck={false} placeholder="CANDOR-DEV-LOCAL" /><small id="candor-license-key-help" role={licenseKeyInvalid ? "alert" : undefined}>{licenseKeyInvalid ? "Enter a license key or choose Start Trial." : "Development accepts CANDOR-DEV keys until production verification is connected."}</small></label>
           <label className="activation-field" htmlFor="candor-license-email"><span>Purchase email <em>optional</em></span><input id="candor-license-email" type="email" value={licenseEmail} onChange={(event) => onLicenseEmailChange(event.target.value)} autoComplete="email" placeholder="you@example.com" /><small>Stored as a local hash only when provided.</small></label>
-          <div className="activation-actions"><button className="primary-button" type="submit" disabled={licenseBusy}>{licenseBusy ? "Activating..." : "Activate License"}</button><button className="secondary-button" type="button" onClick={onStartTrial} disabled={licenseBusy}>Start Trial</button></div>
+          <div className="activation-actions"><button className="primary-button" type="submit" disabled={licenseBusy}>{licenseBusy ? "Activating..." : "Activate License"}</button><button className="secondary-button" type="button" onClick={onStartTrial} disabled={licenseBusy}>Start Trial</button><button className="text-button" type="button" onClick={onContinueLocal} disabled={licenseBusy}>Open local workspace</button></div>
+          <p className="activation-data-access">Existing local meetings always remain available to open, export, and delete.</p>
         </form>
         <dl className="activation-facts"><div><dt>Account required</dt><dd>No</dd></div><div><dt>Storage</dt><dd>{asBool(licenseStatus.secureStorageAvailable) ? "OS protected" : "Local metadata"}</dd></div><div><dt>Network</dt><dd>Disabled by default</dd></div></dl>
       </section>

@@ -18,9 +18,15 @@ import { useCaptureSession } from "../features/capture/useCaptureSession";
 import { useLocalJob } from "../features/ai/useLocalJob";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
+  StartupLoading,
+  StartupRecovery,
+  type StartupPhase,
+} from "../features/startup/StartupState";
+import {
   chooseInitialSelection,
   useMeetingWorkspace,
 } from "../features/meetings/useMeetingWorkspace";
+import { shouldShowActivationPrompt } from "../features/licensing/access-policy";
 import {
   DEFAULT_MODEL,
   asArray,
@@ -74,6 +80,9 @@ export function CandorWorkspace() {
   const [licenseKey, setLicenseKey] = useState("");
   const [licenseEmail, setLicenseEmail] = useState("");
   const [licenseKeyTouched, setLicenseKeyTouched] = useState(false);
+  const [licensePromptDismissed, setLicensePromptDismissed] = useState(false);
+  const [startupPhase, setStartupPhase] = useState<StartupPhase>("loading");
+  const [startupError, setStartupError] = useState("");
   const [notesPanelMode, setNotesPanelMode] = useState<"notes" | "suggestions">("notes");
   const [compactMeetingPane, setCompactMeetingPane] = useState<CompactMeetingPane>("transcript");
   const [advancedSettingsOpen, setAdvancedSettingsOpen] = useState(false);
@@ -243,8 +252,7 @@ export function CandorWorkspace() {
 
   const refresh = useCallback(async () => {
     if (!api || !client) {
-      setError("Candor preload API is unavailable");
-      return;
+      throw new Error("Candor preload API is unavailable");
     }
     const [, nextRecordings] = await Promise.all([
       loadCritical(),
@@ -255,11 +263,19 @@ export function CandorWorkspace() {
     if (nextSelected) await loadSelectedRecording(nextSelected);
     void loadDiagnostics();
   }, [api, client, loadCritical, loadDiagnostics, loadSelectedRecording, refreshLibrary, selectedRecordingId, setSelectedRecordingId]);
+  const retryWorkspaceLoad = refresh;
 
   useEffect(() => {
     if (startupLoaded.current) return;
     startupLoaded.current = true;
-    void refresh().catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    void refresh().then(() => {
+      setStartupPhase("ready");
+      setStartupError("");
+    }).catch((reason) => {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      setStartupError(message);
+      setStartupPhase("failed");
+    });
   }, [refresh]);
 
   useEffect(() => {
@@ -277,11 +293,11 @@ export function CandorWorkspace() {
     }
     const currentState = asString(licenseStatus.state, "inactive");
     if (currentState === "inactive") {
-      setOnboardingStep("activate");
+      setOnboardingStep(recordings.length > 0 || licensePromptDismissed ? "app" : "activate");
     } else if (onboardingStep === "activate") {
       setOnboardingStep("app");
     }
-  }, [licenseApi, licenseLoaded, licenseStatus, onboardingStep]);
+  }, [licenseApi, licenseLoaded, licensePromptDismissed, licenseStatus, onboardingStep, recordings.length]);
 
   useEffect(() => {
     setOpenMeetingIds((current) => {
@@ -693,9 +709,28 @@ export function CandorWorkspace() {
       const status = await licenseApi.deactivateDevice();
       setLicenseStatus(asObject(status));
       await refreshLicense();
-      setOnboardingStep("activate");
-      setView("home");
+      setLicensePromptDismissed(true);
+      setOnboardingStep("app");
+      setView(recordings.length ? "library" : "home");
       setNotice("Local activation removed from this device");
+    });
+  }
+
+  function continueWithoutActivation() {
+    setLicensePromptDismissed(true);
+    setOnboardingStep("app");
+    setView(recordings.length ? "library" : "home");
+    setNotice("Local workspace opened. Existing data remains available.");
+  }
+
+  function retryStartup() {
+    setStartupPhase("loading");
+    setStartupError("");
+    void retryWorkspaceLoad().then(() => {
+      setStartupPhase("ready");
+    }).catch((reason) => {
+      setStartupError(reason instanceof Error ? reason.message : String(reason));
+      setStartupPhase("failed");
     });
   }
 
@@ -908,6 +943,7 @@ export function CandorWorkspace() {
         onLicenseKeyBlur={() => setLicenseKeyTouched(true)}
         onActivate={() => void activateLicense()}
         onStartTrial={() => void startTrial()}
+        onContinueLocal={continueWithoutActivation}
       />
     );
   }
@@ -1173,18 +1209,20 @@ export function CandorWorkspace() {
     return renderProof();
   }
 
-  if (!licenseLoaded) {
-    return (
-      <main className="activation-shell loading-shell" data-view="activation-loading" aria-label="Loading Candor activation">
-        <section className="setup-card">
-          <header><span>Loading</span><h1>Opening Candor</h1><p>Checking local activation and setup status.</p></header>
-        </section>
-      </main>
-    );
+  if (!licenseLoaded || startupPhase === "loading") return <StartupLoading />;
+
+  if (startupPhase === "failed") {
+    return <StartupRecovery message={startupError} retrying={false} onRetry={retryStartup} />;
   }
 
-  if (licenseApi && (!licenseActive || onboardingStep !== "app")) {
-    return !licenseActive || onboardingStep === "activate"
+  const showActivationPrompt = shouldShowActivationPrompt({
+    licenseAvailable: Boolean(licenseApi),
+    licenseActive,
+    promptDismissed: licensePromptDismissed,
+    existingRecordingCount: recordings.length,
+  });
+  if (licenseApi && (showActivationPrompt || (licenseActive && onboardingStep !== "app"))) {
+    return showActivationPrompt || onboardingStep === "activate"
       ? renderActivationGate()
       : renderOnboardingSetup();
   }

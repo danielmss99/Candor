@@ -82,11 +82,10 @@ export function useMeetingWorkspace({ api, client, onContentChanged }: UseMeetin
       return;
     }
     const token = requests.current.begin("selected-recording");
-    const [nextTranscript, replayObject, notesObject, nextReceipt] = await Promise.all([
+    const [nextTranscript, replayObject, notesObject] = await Promise.all([
       client.transcriptPage(recordingId, 0, TRANSCRIPT_PAGE_SIZE),
       client.object("recording.durable.replayManifest", () => api.recordingDurableReplayManifest(recordingId)),
       client.object("recording.notes.read", () => api.recordingNotesRead(recordingId)),
-      client.privacyReceipt(recordingId),
     ]);
     if (!requests.current.isCurrent(token)) return;
     setTranscript(nextTranscript.segments);
@@ -98,7 +97,13 @@ export function useMeetingWorkspace({ api, client, onContentChanged }: UseMeetin
     setNotesStatus(notesObject);
     setNotesDirty(false);
     setMarkedMoments(parseMarkedMoments(nextMarkdown));
-    setPrivacyReceipt(nextReceipt);
+    setPrivacyReceipt(null);
+    const receiptToken = requests.current.begin("privacy-receipt");
+    void client.privacyReceipt(recordingId).then((receipt) => {
+      if (requests.current.isCurrent(receiptToken)) setPrivacyReceipt(receipt);
+    }).catch(() => {
+      if (requests.current.isCurrent(receiptToken)) setPrivacyReceipt(null);
+    });
     if (!preserveAi) onContentChanged();
     const tracks = asArray(replayObject.tracks).map((track) => asString(track)).filter(Boolean);
     setSelectedTrack((current) => tracks.length > 0 && !tracks.includes(current) ? tracks[0] : current);
