@@ -59,6 +59,18 @@ const designTokens = JSON.parse(readFileSync(tokenPath, "utf8"));
 const brandHandoffSource = readFileSync(brandHandoffPath, "utf8");
 const brandMasterSource = readFileSync(brandMasterPath, "utf8");
 const iconGeneratorSource = readFileSync(iconGeneratorPath, "utf8");
+const responsibilityTargets = [
+  path.join(repoRoot, "electron", "main.ts"),
+  path.join(repoRoot, "v3", "renderer", "src", "CandorApp.tsx"),
+  path.join(repoRoot, "v3", "renderer", "src", "app", "CandorApp.tsx"),
+  path.join(repoRoot, "v3", "renderer", "src", "app", "CandorWorkspace.tsx"),
+];
+for (const target of responsibilityTargets) {
+  const lineCount = readFileSync(target, "utf8").split(/\r?\n/).length;
+  if (lineCount > 250) {
+    throw new Error(`${path.relative(repoRoot, target)} exceeds the 250-line responsibility target: ${lineCount}`);
+  }
+}
 
 function requireSource(source, pattern, label) {
   if (pattern instanceof RegExp) {

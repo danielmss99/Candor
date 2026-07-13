@@ -656,6 +656,28 @@ p {
   min-height: 44px;
 }
 
+.activation-actions .text-button {
+  border-color: transparent;
+  background: transparent;
+  color: var(--info);
+  box-shadow: none;
+}
+
+.activation-actions .text-button:hover {
+  background: var(--bg-hover);
+}
+
+.activation-data-access {
+  margin: -4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.core-recovery-card .setup-status-row strong {
+  overflow-wrap: anywhere;
+}
+
 .activation-facts,
 .setup-facts {
   display: grid;

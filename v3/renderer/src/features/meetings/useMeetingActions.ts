@@ -177,16 +177,14 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
   }, [loadRecording, resetMeetingAi, selectedRecordingId, setSelectedRecordingId, setView]);
 
   const closeMeetingTab = useCallback((recordingId: string) => {
-    setOpenMeetingIds((current) => {
-      const remaining = current.filter((id) => id !== recordingId);
-      if (selectedRecordingId === recordingId) {
-        const next = remaining[0] ?? "";
-        setSelectedRecordingId(next);
-        if (next) void loadRecording(next);
-      }
-      return remaining;
-    });
-  }, [loadRecording, selectedRecordingId, setSelectedRecordingId]);
+    const remaining = openMeetingIds.filter((id) => id !== recordingId);
+    setOpenMeetingIds(remaining);
+    if (selectedRecordingId === recordingId) {
+      const next = remaining[0] ?? "";
+      setSelectedRecordingId(next);
+      if (next) void loadRecording(next);
+    }
+  }, [loadRecording, openMeetingIds, selectedRecordingId, setSelectedRecordingId]);
 
   const pinRecording = useCallback((recordingId: string) => {
     setOpenMeetingIds((current) => nextOpenMeetingIds(current, recordingId));

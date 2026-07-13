@@ -109,7 +109,7 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
     },
   }), [paperSize, recap, reviewedItems, sections, selectedRecordingId, summaryDraft]);
 
-  const save = useCallback(async () => {
+  const saveLocalReport = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("export", async () => {
       if (notesDirty) {
@@ -151,7 +151,6 @@ export function useReportWorkflow(options: UseReportWorkflowOptions) {
     setPaperSize,
     toggleSection,
     reviewItem,
-    save,
+    save: saveLocalReport,
   };
 }
-

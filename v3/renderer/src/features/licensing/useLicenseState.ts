@@ -79,7 +79,7 @@ export function useLicenseState(licenseApi: LicenseApi | undefined, onLoadError:
     setLicenseEmail,
     setLicenseKeyTouched,
     setPromptDismissed,
-    refresh: reload,
+    reload,
     activate,
     startTrial,
     deactivate,
