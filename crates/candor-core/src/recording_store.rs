@@ -32,6 +32,10 @@ const MAX_NOTES_MARKDOWN_BYTES: usize = 512 * 1024;
 const MAX_DOCUMENT_EXPORT_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_PAGE_LIMIT: u64 = 50;
 const MAX_PAGE_LIMIT: u64 = 500;
+const LOW_DISK_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const CAPTURE_START_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+const CHUNK_WRITE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
+const MANIFEST_WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
 static NEXT_RECORDING_ID_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
@@ -53,6 +57,10 @@ impl RecordingStoreError {
 pub struct RecordingStore {
     root: PathBuf,
     root_kind: &'static str,
+    #[cfg(test)]
+    available_space_override: Option<u64>,
+    #[cfg(test)]
+    fail_space_probe: bool,
 }
 
 #[cfg_attr(not(feature = "local-whisper"), allow(dead_code))]
@@ -261,6 +269,10 @@ impl RecordingStore {
                 return Self {
                     root: PathBuf::from(path),
                     root_kind: "env-override",
+                    #[cfg(test)]
+                    available_space_override: None,
+                    #[cfg(test)]
+                    fail_space_probe: false,
                 };
             }
         }
@@ -268,6 +280,10 @@ impl RecordingStore {
         Self {
             root: default_data_root(),
             root_kind: "local-user-data",
+            #[cfg(test)]
+            available_space_override: None,
+            #[cfg(test)]
+            fail_space_probe: false,
         }
     }
 
@@ -276,7 +292,21 @@ impl RecordingStore {
         Self {
             root,
             root_kind: "test-root",
+            available_space_override: Some(u64::MAX),
+            fail_space_probe: false,
         }
+    }
+
+    #[cfg(test)]
+    fn with_available_space(mut self, available_bytes: u64) -> Self {
+        self.available_space_override = Some(available_bytes);
+        self
+    }
+
+    #[cfg(test)]
+    fn with_failed_space_probe(mut self) -> Self {
+        self.fail_space_probe = true;
+        self
     }
 
     pub fn status(&self) -> Result<Value, RecordingStoreError> {
@@ -291,6 +321,7 @@ impl RecordingStore {
             0
         };
         let encryption = self.chunk_encryption_status();
+        let storage_health = self.storage_health();
 
         Ok(json!({
             "rootKind": self.root_kind,
@@ -306,8 +337,95 @@ impl RecordingStore {
             "chunkFlushPolicy": "write_all+sync_all-per-chunk",
             "manifestPolicy": "json-manifest-rewritten-after-each-chunk",
             "recordingCount": recording_count,
+            "storageHealth": storage_health,
             "rawPathExposed": false
         }))
+    }
+
+    pub fn storage_health(&self) -> Value {
+        match self.available_space_bytes() {
+            Ok(available_bytes) => {
+                let level = if available_bytes < CAPTURE_START_RESERVE_BYTES {
+                    "blocking"
+                } else if available_bytes < LOW_DISK_THRESHOLD_BYTES {
+                    "low"
+                } else {
+                    "ok"
+                };
+                json!({
+                    "level": level,
+                    "availableBytes": available_bytes,
+                    "lowThresholdBytes": LOW_DISK_THRESHOLD_BYTES,
+                    "captureStartReserveBytes": CAPTURE_START_RESERVE_BYTES,
+                    "chunkWriteReserveBytes": CHUNK_WRITE_RESERVE_BYTES,
+                    "canStartRecording": available_bytes >= CAPTURE_START_RESERVE_BYTES,
+                    "canContinueCapture": available_bytes >= CHUNK_WRITE_RESERVE_BYTES
+                        .saturating_add(MAX_DURABLE_CHUNK_BYTES as u64)
+                        .saturating_add(MANIFEST_WRITE_HEADROOM_BYTES),
+                    "measuredAtMs": now_ms(),
+                    "rawPathExposed": false
+                })
+            }
+            Err(error) => json!({
+                "level": "unavailable",
+                "availableBytes": null,
+                "lowThresholdBytes": LOW_DISK_THRESHOLD_BYTES,
+                "captureStartReserveBytes": CAPTURE_START_RESERVE_BYTES,
+                "chunkWriteReserveBytes": CHUNK_WRITE_RESERVE_BYTES,
+                "canStartRecording": false,
+                "canContinueCapture": false,
+                "errorCode": error.code,
+                "measuredAtMs": now_ms(),
+                "rawPathExposed": false
+            }),
+        }
+    }
+
+    fn available_space_bytes(&self) -> Result<u64, RecordingStoreError> {
+        #[cfg(test)]
+        {
+            if self.fail_space_probe {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_STORAGE_PROBE_FAILED",
+                    "available local storage could not be measured",
+                ));
+            }
+            if let Some(available_bytes) = self.available_space_override {
+                return Ok(available_bytes);
+            }
+        }
+
+        fs::create_dir_all(&self.root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
+        fs2::available_space(&self.root).map_err(|_| {
+            RecordingStoreError::new(
+                "RECORDING_STORAGE_PROBE_FAILED",
+                "available local storage could not be measured",
+            )
+        })
+    }
+
+    fn ensure_capture_start_space(&self) -> Result<(), RecordingStoreError> {
+        let available_bytes = self.available_space_bytes()?;
+        if available_bytes < CAPTURE_START_RESERVE_BYTES {
+            return Err(RecordingStoreError::new(
+                "RECORDING_STORAGE_START_BLOCKED",
+                "free local storage is below the reserve required to start recording",
+            ));
+        }
+        Ok(())
+    }
+
+    fn ensure_chunk_write_space(&self, payload_bytes: usize) -> Result<(), RecordingStoreError> {
+        let required_bytes = CHUNK_WRITE_RESERVE_BYTES
+            .saturating_add(payload_bytes as u64)
+            .saturating_add(MANIFEST_WRITE_HEADROOM_BYTES);
+        if self.available_space_bytes()? < required_bytes {
+            return Err(RecordingStoreError::new(
+                "RECORDING_STORAGE_WRITE_BLOCKED",
+                "free local storage is below the reserve required for another durable chunk",
+            ));
+        }
+        Ok(())
     }
 
     pub fn retention_status(&self) -> Result<Value, RecordingStoreError> {
@@ -340,6 +458,7 @@ impl RecordingStore {
     }
 
     pub fn start(&self, params: StartRecordingParams) -> Result<Value, RecordingStoreError> {
+        self.ensure_capture_start_space()?;
         let recording_id = new_recording_id();
         let dir = self.recording_dir(&recording_id)?;
         fs::create_dir_all(&dir).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
@@ -412,15 +531,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("RECORDING_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("RECORDING_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         manifest.chunks.push(DurableChunk {
             index,
@@ -506,15 +618,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("RECORDING_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("RECORDING_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         manifest.chunks.push(DurableChunk {
             index,
@@ -607,15 +712,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("RECORDING_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("RECORDING_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         let duration_ms = audio_duration_ms(
             bytes.len() as u64,
@@ -660,6 +758,21 @@ impl RecordingStore {
         manifest.state = RecordingState::Finished;
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)?;
+        Ok(recording_summary(&manifest, self.root_kind))
+    }
+
+    pub(crate) fn mark_needs_recovery(
+        &self,
+        params: RecordingIdParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let dir = self.recording_dir(&params.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        if manifest.state != RecordingState::Finished {
+            manifest.state = RecordingState::NeedsRecovery;
+            manifest.updated_at_ms = now_ms();
+            write_manifest(&dir, &manifest)?;
+        }
         Ok(recording_summary(&manifest, self.root_kind))
     }
 
@@ -1045,15 +1158,8 @@ impl RecordingStore {
             ),
         };
         let chunk_path = dir.join(&file_name);
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&chunk_path)
-            .map_err(io_error("NOTES_CHUNK_CREATE_FAILED"))?;
-        file.write_all(&payload)
-            .map_err(io_error("NOTES_CHUNK_WRITE_FAILED"))?;
-        file.sync_all()
-            .map_err(io_error("NOTES_CHUNK_FLUSH_FAILED"))?;
+        self.ensure_chunk_write_space(payload.len())?;
+        write_durable_chunk_file(&chunk_path, &payload)?;
 
         manifest.chunks.push(DurableChunk {
             index,
@@ -2557,6 +2663,31 @@ fn validate_manifest_structure(
     Ok(())
 }
 
+fn write_durable_chunk_file(path: &Path, payload: &[u8]) -> Result<(), RecordingStoreError> {
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(path)
+        .map_err(io_error("RECORDING_CHUNK_CREATE_FAILED"))?;
+    if let Err(error) = file.write_all(payload) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(RecordingStoreError::new(
+            "RECORDING_CHUNK_WRITE_FAILED",
+            error.to_string(),
+        ));
+    }
+    if let Err(error) = file.sync_all() {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(RecordingStoreError::new(
+            "RECORDING_CHUNK_FLUSH_FAILED",
+            error.to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), RecordingStoreError> {
     fs::create_dir_all(dir).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
     let tmp_path = dir.join("manifest.json.tmp");
@@ -3770,6 +3901,118 @@ mod tests {
         assert_eq!(error.code, "RECORDING_CHUNK_CREATE_FAILED");
         let manifest = read_manifest(&dir).expect("read unchanged manifest");
         assert!(manifest.chunks.is_empty());
+    }
+
+    #[test]
+    fn storage_health_is_pathless_and_distinguishes_ok_low_blocking_and_unavailable() {
+        let root = temp_store().root;
+        let ok = RecordingStore::with_root(root.join("ok"))
+            .with_available_space(LOW_DISK_THRESHOLD_BYTES);
+        let low = RecordingStore::with_root(root.join("low"))
+            .with_available_space(CAPTURE_START_RESERVE_BYTES);
+        let blocking = RecordingStore::with_root(root.join("blocking"))
+            .with_available_space(CAPTURE_START_RESERVE_BYTES - 1);
+        let unavailable =
+            RecordingStore::with_root(root.join("unavailable")).with_failed_space_probe();
+
+        assert_eq!(ok.storage_health()["level"], "ok");
+        assert_eq!(ok.storage_health()["canStartRecording"], true);
+        assert_eq!(low.storage_health()["level"], "low");
+        assert_eq!(low.storage_health()["canStartRecording"], true);
+        assert_eq!(blocking.storage_health()["level"], "blocking");
+        assert_eq!(blocking.storage_health()["canStartRecording"], false);
+        assert_eq!(blocking.storage_health()["rawPathExposed"], false);
+        assert_eq!(unavailable.storage_health()["level"], "unavailable");
+        assert_eq!(unavailable.storage_health()["canStartRecording"], false);
+        assert_eq!(
+            unavailable.storage_health()["errorCode"],
+            "RECORDING_STORAGE_PROBE_FAILED"
+        );
+    }
+
+    #[test]
+    fn filesystem_space_probe_reads_the_temporary_volume_without_paths() {
+        let root = env::temp_dir().join(format!("candor-storage-probe-{}", new_recording_id()));
+        let store = RecordingStore {
+            root: root.clone(),
+            root_kind: "test-root",
+            available_space_override: None,
+            fail_space_probe: false,
+        };
+
+        let health = store.storage_health();
+
+        assert_ne!(health["level"], "unavailable");
+        assert!(health["availableBytes"].as_u64().is_some());
+        assert_eq!(health["rawPathExposed"], false);
+        assert!(health.get("path").is_none());
+        fs::remove_dir_all(root).expect("remove temporary storage probe root");
+    }
+
+    #[test]
+    fn capture_start_is_blocked_below_reserve_without_creating_a_recording() {
+        let store = temp_store().with_available_space(CAPTURE_START_RESERVE_BYTES - 1);
+
+        let error = store
+            .start(StartRecordingParams {
+                label: Some("must not start".to_string()),
+            })
+            .expect_err("low storage must block capture start");
+
+        assert_eq!(error.code, "RECORDING_STORAGE_START_BLOCKED");
+        assert!(!store.recordings_root().exists());
+    }
+
+    #[test]
+    fn blocked_chunk_write_preserves_the_last_committed_manifest() {
+        let root = temp_store().root;
+        let healthy_store =
+            RecordingStore::with_root(root.clone()).with_available_space(LOW_DISK_THRESHOLD_BYTES);
+        let started = healthy_store
+            .start(StartRecordingParams {
+                label: Some("storage boundary".to_string()),
+            })
+            .expect("start before storage pressure");
+        let recording_id = recording_id(&started);
+        let dir = healthy_store
+            .recording_dir(&recording_id)
+            .expect("recording dir");
+        let manifest_before = fs::read(dir.join(MANIFEST_FILE)).expect("read committed manifest");
+        let pressured_store =
+            RecordingStore::with_root(root).with_available_space(CHUNK_WRITE_RESERVE_BYTES);
+
+        let error = pressured_store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "must not be partially committed".to_string(),
+            })
+            .expect_err("chunk must stop before storage reserve");
+
+        assert_eq!(error.code, "RECORDING_STORAGE_WRITE_BLOCKED");
+        assert_eq!(
+            fs::read(dir.join(MANIFEST_FILE)).expect("reread committed manifest"),
+            manifest_before
+        );
+        assert!(!dir.join("chunk-000000.raw").exists());
+        assert!(!dir.join("chunk-000000.cchunk").exists());
+        let manifest = read_manifest(&dir).expect("read preserved manifest");
+        assert_eq!(manifest.state, RecordingState::Recording);
+        assert!(manifest.chunks.is_empty());
+    }
+
+    #[test]
+    fn failed_space_probe_blocks_start_without_exposing_a_path() {
+        let store = temp_store().with_failed_space_probe();
+        let health = store.storage_health();
+
+        let error = store
+            .start(StartRecordingParams { label: None })
+            .expect_err("unknown storage must fail closed");
+
+        assert_eq!(error.code, "RECORDING_STORAGE_PROBE_FAILED");
+        assert_eq!(health["rawPathExposed"], false);
+        assert!(health.get("path").is_none());
     }
 
     #[test]

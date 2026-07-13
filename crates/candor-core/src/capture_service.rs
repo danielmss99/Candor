@@ -601,14 +601,20 @@ impl CaptureManager {
                 CaptureError::new("CAPTURE_WRITER_FAILED", "capture writer thread panicked")
             })?;
         }
-        let finished = store.finish(RecordingIdParams {
-            recording_id: session.recording_id.clone(),
-        })?;
         let last_error = session
             .last_error
             .lock()
             .ok()
             .and_then(|error| error.clone());
+        let finished = if last_error.is_some() {
+            store.mark_needs_recovery(RecordingIdParams {
+                recording_id: session.recording_id.clone(),
+            })?
+        } else {
+            store.finish(RecordingIdParams {
+                recording_id: session.recording_id.clone(),
+            })?
+        };
         let integrity_status = if last_error.is_some() {
             "failed"
         } else {
@@ -1804,6 +1810,39 @@ mod tests {
             last_error.lock().expect("last error lock").as_deref(),
             Some("first")
         );
+    }
+
+    #[test]
+    fn stopping_after_a_writer_failure_marks_the_recording_for_recovery() {
+        let root = std::env::temp_dir().join(format!("candor-capture-recovery-{}", now_ms()));
+        let store = RecordingStore::with_root(root);
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("writer failure".to_string()),
+            })
+            .expect("start test recording");
+        let recording_id = started["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        let mut manager = CaptureManager {
+            active: Some(CaptureSession {
+                recording_id,
+                stop: Arc::new(AtomicBool::new(false)),
+                joins: Vec::new(),
+                writer_join: None,
+                runtimes: Vec::new(),
+                last_error: Arc::new(Mutex::new(Some(
+                    "free local storage is below the durable write reserve".to_string(),
+                ))),
+                started_at_ms: now_ms(),
+            }),
+        };
+
+        let stopped = manager.stop(&store).expect("stop failed capture");
+
+        assert_eq!(stopped["recording"]["state"], "needsRecovery");
+        assert_eq!(stopped["capture"]["integrityStatus"], "failed");
     }
 
     #[test]
