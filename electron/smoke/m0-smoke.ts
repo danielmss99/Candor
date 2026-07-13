@@ -38,8 +38,7 @@ function options(): M0SmokeOptions {
   return activeOptions;
 }
 
-const callCore = (method: string, params: JsonValue = null, timeoutMs = 5000) =>
-  options().core.call(method, params, timeoutMs);
+const callCore = (method: string, params: JsonValue = null) => options().core.call(method, params);
 const ensureCoreHandshake = () => options().core.ensureHandshake();
 const supervisorSnapshot = () => options().core.snapshot();
 const requestCoreShutdown = () => options().core.shutdown();
@@ -119,7 +118,7 @@ function delay(ms: number): Promise<void> {
 
 async function seedDesignSmokeMeeting(): Promise<JsonValue> {
   const started = requireCoreResult(
-    await callCore("recording.durable.start", { label: "Product Strategy Sync" }, 15000),
+    await callCore("recording.durable.start", { label: "Product Strategy Sync" }),
     "recording.durable.start",
   );
   const recordingId = stringField(started, "recordingId");
@@ -144,7 +143,6 @@ async function seedDesignSmokeMeeting(): Promise<JsonValue> {
           durationMs: segment.durationMs,
           confidence: 0.97,
         },
-        15000,
       ),
       "recording.durable.writeTranscriptSegment",
     );
@@ -156,12 +154,11 @@ async function seedDesignSmokeMeeting(): Promise<JsonValue> {
         recordingId,
         markdown: "- Export must remain clean and editable\n- Keep transcript and notes visible together\n- Link marked moments to evidence",
       },
-      15000,
     ),
     "recording.notes.save",
   );
   requireCoreResult(
-    await callCore("recording.durable.finish", { recordingId }, 15000),
+    await callCore("recording.durable.finish", { recordingId }),
     "recording.durable.finish",
   );
   return {
@@ -224,7 +221,7 @@ async function provePackagedDocumentExports(recordingId: string): Promise<JsonVa
 
   for (const format of ["docx", "pdf"] as const) {
     const result = requireCoreResult(
-      await callCore("export.create", { recordingId, format, report, options }, 30_000),
+      await callCore("export.create", { recordingId, format, report, options }),
       `export.create:${format}`,
     );
     const decoded = decodeLocalExportResult(format, result);

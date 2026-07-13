@@ -1610,6 +1610,7 @@ fn main() {
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+    use std::fs;
 
     fn core_state() -> CoreState {
         let stamp = SystemTime::now()
@@ -1650,6 +1651,72 @@ mod tests {
             "sentAt": "2026-07-13T03:45:00.000Z"
         })
         .to_string()
+    }
+
+    fn assert_top_level_json_shape(actual: &Value, expected: &Value) {
+        let actual = actual.as_object().expect("fixture result must be an object");
+        let expected = expected
+            .as_object()
+            .expect("fixture contract must be an object");
+        for (field, expected_value) in expected {
+            let actual_value = actual
+                .get(field)
+                .unwrap_or_else(|| panic!("core result omitted fixture field {field}"));
+            assert_eq!(
+                std::mem::discriminant(actual_value),
+                std::mem::discriminant(expected_value),
+                "core result changed the JSON kind for fixture field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn shared_protocol_fixtures_are_consumed_by_the_rust_core() {
+        let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("fixtures")
+            .join("protocol");
+        let mut state = core_state();
+
+        for entry in fs::read_dir(fixture_root.join("valid")).expect("valid fixture directory") {
+            let path = entry.expect("valid fixture entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let fixture: Value = serde_json::from_slice(&fs::read(&path).expect("valid fixture read"))
+                .expect("valid fixture JSON");
+            let kind = fixture["kind"].as_str().expect("valid fixture kind");
+            let (method, params, expected) = if kind == "handshake" {
+                ("core.version", Value::Null, &fixture["value"])
+            } else {
+                (
+                    fixture["method"].as_str().expect("valid fixture method"),
+                    fixture["params"].clone(),
+                    &fixture["result"],
+                )
+            };
+            let response = handle_request(
+                request_with(json!(path.file_name().unwrap().to_string_lossy()), method, params),
+                &mut state,
+            );
+            assert!(response.ok, "valid fixture {path:?} was rejected");
+            assert_top_level_json_shape(
+                response.result.as_ref().expect("valid fixture result"),
+                expected,
+            );
+        }
+
+        for entry in fs::read_dir(fixture_root.join("invalid")).expect("invalid fixture directory") {
+            let path = entry.expect("invalid fixture entry").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let fixture: Value = serde_json::from_slice(&fs::read(&path).expect("invalid fixture read"))
+                .expect("invalid fixture JSON");
+            assert!(fixture["method"].is_string(), "invalid fixture must identify a method");
+            assert!(fixture["expectedCode"].is_string(), "invalid fixture must identify an error code");
+        }
     }
 
     #[test]

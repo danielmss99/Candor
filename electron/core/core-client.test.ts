@@ -24,10 +24,21 @@ function responsiveCore(active = false): string {
     const readline = require("node:readline");
     const protocolVersion = ${JSON.stringify(CORE_PROTOCOL_VERSION)};
     let captureActive = ${String(active)};
+    let handshakeCount = 0;
     const input = readline.createInterface({ input: process.stdin });
     input.on("line", (line) => {
       const request = JSON.parse(line);
-      let result = { ready: true, receivedRequestId: request.requestId, idsMatch: request.id === request.requestId };
+      let result = {
+        version: "test",
+        protocolVersion,
+        uptimeMs: 1,
+        networkPolicy: "disabled-by-default",
+        updaterPolicy: "manual-check-only",
+        vaultState: "test",
+        sidecarTransport: "stdio-json-lines",
+        startupRecovery: {},
+        handshakeCount
+      };
       if (request.method === "core.version") result = {
         version: "test",
         protocolVersion,
@@ -35,15 +46,25 @@ function responsiveCore(active = false): string {
         capabilities: ["stdio-json-lines"],
         build: { target: "test-target", features: [] }
       };
-      if (request.method === "capture.status") result = { active: captureActive, rawPathExposed: false };
+      if (request.method === "core.version") handshakeCount += 1;
+      if (request.method === "capture.status") result = { implemented: true, active: captureActive, sources: {}, rawPathExposed: false };
       if (request.method === "capture.startMic") {
         captureActive = true;
-        result = { active: true, recordingId: "recording-1", rawPathExposed: false };
+        result = {
+          recording: { recordingId: "recording-1", state: "recording" },
+          capture: { recordingId: "recording-1" },
+          rawPathExposed: false
+        };
       }
       if (request.method === "capture.stop") {
         captureActive = false;
-        result = { active: false, recordingId: "recording-1", state: "finished", rawPathExposed: false };
+        result = {
+          recording: { recordingId: "recording-1", state: "finished" },
+          capture: { recordingId: "recording-1", integrityStatus: "verified" },
+          rawPathExposed: false
+        };
       }
+      if (request.method === "core.shutdown") result = { shutdown: true };
       process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       if (request.method === "core.shutdown") setTimeout(() => process.exit(0), 5);
     });
@@ -65,7 +86,7 @@ function capturingThenSilentCore(): string {
         capabilities: ["stdio-json-lines"],
         build: { target: "test-target", features: [] }
       };
-      if (request.method === "capture.status") result = { active: true, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: true, sources: {}, rawPathExposed: false };
       if (result !== null) {
         process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       }
@@ -84,10 +105,9 @@ describe("core client process boundary", () => {
       spawnCore: () => spawnNode(responsiveCore()),
     });
 
-    await client.ensureHandshake();
     const response = await client.call("core.status");
     expect(response.ok).toBe(true);
-    expect(response.result).toMatchObject({ ready: true, idsMatch: true });
+    expect(response.result).toMatchObject({ protocolVersion: CORE_PROTOCOL_VERSION, handshakeCount: 1 });
     expect(client.snapshot()).toMatchObject({ state: "running", lastHandshake: { ok: true } });
     await client.shutdown();
   });
@@ -127,9 +147,10 @@ describe("core client process boundary", () => {
       allowedMethods,
       isDev: false,
       spawnCore: () => spawnNode("process.stdin.resume(); setInterval(() => {}, 1000);"),
+      timeoutMsForTesting: () => 25,
     });
 
-    await expect(client.call("core.status", null, 25)).rejects.toThrow("timed out");
+    await expect(client.call("core.status")).rejects.toThrow("timed out");
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(client.snapshot()).toMatchObject({ state: "failed" });
   });
@@ -141,11 +162,12 @@ describe("core client process boundary", () => {
       allowedMethods,
       isDev: false,
       spawnCore: () => child,
+      timeoutMsForTesting: (method, configured) => method === "core.status" ? 25 : configured,
     });
 
     await client.ensureHandshake();
     await client.call("capture.status");
-    await expect(client.call("core.status", null, 25)).rejects.toThrow("timed out");
+    await expect(client.call("core.status")).rejects.toThrow("timed out");
     await settle();
     expect(client.snapshot()).toMatchObject({ state: "failed", captureActive: true });
     expect(child.killed).toBe(false);
@@ -200,5 +222,39 @@ describe("core client process boundary", () => {
     expect(client.captureGuardPhase()).toBe("idle");
     await client.shutdown();
     expect(client.snapshot()).toMatchObject({ state: "stopped", captureActive: false });
+  });
+
+  it("shares one handshake across concurrent initial calls", async () => {
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => spawnNode(responsiveCore()),
+    });
+
+    const [first, second] = await Promise.all([
+      client.call("core.status"),
+      client.call("core.status"),
+    ]);
+    expect(first.result).toMatchObject({ handshakeCount: 1 });
+    expect(second.result).toMatchObject({ handshakeCount: 1 });
+    await client.shutdown();
+  });
+
+  it("rejects a malformed successful result before delivery", async () => {
+    const script = responsiveCore().replace(
+      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, sources: {}, rawPathExposed: false };',
+      'if (request.method === "capture.status") result = { active: "yes" };',
+    );
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => spawnNode(script),
+    });
+
+    await expect(client.call("capture.status")).rejects.toMatchObject({ code: "CORE_RESULT_SCHEMA_INVALID" });
+    await settle();
+    expect(client.snapshot()).toMatchObject({ state: "failed" });
   });
 });

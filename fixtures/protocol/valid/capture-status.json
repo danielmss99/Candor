@@ -1,0 +1,14 @@
+{
+  "kind": "operation-contract",
+  "method": "capture.status",
+  "params": null,
+  "result": {
+    "implemented": true,
+    "active": false,
+    "sources": {
+      "mic": { "implemented": true },
+      "system": { "implemented": true }
+    },
+    "rawPathExposed": false
+  }
+}

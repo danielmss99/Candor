@@ -21,7 +21,6 @@ export function registerCoreIpc(dependencies: IpcDependencies): void {
         const response = await dependencies.core.call(
           operation.method,
           validatedParams,
-          operation.timeoutMs,
         );
         if (!response.ok) throw rendererSafeCoreError(response.error?.code);
         return sanitizeCoreResultForRenderer(operation.method, response.result ?? null);

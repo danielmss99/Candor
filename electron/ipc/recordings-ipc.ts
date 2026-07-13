@@ -32,7 +32,6 @@ export function registerRecordingsIpc(dependencies: RecordingIpcDependencies): v
     const response = await dependencies.core.call(
       "recording.durable.delete",
       { recordingId: input.recordingId },
-      30_000,
     );
     if (!response.ok) {
       throw new Error(response.error?.message ?? "The local meeting could not be deleted.");

@@ -1,0 +1,8 @@
+{
+  "kind": "operation-params",
+  "method": "capture.startMic",
+  "value": {
+    "command": "calc.exe"
+  },
+  "expectedCode": "CORE_PARAMS_SCHEMA_INVALID"
+}

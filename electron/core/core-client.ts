@@ -10,6 +10,7 @@ import {
   parseCoreResponseLine,
   type CoreResponse,
 } from "./protocol.js";
+import { CORE_OPERATIONS, type CoreOperationDefinition } from "./operation-registry.js";
 import { RequestRegistry } from "./request-registry.js";
 
 export type CoreSupervisorLifecycle =
@@ -47,6 +48,7 @@ interface CoreClientOptions {
   allowedMethods: ReadonlySet<string>;
   isDev: boolean;
   spawnCore?: SpawnCore;
+  timeoutMsForTesting?: (method: string, configuredTimeoutMs: number) => number;
 }
 
 const MAX_CORE_STDERR_BYTES = 64 * 1024;
@@ -93,7 +95,7 @@ export class CoreClient {
     lastHandshake: null,
   };
   private hasStarted = false;
-  private handshakePromise: Promise<void> | null = null;
+  private handshakePromise: Promise<ReturnType<typeof parseCoreHandshake>> | null = null;
   private stdoutBuffer = Buffer.alloc(0);
   private captureActive = false;
   private protocolFault: string | null = null;
@@ -142,48 +144,29 @@ export class CoreClient {
     return this.captureActive ? "recording" : "idle";
   }
 
-  call(method: string, params: JsonValue = null, timeoutMs = 5000): Promise<CoreResponse> {
-    if (!this.options.allowedMethods.has(method)) {
-      return Promise.reject(new CoreClientError("CORE_METHOD_DENIED", `IPC method is not allowed: ${method}`, false));
+  async call(method: string, params: JsonValue = null): Promise<CoreResponse> {
+    const operation = CORE_OPERATIONS.get(method);
+    if (!operation || !this.options.allowedMethods.has(method)) {
+      throw new CoreClientError("CORE_METHOD_DENIED", `IPC method is not allowed: ${method}`, false);
     }
-    try {
-      this.start();
-    } catch (error) {
-      return Promise.reject(error);
-    }
-    const child = this.child;
-    if (!child || child.killed || !child.stdin.writable) {
-      return Promise.reject(new CoreClientError("CORE_UNAVAILABLE", "candor-core is not available", true));
-    }
-
-    const request = createCoreRequest(method, params);
-    const line = `${JSON.stringify(request)}\n`;
-    if (Buffer.byteLength(line, "utf8") > MAX_CORE_REQUEST_LINE_BYTES) {
-      return Promise.reject(
-        new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core request exceeds the JSONL boundary limit", false),
-      );
-    }
-    const response = this.registry.register(request.requestId, method, timeoutMs, () => this.handleTimeout());
-    child.stdin.write(line, "utf8", (error) => {
-      if (error) {
-        this.registry.reject(
-          request.requestId,
-          new CoreClientError("CORE_UNAVAILABLE", "candor-core request could not be written", true, {
-            cause: error,
-          }),
-        );
-      }
-    });
-    return response;
+    const validatedParams = operation.paramsSchema.parse(params);
+    if (operation.requiresHandshake) await this.ensureHandshake();
+    return this.rawCall(operation, validatedParams);
   }
 
-  async ensureHandshake(): Promise<void> {
-    if (this.child && this.supervisor.lastHandshake?.ok) return;
+  async ensureHandshake(): Promise<ReturnType<typeof parseCoreHandshake>> {
+    if (this.child && this.supervisor.lastHandshake?.ok) {
+      return parseCoreHandshake(this.supervisor.lastHandshake.version ?? null);
+    }
     if (this.handshakePromise) return this.handshakePromise;
 
+    const operation = CORE_OPERATIONS.get("core.version");
+    if (!operation) {
+      throw new CoreClientError("CORE_METHOD_DENIED", "Core version operation is not registered", false);
+    }
     this.handshakePromise = (async () => {
       try {
-        const response = await this.call("core.version");
+        const response = await this.rawCall(operation, operation.paramsSchema.parse(null));
         if (!response.ok) {
           throw new CoreClientError(
             "CORE_PROTOCOL_MISMATCH",
@@ -191,12 +174,13 @@ export class CoreClient {
             false,
           );
         }
-        parseCoreHandshake(response.result ?? null);
+        const handshake = parseCoreHandshake(response.result ?? null);
         this.supervisor.lastHandshake = {
           ok: true,
           at: new Date().toISOString(),
           version: response.result ?? null,
         };
+        return handshake;
       } catch (error) {
         this.handshakePromise = null;
         this.supervisor.lastHandshake = {
@@ -208,6 +192,45 @@ export class CoreClient {
       }
     })();
     return this.handshakePromise;
+  }
+
+  private rawCall(operation: CoreOperationDefinition, params: JsonValue): Promise<CoreResponse> {
+    try {
+      this.start();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const child = this.child;
+    if (!child || child.killed || !child.stdin.writable) {
+      return Promise.reject(new CoreClientError("CORE_UNAVAILABLE", "candor-core is not available", true));
+    }
+
+    const request = createCoreRequest(operation.method, params);
+    const line = `${JSON.stringify(request)}\n`;
+    if (Buffer.byteLength(line, "utf8") > MAX_CORE_REQUEST_LINE_BYTES) {
+      return Promise.reject(
+        new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core request exceeds the JSONL boundary limit", false),
+      );
+    }
+    const configuredTimeout = operation.timeoutMs;
+    const timeoutMs = this.options.timeoutMsForTesting?.(operation.method, configuredTimeout) ?? configuredTimeout;
+    const response = this.registry.register(
+      request.requestId,
+      operation.method,
+      timeoutMs,
+      (method) => this.handleTimeout(method),
+    );
+    child.stdin.write(line, "utf8", (error) => {
+      if (error) {
+        this.registry.reject(
+          request.requestId,
+          new CoreClientError("CORE_UNAVAILABLE", "candor-core request could not be written", true, {
+            cause: error,
+          }),
+        );
+      }
+    });
+    return response;
   }
 
   async exerciseRestartForSmoke(): Promise<JsonValue> {
@@ -233,7 +256,7 @@ export class CoreClient {
     const child = this.child;
     if (!child || child.killed) return;
     this.supervisor.state = "stopping";
-    void this.call("core.shutdown", null, 2000).catch(() => undefined);
+    void this.call("core.shutdown").catch(() => undefined);
     await this.waitForExit(child, 5000).catch(() => {
       child.kill("SIGKILL");
     });
@@ -245,7 +268,7 @@ export class CoreClient {
       const phase = this.captureGuardPhase();
       if (phase === "idle") return;
       if (phase === "recording") {
-        const response = await this.call("capture.stop", null, Math.min(15_000, timeoutMs));
+        const response = await this.call("capture.stop");
         if (!response.ok) {
           throw new CoreClientError(
             "CORE_CAPTURE_FINALIZE_FAILED",
@@ -330,9 +353,32 @@ export class CoreClient {
       this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
       if (!line) continue;
       try {
-        const response = parseCoreResponseLine(line);
+        let response = parseCoreResponseLine(line);
         const method = this.registry.methodFor(response.requestId);
-        if (!method || !this.registry.resolve(response.requestId, response)) {
+        if (!method) {
+          this.failProtocol(child, "candor-core returned an unknown or duplicate request id");
+          return;
+        }
+        const operation = CORE_OPERATIONS.get(method);
+        if (!operation) {
+          this.failProtocol(child, "candor-core returned a response for an unregistered operation");
+          return;
+        }
+        if (response.ok) {
+          try {
+            response = { ...response, result: operation.resultSchema.parse(response.result) };
+          } catch (error) {
+            const contractError = error instanceof CoreClientError
+              ? error
+              : new CoreClientError("CORE_RESULT_SCHEMA_INVALID", `candor-core returned an invalid result for ${method}`, false);
+            this.registry.reject(response.requestId, contractError);
+            this.protocolFault = contractError.message;
+            this.supervisor.state = "failed";
+            child.kill();
+            return;
+          }
+        }
+        if (!this.registry.resolve(response.requestId, response)) {
           this.failProtocol(child, "candor-core returned an unknown or duplicate request id");
           return;
         }
@@ -413,7 +459,7 @@ export class CoreClient {
     }
   }
 
-  private handleTimeout(): void {
+  private handleTimeout(_method: string): void {
     this.supervisor.state = "failed";
     if (!this.captureActive) {
       this.protocolFault = "candor-core became unresponsive";
@@ -423,7 +469,7 @@ export class CoreClient {
 
   private async stopForRestart(): Promise<void> {
     await this.ensureHandshake();
-    const capture = await this.call("capture.status", null, 5000);
+    const capture = await this.call("capture.status");
     this.updateCaptureState("capture.status", capture);
     if (this.captureActive) {
       throw new CoreClientError(

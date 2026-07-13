@@ -1,0 +1,11 @@
+{
+  "kind": "operation-result",
+  "method": "capture.status",
+  "value": {
+    "implemented": true,
+    "active": "false",
+    "sources": {},
+    "rawPathExposed": false
+  },
+  "expectedCode": "CORE_RESULT_SCHEMA_INVALID"
+}

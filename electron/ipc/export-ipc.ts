@@ -35,7 +35,7 @@ export function registerExportIpc(dependencies: IpcDependencies): void {
       throw new Error("Local report input exceeds the export boundary limit.");
     }
 
-    const response = await dependencies.core.call("export.create", input, 30_000);
+    const response = await dependencies.core.call("export.create", input);
     if (!response.ok) throw new Error(response.error?.message ?? "export.create failed");
     const result = response.result ?? null;
     const decoded = decodeLocalExportResult(format, result);
