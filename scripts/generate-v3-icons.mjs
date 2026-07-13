@@ -250,13 +250,39 @@ function emit(relativePath, data) {
   return { relativePath, bytes: data.length, sha256: sha256(data) };
 }
 
+function emitText(relativePath, source) {
+  const path = join(repoRoot, relativePath);
+  const normalized = source.replaceAll("\r\n", "\n");
+  const data = Buffer.from(normalized, "utf8");
+  if (checkOnly) {
+    if (!existsSync(path)) {
+      throw new Error("Generated icon asset is missing: " + relativePath);
+    }
+    const current = readFileSync(path, "utf8").replaceAll("\r\n", "\n");
+    if (current !== normalized) {
+      throw new Error(
+        "Generated icon asset is stale: " +
+          relativePath +
+          "\nexpected " +
+          sha256(data) +
+          "\nactual   " +
+          sha256(Buffer.from(current, "utf8")),
+      );
+    }
+  } else {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, data);
+  }
+  return { relativePath, bytes: data.length, sha256: sha256(data) };
+}
+
 const pngBySize = new Map();
 for (const size of PNG_SIZES) {
   pngBySize.set(size, encodePng(size, renderRgba(size)));
 }
 
 const outputs = [];
-outputs.push(emit("assets/icons/candor-app-icon-master.svg", Buffer.from(BRAND_SVG, "utf8")));
+outputs.push(emitText("assets/icons/candor-app-icon-master.svg", BRAND_SVG));
 for (const size of BRAND_PNG_SIZES) {
   outputs.push(emit("assets/icons/candor-app-icon-" + size + ".png", pngBySize.get(size)));
 }
