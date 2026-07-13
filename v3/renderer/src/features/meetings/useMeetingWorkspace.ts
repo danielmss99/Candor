@@ -21,7 +21,6 @@ type CoreApi = NonNullable<Window["candor"]>["core"];
 interface UseMeetingWorkspaceOptions {
   api: CoreApi | undefined;
   client: CandorClient | null;
-  onContentChanged: () => void;
 }
 
 export function mergeRecordingPages(current: RecordingSummary[], incoming: RecordingSummary[]): RecordingSummary[] {
@@ -38,7 +37,7 @@ export function chooseInitialSelection(currentId: string, recordings: RecordingS
     : recordings[0]?.recordingId ?? "";
 }
 
-export function useMeetingWorkspace({ api, client, onContentChanged }: UseMeetingWorkspaceOptions) {
+export function useMeetingWorkspace({ api, client }: UseMeetingWorkspaceOptions) {
   const requests = useRef(new RequestCoordinator());
   const [recordings, setRecordings] = useState<RecordingSummary[]>([]);
   const [recordingTotalCount, setRecordingTotalCount] = useState(0);
@@ -71,10 +70,9 @@ export function useMeetingWorkspace({ api, client, onContentChanged }: UseMeetin
     setNotesDirty(false);
     setMarkedMoments([]);
     setPrivacyReceipt(null);
-    onContentChanged();
-  }, [onContentChanged]);
+  }, []);
 
-  const loadSelectedRecording = useCallback(async (recordingId: string, preserveAi = false) => {
+  const loadSelectedRecording = useCallback(async (recordingId: string, _preserveAi = false) => {
     requests.current.invalidate("transcript-page");
     requests.current.invalidate("privacy-receipt");
     if (!api || !client || !recordingId) {
@@ -104,10 +102,9 @@ export function useMeetingWorkspace({ api, client, onContentChanged }: UseMeetin
     }).catch(() => {
       if (requests.current.isCurrent(receiptToken)) setPrivacyReceipt(null);
     });
-    if (!preserveAi) onContentChanged();
     const tracks = asArray(replayObject.tracks).map((track) => asString(track)).filter(Boolean);
     setSelectedTrack((current) => tracks.length > 0 && !tracks.includes(current) ? tracks[0] : current);
-  }, [api, clearSelectedRecording, client, onContentChanged]);
+  }, [api, clearSelectedRecording, client]);
 
   const refreshLibrary = useCallback(async (offset = 0) => {
     if (!client) return [] as RecordingSummary[];

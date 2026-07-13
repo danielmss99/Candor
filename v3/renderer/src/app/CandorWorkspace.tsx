@@ -16,6 +16,7 @@ import { SettingsView } from "../features/settings/SettingsView";
 import { useCaptureSession } from "../features/capture/useCaptureSession";
 import { useCaptureActions } from "../features/capture/useCaptureActions";
 import { useOperationRunner } from "../features/jobs/useOperationRunner";
+import { useLocalAiWorkspace } from "../features/local-ai/useLocalAiWorkspace";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import {
   StartupLoading,
@@ -40,19 +41,12 @@ import {
   exportReportItem,
   formatDuration,
   metric,
-  parseAnswer,
-  parseRecap,
-  parseModels,
   recapItemKey,
-  type AiMode,
   type AppView,
   type CompactMeetingPane,
   type ExportFormat,
   type ExportPaperSize,
-  type InstructAssetKind,
   type LibraryFilter,
-  type LocalAiAnswer,
-  type LocalAiRecap,
   type MarkedMoment,
   type OnboardingStep,
   type RecapItem,
@@ -86,23 +80,9 @@ export function CandorWorkspace() {
     timestamps: false,
   });
 
-  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
-  const [askQuestion, setAskQuestion] = useState("What are the action items?");
-  const [askAnswer, setAskAnswer] = useState<LocalAiAnswer | null>(null);
-  const [recap, setRecap] = useState<LocalAiRecap | null>(null);
-  const [aiMode, setAiMode] = useState<AiMode>("quality");
-  const [instructAssetKind, setInstructAssetKind] = useState<InstructAssetKind>("runner");
-  const [instructExpectedSha256, setInstructExpectedSha256] = useState("");
-  const [instructAssetError, setInstructAssetError] = useState("");
-  const [instructSetupOpen, setInstructSetupOpen] = useState(false);
   const [markdownExport, setMarkdownExport] = useState("");
   const [audioUrl, setAudioUrl] = useState("");
-  const resetMeetingAi = useCallback(() => {
-    setRecap(null);
-    setAskAnswer(null);
-  }, []);
-
-  const meetingWorkspace = useMeetingWorkspace({ api, client, onContentChanged: resetMeetingAi });
+  const meetingWorkspace = useMeetingWorkspace({ api, client });
   const {
     recordings,
     recordingTotalCount,
@@ -207,12 +187,56 @@ export function CandorWorkspace() {
     refresh: refreshLicense,
   } = license;
   const captureMachine = captureSession.state;
-  const instructReady = asBool(instructStatus.ready);
-  const instructAssetsReady = asBool(instructAssetsStatus.ready);
-  const instructRunnerAsset = asObject(instructAssetsStatus.runner);
-  const instructModelAsset = asObject(instructAssetsStatus.model);
-  const useInstructModel = aiMode === "quality" && instructReady;
-  const models = useMemo(() => parseModels(modelStatus), [modelStatus]);
+  const localAi = useLocalAiWorkspace({
+    api,
+    client,
+    selectedRecordingId,
+    selectedTrack,
+    instructAssetsStatus,
+    instructStatus,
+    modelStatus,
+    run,
+    acquireOperation,
+    localJob,
+    setBusy,
+    setNotice,
+    setError,
+    refreshModelsAndAi,
+    refreshLibrary,
+    loadRecording: loadSelectedRecording,
+    refreshPrivacyReceipt,
+  });
+  const {
+    selectedModel,
+    askQuestion,
+    askAnswer,
+    recap,
+    aiMode,
+    instructAssetKind,
+    instructExpectedSha256,
+    instructAssetError,
+    instructSetupOpen,
+    instructReady,
+    instructAssetsReady,
+    instructRunnerAsset,
+    instructModelAsset,
+    models,
+    aiModeStatus,
+    setSelectedModel,
+    setAskQuestion,
+    setAiMode,
+    setInstructAssetKind,
+    setInstructExpectedSha256,
+    setInstructAssetError,
+    setInstructSetupOpen,
+    resetMeetingAi,
+    importModel,
+    importInstructAsset,
+    verifyModel,
+    transcribe: transcribeRecording,
+    generateRecap,
+    ask: askSelectedRecording,
+  } = localAi;
   const selectedRecording = recordings.find((item) => item.recordingId === selectedRecordingId);
   const selectedTitle = selectedRecording?.label || recordingTitle || "Untitled local meeting";
   const combinedCaptureAvailable = asBool(asObject(asObject(captureStatus.sources).system).simultaneousMicAndSystem);
@@ -306,60 +330,6 @@ export function CandorWorkspace() {
     };
   }, [audioUrl]);
 
-  async function importModel() {
-    if (!api) return;
-    await run("import", async () => {
-      const result = await api.modelsImportFromFile({ modelId: selectedModel, replace: true });
-      const object = asObject(result);
-      setNotice(asBool(object.canceled) ? "Import canceled" : asBool(object.imported) ? `${selectedModel} verified and installed` : "Model import finished");
-      await refreshModelsAndAi();
-    }, "local-model", "model-import");
-  }
-
-  async function importInstructAsset() {
-    if (!api) return;
-    const expectedSha256 = instructExpectedSha256.trim().toLowerCase();
-    if (!/^[a-f0-9]{64}$/.test(expectedSha256)) {
-      setInstructAssetError("Enter exactly 64 hexadecimal characters.");
-      return;
-    }
-    const release = acquireOperation("local-model");
-    if (!release) {
-      setNotice("A local model import is already in progress");
-      return;
-    }
-    const requestId = localJob.begin("model-import");
-    setBusy("instruct-asset");
-    setError("");
-    setNotice("");
-    setInstructAssetError("");
-    try {
-      const result = await api.aiInstructAssetImportFromFile({ assetKind: instructAssetKind, expectedSha256, replace: true });
-      const object = asObject(result);
-      if (asBool(object.canceled)) {
-        localJob.cancel(requestId);
-        localJob.reset();
-        setNotice("Local AI import canceled");
-        return;
-      }
-      if (!asBool(object.imported) || !asBool(object.integrityVerified)) {
-        throw new Error("Local AI asset was not verified.");
-      }
-      setInstructExpectedSha256("");
-      setNotice(`${instructAssetKind === "runner" ? "Processing engine" : "Language model"} verified and stored locally`);
-      await refreshModelsAndAi();
-      localJob.complete(requestId);
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      setInstructAssetError(message);
-      setError(message);
-      localJob.fail(requestId, message);
-    } finally {
-      setBusy("");
-      release();
-    }
-  }
-
   async function importV2Folder() {
     if (!api) return;
     await run("import", async () => {
@@ -373,29 +343,6 @@ export function CandorWorkspace() {
       await refreshLibrary(0);
       setView("library");
     }, "v2-import");
-  }
-
-  async function verifyModel() {
-    if (!api) return;
-    await run("verify", async () => {
-      const result = await api.modelsVerifyLocal({ modelId: selectedModel });
-      const object = asObject(result);
-      setNotice(asBool(object.verified) ? `${selectedModel} verified` : `${selectedModel}: ${asString(object.failureCode, "not ready")}`);
-      await refreshModelsAndAi();
-    }, "local-model");
-  }
-
-  async function transcribeRecording() {
-    if (!api || !selectedRecordingId) return;
-    await run("transcribe", async () => {
-      await api.transcriptionRunLocal({ recordingId: selectedRecordingId, channel: selectedTrack || undefined, modelId: selectedModel, language: "en" });
-      setNotice("Transcription updated");
-      await Promise.all([
-        loadSelectedRecording(selectedRecordingId, true),
-        refreshLibrary(0),
-        refreshModelsAndAi(),
-      ]);
-    }, "local-model", "transcription");
   }
 
   async function searchRecordings() {
@@ -497,43 +444,6 @@ export function CandorWorkspace() {
     setNotesDirty(true);
     setError("");
     setNotice(`Moment linked to notes at ${formatDuration(roundedMs)}`);
-  }
-
-  async function generateRecap() {
-    if (!api || !selectedRecordingId) return;
-    await run("recap", async () => {
-      const nextRecap = client
-        ? await client.recap(() => useInstructModel
-          ? api.aiRecapInstruct(selectedRecordingId, 512)
-          : api.aiRecapHeuristic(selectedRecordingId))
-        : parseRecap(useInstructModel
-          ? await api.aiRecapInstruct(selectedRecordingId, 512)
-          : await api.aiRecapHeuristic(selectedRecordingId));
-      setRecap(nextRecap);
-      setNotice(useInstructModel ? "Local model recap generated" : aiMode === "quality" ? "Fast local recap generated because the model is unavailable" : "Fast local recap generated");
-      await refreshPrivacyReceipt();
-    }, "local-model", "recap");
-  }
-
-  async function askSelectedRecording() {
-    if (!api || !selectedRecordingId) return;
-    const question = askQuestion.trim();
-    if (!question) {
-      setError("Ask needs a question.");
-      return;
-    }
-    await run("ask", async () => {
-      const nextAnswer = client
-        ? await client.answer(() => useInstructModel
-          ? api.aiAskInstruct(selectedRecordingId, question, 256)
-          : api.aiAskHeuristic(selectedRecordingId, question))
-        : parseAnswer(useInstructModel
-          ? await api.aiAskInstruct(selectedRecordingId, question, 256)
-          : await api.aiAskHeuristic(selectedRecordingId, question));
-      setAskAnswer(nextAnswer);
-      setNotice(useInstructModel ? "Local model answer generated" : "Fast local answer generated");
-      await refreshPrivacyReceipt();
-    }, "local-model", "ask");
   }
 
   async function loadAudio() {
@@ -685,6 +595,7 @@ export function CandorWorkspace() {
   }
 
   async function openRecording(recordingId: string, target: AppView = "meeting") {
+    if (recordingId !== selectedRecordingId) resetMeetingAi();
     setSelectedRecordingId(recordingId);
     setOpenMeetingIds((current) => [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3));
     await loadSelectedRecording(recordingId);
@@ -701,7 +612,6 @@ export function CandorWorkspace() {
     }
   }
 
-  const aiModeStatus = aiMode === "fast" ? "Heuristic local" : instructReady ? "Hash-verified local model" : "Fast fallback, model unavailable";
   const captureStatusLabel = captureMachine.phase === "idle"
     ? "Ready"
     : captureMachine.phase === "recording"
