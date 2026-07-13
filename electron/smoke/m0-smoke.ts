@@ -387,7 +387,7 @@ async function captureSmokeView(
             advanced.click();
             await settle();
           }
-          clicked = await clickExact('.settings-layout nav button', 'Privacy and diagnostics');
+          clicked = await clickExact('.settings-layout nav button', 'Diagnostics');
           if (clicked) {
             await clickExact('button', 'Prepare preview');
             for (let index = 0; index < 80; index += 1) {
@@ -859,7 +859,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
         ["review", "Review report"],
         ["export", "Export report"],
         ["settings", "Settings"],
-        ["advanced", "Privacy and diagnostics"],
+        ["advanced", "Diagnostics"],
       ];
       for (const [view, navLabel] of views) {
         rendererViewScreenshots.push(await captureSmokeView(windowRef, view, navLabel));
