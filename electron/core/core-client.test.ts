@@ -20,9 +20,15 @@ function responsiveCore(active = false): string {
     input.on("line", (line) => {
       const request = JSON.parse(line);
       let result = { ready: true, receivedRequestId: request.requestId, idsMatch: request.id === request.requestId };
-      if (request.method === "core.version") result = { version: "test", protocolVersion };
+      if (request.method === "core.version") result = {
+        version: "test",
+        protocolVersion,
+        schemaVersion: 1,
+        capabilities: ["stdio-json-lines"],
+        build: { target: "test-target", features: [] }
+      };
       if (request.method === "capture.status") result = { active: ${String(active)}, rawPathExposed: false };
-      process.stdout.write(JSON.stringify({ id: request.id, protocolVersion, ok: true, result }) + "\\n");
+      process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       if (request.method === "core.shutdown") setTimeout(() => process.exit(0), 5);
     });
   `;

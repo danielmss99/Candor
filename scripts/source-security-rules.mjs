@@ -238,8 +238,11 @@ export function evaluateSourceSecurity(input) {
 
   const coreMain = "crates/candor-core/src/main.rs";
   includes("core:bounded-rpc", coreMain, "MAX_RPC_LINE_BYTES", "Rust core bounds JSONL frames");
+  includes("core:bounded-rpc-reader", coreMain, "read_bounded_frame", "Rust core bounds frames before allocation");
+  includes("core:duplicate-request-rejection", coreMain, "DUPLICATE_REQUEST_ID", "Rust core rejects replayed request ids");
   includes("core:stdio-transport", coreMain, '"stdio-json-lines"', "Rust core uses stdio transport");
   includes("core:protocol-version", coreMain, '"protocolVersion"', "Rust core reports protocol version");
+  includes("core:protocol-handshake", coreMain, '"schemaVersion"', "Rust core reports the schema handshake");
 
   const coreCargo = "crates/candor-core/Cargo.toml";
   excludes(

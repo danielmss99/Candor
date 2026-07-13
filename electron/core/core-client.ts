@@ -3,10 +3,10 @@ import path from "node:path";
 import { CoreClientError, errorMessage } from "./core-errors.js";
 import { objectValue, type JsonValue } from "./json.js";
 import {
-  CORE_PROTOCOL_VERSION,
   createCoreRequest,
   MAX_CORE_REQUEST_LINE_BYTES,
   MAX_CORE_RESPONSE_LINE_BYTES,
+  parseCoreHandshake,
   parseCoreResponseLine,
   type CoreResponse,
 } from "./protocol.js";
@@ -149,10 +149,7 @@ export class CoreClient {
             false,
           );
         }
-        const version = objectValue(response.result ?? null);
-        if (version.protocolVersion !== CORE_PROTOCOL_VERSION) {
-          throw new CoreClientError("CORE_PROTOCOL_MISMATCH", "candor-core uses an incompatible protocol version", false);
-        }
+        parseCoreHandshake(response.result ?? null);
         this.supervisor.lastHandshake = {
           ok: true,
           at: new Date().toISOString(),

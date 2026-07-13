@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CORE_PROTOCOL_VERSION,
   createCoreRequest,
+  parseCoreHandshake,
   parseCoreResponseLine,
   rendererCoreOperations,
 } from "./protocol.js";
@@ -20,16 +21,17 @@ describe("core protocol", () => {
   it("validates success and failure envelopes", () => {
     expect(
       parseCoreResponseLine(
-        JSON.stringify({ id: "request-1", protocolVersion: CORE_PROTOCOL_VERSION, ok: true, result: { ready: true } }),
+        JSON.stringify({ id: "request-1", requestId: "request-1", protocolVersion: CORE_PROTOCOL_VERSION, ok: true, result: { ready: true } }),
       ),
     ).toMatchObject({ requestId: "request-1", ok: true, result: { ready: true } });
     expect(
       parseCoreResponseLine(
         JSON.stringify({
           id: "request-2",
+          requestId: "request-2",
           protocolVersion: CORE_PROTOCOL_VERSION,
           ok: false,
-          error: { code: "NOPE", message: "denied" },
+          error: { code: "NOPE", message: "denied", retryable: false },
         }),
       ),
     ).toMatchObject({ requestId: "request-2", ok: false, error: { code: "NOPE", retryable: false } });
@@ -38,15 +40,38 @@ describe("core protocol", () => {
   it("rejects malformed and incompatible envelopes", () => {
     expect(() => parseCoreResponseLine("not json")).toThrow("malformed JSON");
     expect(() =>
-      parseCoreResponseLine(JSON.stringify({ id: "request-1", protocolVersion: "old", ok: true })),
+      parseCoreResponseLine(JSON.stringify({ id: "request-1", requestId: "request-1", protocolVersion: "old", ok: true })),
     ).toThrow("incompatible protocol");
     expect(() =>
-      parseCoreResponseLine(JSON.stringify({ id: 1, protocolVersion: CORE_PROTOCOL_VERSION, ok: true })),
+      parseCoreResponseLine(JSON.stringify({ id: 1, requestId: "1", protocolVersion: CORE_PROTOCOL_VERSION, ok: true })),
     ).toThrow("request id");
   });
 
+  it("validates the complete core handshake", () => {
+    expect(parseCoreHandshake({
+      version: "0.1.0",
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      schemaVersion: 1,
+      capabilities: ["stdio-json-lines", "durable-recording"],
+      build: { commit: null, target: "windows-x64", features: ["sqlcipher-vault"] },
+    })).toEqual({
+      coreVersion: "0.1.0",
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      schemaVersion: 1,
+      capabilities: ["stdio-json-lines", "durable-recording"],
+      build: { target: "windows-x64", features: ["sqlcipher-vault"] },
+    });
+    expect(() => parseCoreHandshake({
+      version: "0.1.0",
+      protocolVersion: CORE_PROTOCOL_VERSION,
+      schemaVersion: 0,
+      capabilities: [],
+      build: { target: "windows-x64", features: [] },
+    })).toThrow("incompatible handshake");
+  });
+
   it("keeps the preload on the exact named core channel allowlist", () => {
-    const preloadPath = fileURLToPath(new URL("../preload.cts", import.meta.url));
+    const preloadPath = path.resolve(process.cwd(), "electron", "preload.cts");
     const preload = readFileSync(preloadPath, "utf8");
     const preloadChannels = new Set(
       [...preload.matchAll(/ipcRenderer\.invoke\(\s*"(candor-core:[^"]+)"/g)]

@@ -13,6 +13,7 @@ mod update_policy;
 mod v2_importer;
 mod vault_store;
 
+use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
 use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -52,21 +53,30 @@ use vault_store::{VaultOpenParams, VaultStore, VaultStoreError};
 
 const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "m0-jsonrpc-stdio-1";
-const MAX_RPC_LINE_BYTES: usize = 1024 * 1024;
+const MAX_RPC_LINE_BYTES: usize = 4_000_000;
+const RECENT_REQUEST_ID_LIMIT: usize = 1_024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RpcRequest {
     id: Value,
+    #[serde(default)]
+    protocol_version: Option<String>,
+    #[serde(default)]
+    request_id: Option<String>,
     method: String,
     #[serde(default)]
     params: Value,
+    #[serde(default)]
+    sent_at: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RpcResponse {
     id: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_id: Option<String>,
     protocol_version: &'static str,
     ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -80,6 +90,7 @@ struct RpcResponse {
 struct RpcError {
     code: &'static str,
     message: String,
+    retryable: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +118,28 @@ struct StartupRecoveryStatus {
     raw_path_exposed: bool,
 }
 
+#[derive(Default)]
+struct RecentRequestIds {
+    order: VecDeque<String>,
+    seen: HashSet<String>,
+}
+
+impl RecentRequestIds {
+    fn insert(&mut self, id: &Value) -> bool {
+        let key = serde_json::to_string(id).unwrap_or_else(|_| "null".to_string());
+        if !self.seen.insert(key.clone()) {
+            return false;
+        }
+        self.order.push_back(key);
+        if self.order.len() > RECENT_REQUEST_ID_LIMIT {
+            if let Some(expired) = self.order.pop_front() {
+                self.seen.remove(&expired);
+            }
+        }
+        true
+    }
+}
+
 struct CoreState {
     started_at_ms: u128,
     capture_manager: CaptureManager,
@@ -117,6 +150,8 @@ struct CoreState {
     model_manager: ModelManager,
     model_scheduler: LocalModelScheduler,
     recording_store: RecordingStore,
+    recent_request_ids: RecentRequestIds,
+    shutdown_requested: bool,
     startup_recovery: StartupRecoveryStatus,
     transcription_service: TranscriptionService,
     update_policy: UpdatePolicy,
@@ -141,6 +176,8 @@ impl CoreState {
             model_manager: ModelManager,
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
+            recent_request_ids: RecentRequestIds::default(),
+            shutdown_requested: false,
             startup_recovery,
             transcription_service: TranscriptionService,
             update_policy: UpdatePolicy,
@@ -172,6 +209,8 @@ impl CoreState {
             model_manager: ModelManager,
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
+            recent_request_ids: RecentRequestIds::default(),
+            shutdown_requested: false,
             startup_recovery,
             transcription_service: TranscriptionService,
             update_policy: UpdatePolicy,
@@ -208,6 +247,17 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or_default()
+}
+
+fn core_build_features() -> Vec<&'static str> {
+    let mut features = Vec::new();
+    if cfg!(feature = "sqlcipher-vault") {
+        features.push("sqlcipher-vault");
+    }
+    if cfg!(feature = "local-whisper") {
+        features.push("local-whisper");
+    }
+    features
 }
 
 fn network_capability_matrix() -> Value {
@@ -259,12 +309,14 @@ fn network_capability_matrix() -> Value {
 fn make_error(id: Value, code: &'static str, message: impl Into<String>) -> RpcResponse {
     RpcResponse {
         id,
+        request_id: None,
         protocol_version: PROTOCOL_VERSION,
         ok: false,
         result: None,
         error: Some(RpcError {
             code,
             message: message.into(),
+            retryable: false,
         }),
     }
 }
@@ -332,6 +384,19 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
         "core.version" => json!({
             "version": CORE_VERSION,
             "protocolVersion": PROTOCOL_VERSION,
+            "schemaVersion": 1,
+            "capabilities": [
+                "stdio-json-lines",
+                "durable-recording",
+                "encrypted-local-vault",
+                "local-transcription",
+                "local-ai"
+            ],
+            "build": {
+                "commit": option_env!("CANDOR_BUILD_COMMIT"),
+                "target": format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+                "features": core_build_features()
+            }
         }),
         "core.capabilities" => json!({
             "transport": "stdio-json-lines",
@@ -1072,15 +1137,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "core.shutdown" => {
-            let response = RpcResponse {
-                id,
-                protocol_version: PROTOCOL_VERSION,
-                ok: true,
-                result: Some(json!({ "shutdown": true })),
-                error: None,
-            };
-            write_response(&response);
-            process::exit(0);
+            state.shutdown_requested = true;
+            json!({ "shutdown": true })
         }
         _ => {
             return make_error(
@@ -1093,6 +1151,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
 
     RpcResponse {
         id,
+        request_id: None,
         protocol_version: PROTOCOL_VERSION,
         ok: true,
         result: Some(result),
@@ -1188,6 +1247,97 @@ fn annotate_import_result(mut value: Value, state: &mut CoreState) -> Value {
     value
 }
 
+fn is_uuid_v4(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b' | b'A' | b'B')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
+}
+
+fn is_iso_timestamp(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 24
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes[10] == b'T'
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+        && bytes[19] == b'.'
+        && bytes[23] == b'Z'
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            matches!(index, 4 | 7 | 10 | 13 | 16 | 19 | 23) || byte.is_ascii_digit()
+        })
+}
+
+fn validate_request_envelope(request: &RpcRequest) -> Result<(), RpcResponse> {
+    let metadata_count = [
+        request.protocol_version.is_some(),
+        request.request_id.is_some(),
+        request.sent_at.is_some(),
+    ]
+    .into_iter()
+    .filter(|present| *present)
+    .count();
+    if metadata_count == 0 {
+        return Ok(());
+    }
+    if metadata_count != 3 {
+        return Err(make_error(
+            request.id.clone(),
+            "INVALID_RPC_ENVELOPE",
+            "protocolVersion, requestId, and sentAt must be provided together",
+        ));
+    }
+    if request.protocol_version.as_deref() != Some(PROTOCOL_VERSION) {
+        return Err(make_error(
+            request.id.clone(),
+            "PROTOCOL_VERSION_MISMATCH",
+            "request protocolVersion is incompatible with candor-core",
+        ));
+    }
+    let request_id = request.request_id.as_deref().unwrap_or_default();
+    if request.id.as_str() != Some(request_id) {
+        return Err(make_error(
+            request.id.clone(),
+            "REQUEST_ID_MISMATCH",
+            "id and requestId must be the same UUID",
+        ));
+    }
+    if !is_uuid_v4(request_id) {
+        return Err(make_error(
+            request.id.clone(),
+            "INVALID_REQUEST_ID",
+            "requestId must be a version 4 UUID",
+        ));
+    }
+    if !request
+        .sent_at
+        .as_deref()
+        .map(is_iso_timestamp)
+        .unwrap_or(false)
+    {
+        return Err(make_error(
+            request.id.clone(),
+            "INVALID_SENT_AT",
+            "sentAt must be an ISO-8601 UTC timestamp",
+        ));
+    }
+    Ok(())
+}
+
+fn with_request_id(mut response: RpcResponse, request_id: Option<String>) -> RpcResponse {
+    response.request_id = request_id;
+    response
+}
+
 fn handle_line(line: &str, state: &mut CoreState) -> Option<RpcResponse> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
@@ -1203,7 +1353,23 @@ fn handle_line(line: &str, state: &mut CoreState) -> Option<RpcResponse> {
     }
 
     Some(match serde_json::from_str::<RpcRequest>(trimmed) {
-        Ok(req) => handle_request(req, state),
+        Ok(req) => {
+            let request_id = req.request_id.clone();
+            if let Err(response) = validate_request_envelope(&req) {
+                return Some(with_request_id(response, request_id));
+            }
+            if !state.recent_request_ids.insert(&req.id) {
+                return Some(with_request_id(
+                    make_error(
+                        req.id,
+                        "DUPLICATE_REQUEST_ID",
+                        "request id has already been processed",
+                    ),
+                    request_id,
+                ));
+            }
+            with_request_id(handle_request(req, state), request_id)
+        }
         Err(err) => make_error(Value::Null, "MALFORMED_JSON_RPC", err.to_string()),
     })
 }
@@ -1217,14 +1383,57 @@ fn write_response(response: &RpcResponse) {
     }
 }
 
+enum BoundedFrame {
+    EndOfStream,
+    Frame(Vec<u8>),
+    TooLarge,
+}
+
+fn read_bounded_frame(reader: &mut impl BufRead) -> io::Result<BoundedFrame> {
+    let mut frame = Vec::with_capacity(8 * 1024);
+    let mut oversized = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if frame.is_empty() && !oversized {
+                Ok(BoundedFrame::EndOfStream)
+            } else if oversized {
+                Ok(BoundedFrame::TooLarge)
+            } else {
+                Ok(BoundedFrame::Frame(frame))
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let payload_bytes = newline.unwrap_or(available.len());
+        if !oversized {
+            if frame.len().saturating_add(payload_bytes) > MAX_RPC_LINE_BYTES {
+                frame.clear();
+                oversized = true;
+            } else {
+                frame.extend_from_slice(&available[..payload_bytes]);
+            }
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            return if oversized {
+                Ok(BoundedFrame::TooLarge)
+            } else {
+                Ok(BoundedFrame::Frame(frame))
+            };
+        }
+    }
+}
+
 fn main() {
     let started_at_ms = now_ms();
     let mut state = CoreState::new(started_at_ms);
     let stdin = io::stdin();
 
-    for line in stdin.lock().lines() {
-        let line = match line {
-            Ok(line) => line,
+    let mut input = stdin.lock();
+    loop {
+        let frame = match read_bounded_frame(&mut input) {
+            Ok(frame) => frame,
             Err(err) => {
                 write_response(&make_error(
                     Value::Null,
@@ -1234,9 +1443,28 @@ fn main() {
                 continue;
             }
         };
-
-        if let Some(response) = handle_line(&line, &mut state) {
-            write_response(&response);
+        match frame {
+            BoundedFrame::EndOfStream => break,
+            BoundedFrame::TooLarge => write_response(&make_error(
+                Value::Null,
+                "RPC_FRAME_TOO_LARGE",
+                format!("RPC frame exceeds {} byte limit", MAX_RPC_LINE_BYTES),
+            )),
+            BoundedFrame::Frame(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(line) => {
+                    if let Some(response) = handle_line(line, &mut state) {
+                        write_response(&response);
+                        if state.shutdown_requested {
+                            process::exit(0);
+                        }
+                    }
+                }
+                Err(error) => write_response(&make_error(
+                    Value::Null,
+                    "MALFORMED_JSON_RPC",
+                    format!("RPC frame is not UTF-8: {error}"),
+                )),
+            },
         }
     }
 }
@@ -1261,11 +1489,30 @@ mod tests {
     }
 
     fn request(method: &str) -> RpcRequest {
+        request_with(json!(1), method, Value::Null)
+    }
+
+    fn request_with(id: Value, method: &str, params: Value) -> RpcRequest {
         RpcRequest {
-            id: json!(1),
+            id,
+            protocol_version: None,
+            request_id: None,
             method: method.to_string(),
-            params: Value::Null,
+            params,
+            sent_at: None,
         }
+    }
+
+    fn versioned_request_line(request_id: &str, method: &str) -> String {
+        json!({
+            "protocolVersion": PROTOCOL_VERSION,
+            "requestId": request_id,
+            "id": request_id,
+            "method": method,
+            "params": null,
+            "sentAt": "2026-07-13T03:45:00.000Z"
+        })
+        .to_string()
     }
 
     #[test]
@@ -1294,6 +1541,69 @@ mod tests {
     }
 
     #[test]
+    fn version_handshake_reports_schema_capabilities_and_build() {
+        let mut state = core_state();
+        let response = handle_request(request("core.version"), &mut state);
+        let result = response.result.expect("version handshake");
+
+        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(result["schemaVersion"], 1);
+        assert!(result["capabilities"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty()));
+        assert!(result["build"]["target"]
+            .as_str()
+            .is_some_and(|target| !target.is_empty()));
+        assert!(result["build"]["features"].is_array());
+    }
+
+    #[test]
+    fn versioned_envelopes_are_validated_and_duplicate_ids_are_rejected() {
+        let request_id = "550e8400-e29b-41d4-a716-446655440000";
+        let line = versioned_request_line(request_id, "core.status");
+        let mut state = core_state();
+
+        let first = handle_line(&line, &mut state).expect("first response");
+        assert!(first.ok);
+        assert_eq!(first.request_id.as_deref(), Some(request_id));
+        assert_eq!(first.id, request_id);
+
+        let duplicate = handle_line(&line, &mut state).expect("duplicate response");
+        assert!(!duplicate.ok);
+        assert_eq!(duplicate.request_id.as_deref(), Some(request_id));
+        assert_eq!(
+            duplicate.error.as_ref().map(|error| error.code),
+            Some("DUPLICATE_REQUEST_ID")
+        );
+    }
+
+    #[test]
+    fn partial_or_incompatible_versioned_envelopes_are_rejected() {
+        let mut state = core_state();
+        let partial = json!({
+            "id": "550e8400-e29b-41d4-a716-446655440000",
+            "requestId": "550e8400-e29b-41d4-a716-446655440000",
+            "method": "core.status",
+            "params": null
+        })
+        .to_string();
+        let response = handle_line(&partial, &mut state).expect("partial response");
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("INVALID_RPC_ENVELOPE")
+        );
+
+        let incompatible =
+            versioned_request_line("550e8400-e29b-41d4-a716-446655440001", "core.status")
+                .replace(PROTOCOL_VERSION, "old-protocol");
+        let response = handle_line(&incompatible, &mut state).expect("mismatch response");
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("PROTOCOL_VERSION_MISMATCH")
+        );
+    }
+
+    #[test]
     fn unknown_methods_are_denied() {
         let mut state = core_state();
         let response = handle_request(request("recording.start"), &mut state);
@@ -1306,13 +1616,13 @@ mod tests {
     fn capture_start_requires_core_consent() {
         let mut state = core_state();
         let response = handle_request(
-            RpcRequest {
-                id: json!(1),
-                method: "capture.startMic".to_string(),
-                params: json!({
+            request_with(
+                json!(1),
+                "capture.startMic",
+                json!({
                     "label": "must fail before consent"
                 }),
-            },
+            ),
             &mut state,
         );
 
@@ -1391,6 +1701,23 @@ mod tests {
     }
 
     #[test]
+    fn bounded_reader_drains_an_oversized_frame_before_the_next_request() {
+        let next = versioned_request_line("550e8400-e29b-41d4-a716-446655440002", "core.status");
+        let input = format!("{}\n{}\n", "x".repeat(MAX_RPC_LINE_BYTES + 1), next);
+        let mut reader = io::Cursor::new(input.into_bytes());
+
+        assert!(matches!(
+            read_bounded_frame(&mut reader).expect("oversized frame"),
+            BoundedFrame::TooLarge
+        ));
+        let BoundedFrame::Frame(frame) = read_bounded_frame(&mut reader).expect("next frame")
+        else {
+            panic!("expected the next bounded frame");
+        };
+        assert_eq!(String::from_utf8(frame).expect("utf8"), next);
+    }
+
+    #[test]
     fn empty_rpc_frames_are_ignored() {
         let mut state = core_state();
         assert!(handle_line("   ", &mut state).is_none());
@@ -1400,11 +1727,11 @@ mod tests {
     fn durable_recording_rpc_round_trip_uses_local_store_without_paths() {
         let mut state = core_state();
         let start = handle_request(
-            RpcRequest {
-                id: json!(1),
-                method: "recording.durable.start".to_string(),
-                params: json!({ "label": "unit" }),
-            },
+            request_with(
+                json!(1),
+                "recording.durable.start",
+                json!({ "label": "unit" }),
+            ),
             &mut state,
         );
         assert!(start.ok);
@@ -1414,15 +1741,15 @@ mod tests {
             .to_string();
 
         let write = handle_request(
-            RpcRequest {
-                id: json!(2),
-                method: "recording.durable.writeTextChunk".to_string(),
-                params: json!({
+            request_with(
+                json!(2),
+                "recording.durable.writeTextChunk",
+                json!({
                     "recordingId": recording_id.clone(),
                     "channel": "mic",
                     "dataUtf8": "audio bytes"
                 }),
-            },
+            ),
             &mut state,
         );
         assert!(write.ok);
@@ -1432,10 +1759,10 @@ mod tests {
 
         let audio_bytes = vec![0_u8; 160];
         let write_audio = handle_request(
-            RpcRequest {
-                id: json!(7),
-                method: "recording.durable.writeAudioChunk".to_string(),
-                params: json!({
+            request_with(
+                json!(7),
+                "recording.durable.writeAudioChunk",
+                json!({
                     "recordingId": recording_id.clone(),
                     "channel": "system",
                     "sampleRateHz": 8000,
@@ -1443,16 +1770,16 @@ mod tests {
                     "bitsPerSample": 16,
                     "dataBase64": BASE64_STANDARD.encode(&audio_bytes)
                 }),
-            },
+            ),
             &mut state,
         );
         assert!(write_audio.ok);
 
         let write_segment = handle_request(
-            RpcRequest {
-                id: json!(10),
-                method: "recording.durable.writeTranscriptSegment".to_string(),
-                params: json!({
+            request_with(
+                json!(10),
+                "recording.durable.writeTranscriptSegment",
+                json!({
                     "recordingId": recording_id.clone(),
                     "channel": "mic",
                     "speaker": "Alex",
@@ -1461,17 +1788,17 @@ mod tests {
                     "durationMs": 900,
                     "confidence": 0.91
                 }),
-            },
+            ),
             &mut state,
         );
         assert!(write_segment.ok);
 
         let finish = handle_request(
-            RpcRequest {
-                id: json!(3),
-                method: "recording.durable.finish".to_string(),
-                params: json!({ "recordingId": recording_id.clone() }),
-            },
+            request_with(
+                json!(3),
+                "recording.durable.finish",
+                json!({ "recordingId": recording_id.clone() }),
+            ),
             &mut state,
         );
         assert!(finish.ok);
@@ -1483,11 +1810,11 @@ mod tests {
         assert_eq!(list_result["recordingCount"], 1);
 
         let read = handle_request(
-            RpcRequest {
-                id: json!(4),
-                method: "recording.durable.read".to_string(),
-                params: json!({ "recordingId": recording_id.clone() }),
-            },
+            request_with(
+                json!(4),
+                "recording.durable.read",
+                json!({ "recordingId": recording_id.clone() }),
+            ),
             &mut state,
         );
         assert!(read.ok);
@@ -1498,11 +1825,11 @@ mod tests {
         assert_eq!(read_result["chunks"][2]["kind"], "transcriptSegment");
 
         let transcript = handle_request(
-            RpcRequest {
-                id: json!(11),
-                method: "recording.durable.transcript".to_string(),
-                params: json!({ "recordingId": recording_id.clone() }),
-            },
+            request_with(
+                json!(11),
+                "recording.durable.transcript",
+                json!({ "recordingId": recording_id.clone() }),
+            ),
             &mut state,
         );
         assert!(transcript.ok);
@@ -1517,11 +1844,11 @@ mod tests {
         );
 
         let replay = handle_request(
-            RpcRequest {
-                id: json!(8),
-                method: "recording.durable.replayManifest".to_string(),
-                params: json!({ "recordingId": recording_id.clone() }),
-            },
+            request_with(
+                json!(8),
+                "recording.durable.replayManifest",
+                json!({ "recordingId": recording_id.clone() }),
+            ),
             &mut state,
         );
         assert!(replay.ok);
@@ -1531,11 +1858,11 @@ mod tests {
         assert_eq!(replay_result["audioChunks"][0]["durationMs"], 10);
 
         let audio = handle_request(
-            RpcRequest {
-                id: json!(9),
-                method: "recording.durable.readAudioChunk".to_string(),
-                params: json!({ "recordingId": recording_id.clone(), "index": 1 }),
-            },
+            request_with(
+                json!(9),
+                "recording.durable.readAudioChunk",
+                json!({ "recordingId": recording_id.clone(), "index": 1 }),
+            ),
             &mut state,
         );
         assert!(audio.ok);
@@ -1548,11 +1875,11 @@ mod tests {
         );
 
         let search = handle_request(
-            RpcRequest {
-                id: json!(5),
-                method: "recording.durable.search".to_string(),
-                params: json!({ "query": "Reliability" }),
-            },
+            request_with(
+                json!(5),
+                "recording.durable.search",
+                json!({ "query": "Reliability" }),
+            ),
             &mut state,
         );
         assert!(search.ok);
@@ -1561,11 +1888,11 @@ mod tests {
         assert_eq!(search_result["matchCount"], 1);
 
         let export = handle_request(
-            RpcRequest {
-                id: json!(6),
-                method: "export.create".to_string(),
-                params: json!({ "recordingId": recording_id, "format": "markdown" }),
-            },
+            request_with(
+                json!(6),
+                "export.create",
+                json!({ "recordingId": recording_id, "format": "markdown" }),
+            ),
             &mut state,
         );
         assert!(export.ok);
@@ -1628,14 +1955,14 @@ mod tests {
     fn vault_wrong_key_rpc_proof_uses_sqlcipher_without_exposing_key_or_path() {
         let mut state = core_state();
         let response = handle_request(
-            RpcRequest {
-                id: json!(1),
-                method: "vault.proofWrongKeyFails".to_string(),
-                params: json!({
+            request_with(
+                json!(1),
+                "vault.proofWrongKeyFails",
+                json!({
                     "correctPassphrase": "correct horse battery staple",
                     "wrongPassphrase": "wrong horse battery staple"
                 }),
-            },
+            ),
             &mut state,
         );
 
