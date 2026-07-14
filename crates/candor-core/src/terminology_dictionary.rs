@@ -267,6 +267,8 @@ pub struct TerminologyService {
     root: Option<PathBuf>,
     key_root: Option<PathBuf>,
     storage_lock: Arc<Mutex<()>>,
+    #[cfg(test)]
+    test_encryption_key: Option<[u8; 32]>,
 }
 
 impl TerminologyService {
@@ -275,6 +277,18 @@ impl TerminologyService {
             root: Some(root),
             key_root: Some(key_root),
             storage_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            test_encryption_key: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_test_roots(root: PathBuf, key_root: PathBuf) -> Self {
+        Self {
+            root: Some(root),
+            key_root: Some(key_root),
+            storage_lock: Arc::new(Mutex::new(())),
+            test_encryption_key: Some([0x5a; 32]),
         }
     }
 
@@ -1051,6 +1065,11 @@ impl TerminologyService {
     }
 
     fn encryption_key(&self) -> Result<[u8; 32], TerminologyError> {
+        #[cfg(test)]
+        if let Some(key) = self.test_encryption_key {
+            return Ok(key);
+        }
+
         let key_root = self.key_root.as_ref().ok_or_else(|| {
             TerminologyError::new(
                 "TERMINOLOGY_KEY_UNAVAILABLE",
@@ -1626,9 +1645,9 @@ mod tests {
     }
 
     #[test]
-    fn dictionary_round_trip_is_os_key_encrypted_and_pathless() {
+    fn dictionary_round_trip_is_encrypted_and_pathless() {
         let (root, key_root) = roots("round-trip");
-        let service = TerminologyService::with_roots(root.clone(), key_root);
+        let service = TerminologyService::with_test_roots(root.clone(), key_root);
         let result = import(
             &service,
             r#"{"name":"Pharmaceutics","entries":[{"canonicalTerm":"pharmacokinetics","aliases":["farmaco kinetics"],"definition":"Movement of a drug through the body","category":"pharmaceutics"}]}"#,
@@ -1644,9 +1663,31 @@ mod tests {
     }
 
     #[test]
+    fn production_key_path_encrypts_or_fails_closed() {
+        let (root, key_root) = roots("production-key-path");
+        let proof = os_key_store::proof(&key_root).expect("OS key proof");
+        let service = TerminologyService::with_roots(root.clone(), key_root);
+        let result = service.import_dictionary(TerminologyImportParams {
+            name: "Pharmaceutics".to_string(),
+            format: "txt".to_string(),
+            content: "pharmacokinetics".to_string(),
+        });
+
+        if proof["available"] == true {
+            result.expect("available OS key store should encrypt the dictionary");
+            let bytes = fs::read(root.join(STORE_FILE)).expect("encrypted store");
+            assert!(!String::from_utf8_lossy(&bytes).contains("pharmacokinetics"));
+        } else {
+            let error = result.expect_err("unavailable OS key store must fail closed");
+            assert_eq!(error.code, "TERMINOLOGY_KEY_UNAVAILABLE");
+            assert!(!root.join(STORE_FILE).exists());
+        }
+    }
+
+    #[test]
     fn purely_numeric_and_directional_terms_are_rejected() {
         let (root, key_root) = roots("validation");
-        let service = TerminologyService::with_roots(root, key_root);
+        let service = TerminologyService::with_test_roots(root, key_root);
         let numeric = service
             .import_dictionary(TerminologyImportParams {
                 name: "Invalid".to_string(),
@@ -1686,7 +1727,7 @@ mod tests {
     #[test]
     fn concurrent_dictionary_updates_are_serialized() {
         let (root, key_root) = roots("concurrent-updates");
-        let service = TerminologyService::with_roots(root, key_root);
+        let service = TerminologyService::with_test_roots(root, key_root);
         let barrier = Arc::new(Barrier::new(3));
         let workers = ["pharmacokinetics", "bioavailability"]
             .into_iter()
@@ -1716,7 +1757,7 @@ mod tests {
     fn prompt_is_bounded_and_automatic() {
         let (root, key_root) = roots("prompt");
         let store = RecordingStore::with_root(key_root.clone());
-        let service = TerminologyService::with_roots(root, key_root);
+        let service = TerminologyService::with_test_roots(root, key_root);
         import(
             &service,
             r#"["pharmacokinetics","pharmacodynamics","bioavailability","CYP3A4","adalimumab","excipients","contraindications","active pharmaceutical ingredient","dosage forms","drug-drug interaction"]"#,
@@ -1740,7 +1781,7 @@ mod tests {
     fn pharmaceutical_corrections_require_approval_and_rejection_persists() {
         let (root, key_root) = roots("proposals");
         let store = RecordingStore::with_root(key_root.clone());
-        let service = TerminologyService::with_roots(root, key_root);
+        let service = TerminologyService::with_test_roots(root, key_root);
         import(
             &service,
             r#"{"entries":[{"canonicalTerm":"pharmacokinetics","aliases":["farmaco kinetics"],"category":"pharmaceutics"},{"canonicalTerm":"CYP3A4","aliases":["CYP 3A 4"],"category":"enzyme"}]}"#,
@@ -1808,7 +1849,7 @@ mod tests {
     fn accepted_correction_overlays_transcript_without_replacing_original_chunk() {
         let (root, key_root) = roots("accepted-overlay");
         let store = RecordingStore::with_root(key_root.clone());
-        let service = TerminologyService::with_roots(root, key_root);
+        let service = TerminologyService::with_test_roots(root, key_root);
         import(
             &service,
             r#"{"entries":[{"canonicalTerm":"pharmacokinetics","category":"pharmaceutics"}]}"#,
@@ -1878,7 +1919,7 @@ mod tests {
     #[test]
     fn corrupt_primary_is_not_silently_replaced_by_backup() {
         let (root, key_root) = roots("corrupt");
-        let service = TerminologyService::with_roots(root.clone(), key_root);
+        let service = TerminologyService::with_test_roots(root.clone(), key_root);
         import(&service, r#"["bioavailability"]"#);
         import(&service, r#"["excipients"]"#);
         fs::write(root.join(STORE_FILE), b"corrupt").expect("corrupt primary");

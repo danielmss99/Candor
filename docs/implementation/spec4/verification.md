@@ -8,7 +8,7 @@ Recorded on 2026-07-14 on Windows x64 from `codex/whisper-llm-release`.
 | --- | --- |
 | `cargo fmt --check` | Passed |
 | Strict Rust Clippy (`--all-targets --all-features -- -D warnings`) | Passed |
-| Default Rust tests | 131 passed |
+| Default Rust tests | 132 passed |
 | Rust `local-whisper` feature check | Passed |
 | Renderer and Electron unit tests | 40 files, 147 tests passed |
 | Renderer TypeScript check | Passed |
@@ -65,3 +65,5 @@ This failure is required. Replacing it with a passing placeholder would weaken t
 - Rejected local benchmark starts in the Rust core while capture is active, including callers outside the renderer.
 - Added a no-spawn test proving malformed private job requests are rejected before the core process starts.
 - Completed an authenticated Claude rereview after reconciliation; it confirmed every disposition and found no remaining P0 or P1 code defect.
+- Repaired the headless Ubuntu terminology tests with a compile-time test-only encryption key, then added real-constructor coverage proving OS-backed encryption when available and fail-closed behavior when unavailable.
+- Sent the CI portability correction through another authenticated Claude review and implemented its recommended fail-closed coverage.
