@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   EXPECTED_PROTOCOL_VERSION,
   ProtocolValidationError,
+  parseBundledAiStatus,
   parseMeetingPrivacyReceipt,
   parseProtocolVersion,
   parseRecap,
@@ -73,6 +74,43 @@ describe("versioned Candor contracts", () => {
       durationMs: 500,
       segments: "not-an-array",
     })).toThrow("segments");
+  });
+
+  it("accepts pathless bundled readiness and rejects path or hash exposure", () => {
+    const status = {
+      implemented: true,
+      localOnly: true,
+      cloudAi: false,
+      releaseReady: false,
+      fixture: false,
+      selectionStatus: "no-default-selected",
+      state: "no-default-selected",
+      ready: false,
+      repairRequired: false,
+      repairPolicy: "signed-installer-only",
+      repairAction: "none",
+      speech: { state: "no-default-selected", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: "BUNDLED_AI_NO_DEFAULT_SELECTED" },
+      language: { state: "no-default-selected", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: "BUNDLED_AI_NO_DEFAULT_SELECTED" },
+      requiredDownload: false,
+      backgroundDownloads: false,
+      runtimePathAcceptedFromRenderer: false,
+      rawPathExposed: false,
+      hashExposed: false,
+      keyMaterialExposedToRenderer: false,
+    };
+    expect(parseBundledAiStatus(status).repairPolicy).toBe("signed-installer-only");
+    expect(() => parseBundledAiStatus({ ...status, hashExposed: true })).toThrow("local-only readiness");
+    expect(() => parseBundledAiStatus({ ...status, cloudAi: true })).toThrow("local-only readiness");
+    expect(() => parseBundledAiStatus({ ...status, state: "ready" })).toThrow("aggregate readiness");
+    expect(() => parseBundledAiStatus({ ...status, repairRequired: true })).toThrow("matching repairRequired");
+    const falseReady = {
+      ...status,
+      state: "ready",
+      ready: true,
+      speech: { ...status.speech, state: "ready", ready: true, available: true },
+      language: { ...status.language, state: "ready", ready: true, available: true },
+    };
+    expect(() => parseBundledAiStatus(falseReady)).toThrow("selected model when ready");
   });
 
   it("accepts a pathless core-backed privacy receipt", () => {

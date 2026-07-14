@@ -157,15 +157,25 @@ enabled.
 
 `npm run build` performs:
 
-1. deterministic icon validation;
-2. release Rust core build with source-prefix remapping;
-3. staging of the sidecar under ignored `build/core-bin/`;
-4. Electron main compilation;
-5. renderer compilation.
+1. bundled-AI verifier self-tests and source-manifest validation;
+2. deterministic icon validation;
+3. release Rust core build with source-prefix remapping;
+4. staging of the sidecar under ignored `build/core-bin/`;
+5. Electron main compilation;
+6. renderer compilation.
 
 `npm run dist` packages through `electron-builder.v3.yml`. The Rust sidecar is
 placed under `resources/bin`. `asar` protects application JavaScript layout but
-is not treated as an encryption boundary.
+is not treated as an encryption boundary. Packaged AI assets are placed outside
+ASAR under `resources/ai`. Electron main derives that root from
+`process.resourcesPath`; the renderer cannot submit a runtime path, executable,
+argument list, or network endpoint.
+
+`npm run electron:v3:dist:ai-release` is the public Complete-package gate. It
+requires release-selected model and runtime locks, redistribution approval,
+notices, model cards, exact digests, executable compatibility, and all required
+host assets. The ordinary package command remains available for M0 structural
+verification while no release model is selected.
 
 ## Security Invariants
 
@@ -190,6 +200,8 @@ The staged local gate is `npm run v3:verify`. Packaged and release gates include
 - `npm run electron:v3:pack`
 - `npm run m0:packaged-smoke`
 - `npm run m0:artifact-manifest`
+- `npm run spec3:ai-bundle:verify:strict`
+- `npm run spec3:packaged-ai-smoke`
 - `npm run audit:release`
 - OS-specific network-deny proofs
 - release signing and readiness proofs

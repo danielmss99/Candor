@@ -58,6 +58,11 @@ unexpected values, attempt unknown methods, or try to navigate/network out.
   `window.candor.core.modelsImportFromFile`, which asks Electron main to open a
   native file picker and stream the selected file to the core; the selected path
   is never returned to the renderer.
+- The renderer may call `ai.bundledAssetsStatus` with no parameters. It returns
+  only product readiness, repair state, selected model identifiers, and bounded
+  counts. It explicitly reports that paths, hashes, keys, downloads, background
+  downloads, and renderer-controlled runtime paths are unavailable. Electron
+  main derives the package root from its trusted resources directory.
 - The renderer may call typed local AI methods: `ai.status`,
   `ai.askHeuristic`, `ai.recapHeuristic`, `ai.instructStatus`,
   `ai.askInstruct`, `ai.recapInstruct`, and `ai.schedulerStatus`. These accept

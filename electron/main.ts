@@ -64,11 +64,17 @@ function corePath(): string {
   return path.join(process.resourcesPath, "bin", coreExecutableName());
 }
 
+function aiBundleRoot(): string {
+  if (isDev) return path.resolve(__dirname, "..", "..", "build", "ai-bundle");
+  return path.join(process.resourcesPath, "ai");
+}
+
 const captureRecoveryStore = new CaptureRecoveryStore(() => app.getPath("userData"));
 const coreClient = new CoreClient({
   executablePath: corePath,
   allowedMethods: privateCoreMethods,
   isDev,
+  environment: () => ({ CANDOR_AI_BUNDLE_ROOT: aiBundleRoot() }),
   onCaptureConnectionDegraded: (metadata) => captureRecoveryStore.persist(metadata),
   onCaptureRecoveryResolved: () => captureRecoveryStore.clear(),
 });

@@ -1,5 +1,5 @@
 import { PrivacyReceipt } from "../privacy/PrivacyReceipt";
-import { asArray, asBool, asNumber, asObject, asString, formatBytes, metric, type AiMode, type InstructAssetKind, type JsonObject, type MeetingPrivacyReceipt, type ModelRow, type NetworkCapabilities, type SettingsSection } from "../../core/contracts";
+import { asArray, asBool, asNumber, asObject, asString, formatBytes, metric, type AiMode, type BundledAiStatus, type InstructAssetKind, type JsonObject, type MeetingPrivacyReceipt, type ModelRow, type NetworkCapabilities, type SettingsSection } from "../../core/contracts";
 
 interface SettingsStatuses {
   core: JsonObject;
@@ -18,13 +18,14 @@ interface SettingsViewProps {
   activeCapture: boolean;
   combinedCaptureAvailable: boolean;
   statuses: SettingsStatuses;
+  bundledAiStatus: BundledAiStatus;
   models: ModelRow[];
   selectedModel: string;
   defaultModel: string;
   aiMode: AiMode;
   aiModeStatus: string;
   instructSetupOpen: boolean;
-  instructAssetsReady: boolean;
+  instructReady: boolean;
   instructRunnerAsset: JsonObject;
   instructModelAsset: JsonObject;
   instructAssetKind: InstructAssetKind;
@@ -62,7 +63,85 @@ interface SettingsViewProps {
 export function SettingsView(props: SettingsViewProps) {
   const renderLocalAi = () => {
     const availableModels = props.models.length ? props.models : [{ modelId: props.defaultModel, language: "english", installed: false, verified: false, bytes: 0, failureCode: "" }];
-    return <div className="settings-panel-content"><header><h2>Local AI</h2><p>Speech and writing tools installed on this computer</p></header><section className="settings-group"><div className="settings-row-title"><div><strong>Transcription</strong><span>{asBool(props.statuses.transcription.whisperFeatureEnabled) ? "Runs locally" : "Not available in this build"}</span></div><div className="settings-actions"><button type="button" onClick={props.onVerifyModel} disabled={Boolean(props.busy)}>Check integrity</button><button type="button" onClick={props.onImportModel} disabled={Boolean(props.busy)}>Choose speech model</button></div></div><div className="model-choice-list">{availableModels.slice(0, 6).map((model) => <button type="button" key={model.modelId} aria-pressed={props.selectedModel === model.modelId} onClick={() => props.onSelectedModelChange(model.modelId)}><span><strong>Local speech model</strong><small>{model.modelId} / {model.language}</small></span><em>{model.verified ? "Ready" : model.installed ? "Needs integrity check" : "Not installed"}</em></button>)}</div></section><section className="settings-group"><div className="settings-row-title"><div><strong>Generation mode</strong><span id="local-ai-mode-status-settings">{props.aiModeStatus}</span></div><div className="segmented-control" role="group" aria-label="Settings local AI mode"><button type="button" aria-pressed={props.aiMode === "quality"} onClick={() => props.onAiModeChange("quality")}>Quality</button><button type="button" aria-pressed={props.aiMode === "fast"} onClick={() => props.onAiModeChange("fast")}>Fast</button></div></div></section><details className="instruct-setup" open={props.instructSetupOpen} onToggle={(event) => props.onInstructSetupOpenChange(event.currentTarget.open)}><summary><span><strong>Enhanced local summaries</strong><em>{props.instructAssetsReady ? "Ready" : "Optional setup"}</em></span></summary><div className="instruct-setup-body"><dl className="asset-status-list" aria-label="Managed local AI assets"><div><dt>Processing engine</dt><dd className={asBool(props.instructRunnerAsset.verified) ? "ok" : ""}>{asBool(props.instructRunnerAsset.verified) ? `Ready, ${formatBytes(asNumber(props.instructRunnerAsset.bytes))}` : "Not installed"}</dd></div><div><dt>Language model</dt><dd className={asBool(props.instructModelAsset.verified) ? "ok" : ""}>{asBool(props.instructModelAsset.verified) ? `Ready, ${formatBytes(asNumber(props.instructModelAsset.bytes))}` : "Not installed"}</dd></div></dl><div className="segmented-control asset-kind-control" role="group" aria-label="Local AI asset type"><button type="button" aria-pressed={props.instructAssetKind === "runner"} onClick={() => props.onInstructAssetKindChange("runner")}>Processing engine</button><button type="button" aria-pressed={props.instructAssetKind === "model"} onClick={() => props.onInstructAssetKindChange("model")}>Language model</button></div><label className="asset-hash-field" htmlFor="instruct-asset-sha256"><span>Integrity fingerprint</span><input id="instruct-asset-sha256" value={props.instructExpectedSha256} onChange={(event) => props.onInstructExpectedShaChange(event.target.value)} aria-invalid={Boolean(props.instructAssetError)} aria-describedby="instruct-asset-sha256-status" autoCapitalize="none" autoCorrect="off" spellCheck={false} placeholder="64 hexadecimal characters" /><small id="instruct-asset-sha256-status" className={props.instructAssetError ? "asset-hash-error" : ""} role={props.instructAssetError ? "alert" : undefined}>{props.instructAssetError || "SHA-256 fingerprint required before local copy"}</small></label><button type="button" className="secondary-button full-width" onClick={props.onImportInstructAsset} disabled={Boolean(props.busy)}>{props.busy === "instruct-asset" ? "Checking integrity..." : `Choose ${props.instructAssetKind === "runner" ? "processing engine" : "language model"}`}</button></div></details></div>;
+    const repairRequired = props.bundledAiStatus.repairRequired;
+    const speechReady = props.bundledAiStatus.speech.ready || availableModels.some((model) => model.verified);
+    const languageReady = props.instructReady;
+    const checking = props.bundledAiStatus.state === "checking";
+    const statusUnavailable = props.bundledAiStatus.state === "unavailable";
+    const transcriptionLabel = checking && !speechReady ? "Checking..." : speechReady ? "Ready on this device" : "Not set up";
+    const summaryLabel = checking && !languageReady ? "Checking..." : languageReady ? "Enhanced local mode ready" : "Fast local mode available";
+    return (
+      <div className="settings-panel-content">
+        <header><h2>Local AI</h2><p>Offline transcription and meeting assistance on this computer</p></header>
+        {checking ? (
+          <section className="settings-group local-ai-checking" role="status" aria-live="polite">
+            <h3>Checking included AI tools</h3>
+            <p>Candor is verifying the local package on this device.</p>
+          </section>
+        ) : statusUnavailable ? (
+          <section className="settings-group local-ai-unavailable" role="alert">
+            <h3>Included AI status is unavailable</h3>
+            <p>Recording and existing meetings remain available. Manual local setup stays in Advanced model override.</p>
+          </section>
+        ) : repairRequired ? (
+          <section className="settings-group local-ai-repair" role="alert">
+            <h3>Included AI tools need app repair</h3>
+            <p>Candor can still open, export, and delete your meetings. Reinstall the signed Candor app to restore the included AI tools.</p>
+          </section>
+        ) : null}
+        <section className="settings-group">
+          <h3>Readiness</h3>
+          <dl className="settings-facts">
+            <div><dt>Transcription</dt><dd>{transcriptionLabel}</dd></div>
+            <div><dt>Meeting summaries</dt><dd>{summaryLabel}</dd></div>
+            <div><dt>Required downloads</dt><dd>None</dd></div>
+          </dl>
+        </section>
+        <section className="settings-group">
+          <div className="settings-row-title">
+            <div><strong>Generation mode</strong><span id="local-ai-mode-status-settings">{props.aiModeStatus}</span></div>
+            <div className="segmented-control" role="group" aria-label="Settings local AI mode">
+              <button type="button" aria-pressed={props.aiMode === "quality"} onClick={() => props.onAiModeChange("quality")}>Quality</button>
+              <button type="button" aria-pressed={props.aiMode === "fast"} onClick={() => props.onAiModeChange("fast")}>Fast</button>
+            </div>
+          </div>
+        </section>
+        <details className="instruct-setup" open={props.instructSetupOpen} onToggle={(event) => props.onInstructSetupOpenChange(event.currentTarget.open)}>
+          <summary><span><strong>Advanced model override</strong><em>{speechReady && languageReady ? "Optional" : "Manual setup"}</em></span></summary>
+          <div className="instruct-setup-body">
+            <div className="settings-row-title">
+              <div><strong>Speech model</strong><span>Use a locally supplied model instead of the included default</span></div>
+              <div className="settings-actions">
+                <button type="button" onClick={props.onVerifyModel} disabled={Boolean(props.busy)}>Check integrity</button>
+                <button type="button" onClick={props.onImportModel} disabled={Boolean(props.busy)}>Choose speech model</button>
+              </div>
+            </div>
+            <div className="model-choice-list">
+              {availableModels.slice(0, 6).map((model) => (
+                <button type="button" key={model.modelId} aria-pressed={props.selectedModel === model.modelId} onClick={() => props.onSelectedModelChange(model.modelId)}>
+                  <span><strong>Local speech model</strong><small>{model.modelId} / {model.language}</small></span>
+                  <em>{model.verified ? "Ready" : model.installed ? "Needs integrity check" : "Not installed"}</em>
+                </button>
+              ))}
+            </div>
+            <dl className="asset-status-list" aria-label="Advanced local AI components">
+              <div><dt>Processing component</dt><dd className={asBool(props.instructRunnerAsset.verified) ? "ok" : ""}>{asBool(props.instructRunnerAsset.verified) ? `Ready, ${formatBytes(asNumber(props.instructRunnerAsset.bytes))}` : "Not installed"}</dd></div>
+              <div><dt>Language model</dt><dd className={asBool(props.instructModelAsset.verified) ? "ok" : ""}>{asBool(props.instructModelAsset.verified) ? `Ready, ${formatBytes(asNumber(props.instructModelAsset.bytes))}` : "Not installed"}</dd></div>
+            </dl>
+            <div className="segmented-control asset-kind-control" role="group" aria-label="Local AI component type">
+              <button type="button" aria-pressed={props.instructAssetKind === "runner"} onClick={() => props.onInstructAssetKindChange("runner")}>Processing component</button>
+              <button type="button" aria-pressed={props.instructAssetKind === "model"} onClick={() => props.onInstructAssetKindChange("model")}>Language model</button>
+            </div>
+            <label className="asset-hash-field" htmlFor="instruct-asset-sha256">
+              <span>Integrity fingerprint</span>
+              <input id="instruct-asset-sha256" value={props.instructExpectedSha256} onChange={(event) => props.onInstructExpectedShaChange(event.target.value)} aria-invalid={Boolean(props.instructAssetError)} aria-describedby="instruct-asset-sha256-status" autoCapitalize="none" autoCorrect="off" spellCheck={false} placeholder="64 hexadecimal characters" />
+              <small id="instruct-asset-sha256-status" className={props.instructAssetError ? "asset-hash-error" : ""} role={props.instructAssetError ? "alert" : undefined}>{props.instructAssetError || "Fingerprint required before local copy"}</small>
+            </label>
+            <button type="button" className="secondary-button full-width" onClick={props.onImportInstructAsset} disabled={Boolean(props.busy)}>{props.busy === "instruct-asset" ? "Checking integrity..." : `Choose ${props.instructAssetKind === "runner" ? "processing component" : "language model"}`}</button>
+          </div>
+        </details>
+      </div>
+    );
   };
   const renderLicense = () => {
     const portalActions = asArray(props.licensePortalInfo.actions).map((item) => asObject(item));

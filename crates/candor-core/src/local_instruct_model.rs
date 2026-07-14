@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::env;
-use std::fs::{self, File};
-use std::io::{self, Read};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command, Stdio};
 use std::thread;
@@ -11,6 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::bundled_ai_assets::BundledAiAssets;
 use crate::local_instruct_assets::load_runtime_config;
 use crate::local_model_scheduler::{
     LocalModelJobKind, LocalModelScheduler, LocalModelSchedulerError,
@@ -119,6 +122,7 @@ struct LocalInstructModelConfig {
     context_tokens: Option<u32>,
     configuration_source: String,
     managed_manifest_present: bool,
+    bundled_manifest_present: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -153,60 +157,94 @@ impl LocalInstructModelConfig {
                 .filter(|value| *value > 0),
             configuration_source: "environment".to_string(),
             managed_manifest_present: false,
+            bundled_manifest_present: false,
         }
     }
 
-    fn from_sources(asset_root: &Path) -> Self {
+    fn from_sources(asset_root: &Path, bundled_assets: &BundledAiAssets) -> Self {
         let env_config = Self::from_env();
         let managed = load_runtime_config(asset_root);
+        let bundled_status = bundled_assets.status();
+        let bundled = bundled_assets.language_config().ok().flatten();
         let binary_from_managed = managed.binary_path.is_some();
         let model_from_managed = managed.model_path.is_some();
-        let binary_from_env = !binary_from_managed && env_config.binary_path.is_some();
-        let model_from_env = !model_from_managed && env_config.model_path.is_some();
+        let binary_from_bundled = !binary_from_managed && bundled.is_some();
+        let model_from_bundled = !model_from_managed && bundled.is_some();
+        let binary_from_env =
+            !binary_from_managed && !binary_from_bundled && env_config.binary_path.is_some();
+        let model_from_env =
+            !model_from_managed && !model_from_bundled && env_config.model_path.is_some();
         let managed_used = binary_from_managed || model_from_managed;
+        let bundled_used = binary_from_bundled || model_from_bundled;
         let environment_used = binary_from_env || model_from_env;
-        let configuration_source = match (managed_used, environment_used) {
-            (true, true) => "mixed",
-            (true, false) => "managed-local-assets",
-            (false, true) => "environment",
-            (false, false) => "none",
+        let configuration_source = match (managed_used, bundled_used, environment_used) {
+            (true, false, false) => "managed-local-assets",
+            (false, true, false) => "bundled-package",
+            (false, false, true) => "environment",
+            (false, false, false) => "none",
+            _ => "mixed",
         };
+        let bundled_binary_path = bundled.as_ref().map(|value| value.runtime.path.clone());
+        let bundled_model_path = bundled.as_ref().map(|value| value.model.path.clone());
+        let bundled_binary_sha = bundled.as_ref().map(|value| value.runtime.sha256.clone());
+        let bundled_model_sha = bundled.as_ref().map(|value| value.model.sha256.clone());
+        let bundled_context_tokens = bundled
+            .as_ref()
+            .and_then(|value| value.model.context_tokens);
 
         Self {
-            binary_path: managed.binary_path.or(env_config.binary_path),
-            model_path: managed.model_path.or(env_config.model_path),
+            binary_path: managed
+                .binary_path
+                .or(bundled_binary_path)
+                .or(env_config.binary_path),
+            model_path: managed
+                .model_path
+                .or(bundled_model_path)
+                .or(env_config.model_path),
             expected_binary_sha256: managed
                 .expected_binary_sha256
+                .or(bundled_binary_sha.clone())
                 .or(env_config.expected_binary_sha256),
             expected_model_sha256: managed
                 .expected_model_sha256
+                .or(bundled_model_sha.clone())
                 .or(env_config.expected_model_sha256),
-            verified_binary_sha256: managed.verified_binary_sha256,
-            verified_model_sha256: managed.verified_model_sha256,
-            binary_fingerprint_verified: managed.binary_fingerprint_verified,
-            model_fingerprint_verified: managed.model_fingerprint_verified,
+            verified_binary_sha256: managed.verified_binary_sha256.or(bundled_binary_sha),
+            verified_model_sha256: managed.verified_model_sha256.or(bundled_model_sha),
+            binary_fingerprint_verified: managed.binary_fingerprint_verified || binary_from_bundled,
+            model_fingerprint_verified: managed.model_fingerprint_verified || model_from_bundled,
             context_tokens: if managed.manifest_present {
                 managed.context_tokens
+            } else if bundled_used {
+                bundled_context_tokens
             } else {
                 env_config.context_tokens
             },
             configuration_source: configuration_source.to_string(),
             managed_manifest_present: managed.manifest_present,
+            bundled_manifest_present: bundled_status
+                .get("manifestVersion")
+                .is_some_and(Value::is_number),
         }
     }
 }
 
+#[derive(Clone)]
 pub struct LocalInstructModelService {
     asset_root: PathBuf,
+    bundled_assets: BundledAiAssets,
 }
 
 impl LocalInstructModelService {
-    pub fn with_asset_root(asset_root: PathBuf) -> Self {
-        Self { asset_root }
+    pub fn with_sources(asset_root: PathBuf, bundled_assets: BundledAiAssets) -> Self {
+        Self {
+            asset_root,
+            bundled_assets,
+        }
     }
 
     fn config(&self) -> LocalInstructModelConfig {
-        LocalInstructModelConfig::from_sources(&self.asset_root)
+        LocalInstructModelConfig::from_sources(&self.asset_root, &self.bundled_assets)
     }
 
     pub fn status(&self, scheduler: &LocalModelScheduler) -> Value {
@@ -448,6 +486,7 @@ impl LocalInstructModelService {
             "backend": "external-llama-cpp-binary",
             "downloadPolicy": "manual-install-only",
             "backgroundDownloads": false,
+            "bundledDefaultsSupported": true,
             "promptTransport": "local-temp-prompt-file",
             "promptPathExposed": false,
             "promptDeletedAfterRun": true,
@@ -455,6 +494,7 @@ impl LocalInstructModelService {
             "configuration": {
                 "source": config.configuration_source,
                 "managedManifestPresent": config.managed_manifest_present,
+                "bundledManifestPresent": config.bundled_manifest_present,
                 "binaryEnv": BINARY_ENV,
                 "binarySha256Env": BINARY_SHA256_ENV,
                 "modelEnv": MODEL_ENV,
@@ -570,17 +610,41 @@ fn write_prompt_file(prompt: &str) -> Result<PathBuf, LocalInstructError> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let path = env::temp_dir().join(format!(
-        "candor-local-instruct-{}-{stamp}.prompt.txt",
-        process::id()
-    ));
-    fs::write(&path, prompt).map_err(|_| {
-        LocalInstructError::new(
-            "LOCAL_LLM_PROMPT_WRITE_FAILED",
-            "local instruct prompt file could not be written",
-        )
-    })?;
-    Ok(path)
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+
+    for attempt in 0..16_u8 {
+        let path = env::temp_dir().join(format!(
+            "candor-local-instruct-{}-{stamp}-{attempt}.prompt.txt",
+            process::id()
+        ));
+        let mut file = match options.open(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => {
+                return Err(LocalInstructError::new(
+                    "LOCAL_LLM_PROMPT_WRITE_FAILED",
+                    "local instruct prompt file could not be written",
+                ));
+            }
+        };
+        if file.write_all(prompt.as_bytes()).is_err() {
+            drop(file);
+            let _ = fs::remove_file(&path);
+            return Err(LocalInstructError::new(
+                "LOCAL_LLM_PROMPT_WRITE_FAILED",
+                "local instruct prompt file could not be written",
+            ));
+        }
+        return Ok(path);
+    }
+
+    Err(LocalInstructError::new(
+        "LOCAL_LLM_PROMPT_WRITE_FAILED",
+        "local instruct prompt file could not be created safely",
+    ))
 }
 
 fn is_llama_completion_frontend(binary_path: &Path) -> bool {
@@ -1654,6 +1718,26 @@ mod tests {
             prepare_prompt_for_runner("local prompt", Some(Path::new("llama-cli.exe")))
                 .expect("CLI prompt");
         assert!(cli_prompt.ends_with(&format!("{LLAMA_OUTPUT_BOUNDARY}\n")));
+    }
+
+    #[test]
+    fn prompt_transport_uses_a_private_new_file() {
+        let path = write_prompt_file("private meeting transcript").expect("write prompt");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read prompt"),
+            "private meeting transcript"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&path)
+                .expect("prompt metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        fs::remove_file(path).expect("remove prompt");
     }
 
     #[test]

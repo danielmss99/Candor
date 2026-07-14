@@ -3,6 +3,7 @@ import { DesktopShell } from "../../v3/renderer/src/components/DesktopShell";
 import { EmptyState } from "../../v3/renderer/src/components/EmptyState";
 import {
   type AppView,
+  type BundledAiStatus,
   type MeetingPrivacyReceipt,
   type NetworkCapabilities,
   type PersistentAlert,
@@ -35,6 +36,8 @@ export const VISUAL_SCENARIOS = [
   "export-failed",
   "settings-normal",
   "settings-advanced",
+  "settings-local-ai-checking",
+  "settings-local-ai-repair",
   "core-unavailable",
   "core-incompatible",
   "permission-denied",
@@ -46,6 +49,18 @@ export type VisualScenario = (typeof VISUAL_SCENARIOS)[number];
 
 const noop = () => undefined;
 const now = Date.UTC(2026, 6, 13, 15, 30);
+const bundledAiReady: BundledAiStatus = {
+  releaseReady: true,
+  fixture: false,
+  selectionStatus: "release-selected",
+  state: "ready",
+  ready: true,
+  repairRequired: false,
+  repairPolicy: "signed-installer-only",
+  repairAction: "none",
+  speech: { state: "ready", ready: true, available: true, requiredAssets: 1, verifiedAssets: 1, modelId: "base.en", failureCode: null },
+  language: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "candor-local", failureCode: null },
+};
 
 const allMeetings: RecordingSummary[] = Array.from({ length: 1_000 }, (_, index) => ({
   recordingId: `meeting-${index + 1}`,
@@ -338,10 +353,11 @@ function Export() {
   );
 }
 
-function Settings({ advanced }: { advanced: boolean }) {
+function Settings({ advanced, repair = false, checking = false }: { advanced: boolean; repair?: boolean; checking?: boolean }) {
+  const baselineUnavailable = repair || checking;
   return (
     <SettingsView
-      section={advanced ? "storage" : "general"}
+      section={baselineUnavailable ? "models" : advanced ? "storage" : "general"}
       advancedOpen={advanced}
       busy=""
       activeCapture={false}
@@ -355,15 +371,32 @@ function Settings({ advanced }: { advanced: boolean }) {
         retention: { policy: "manual-delete-only", automaticDeletion: false },
         transcription: { whisperFeatureEnabled: true },
       }}
-      models={[{ modelId: "base.en", language: "English", installed: true, verified: true, bytes: 148_000_000, failureCode: "" }]}
+      bundledAiStatus={checking ? {
+        ...bundledAiReady,
+        releaseReady: false,
+        selectionStatus: "checking",
+        state: "checking",
+        ready: false,
+        speech: { ...bundledAiReady.speech, state: "checking", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: null },
+        language: { ...bundledAiReady.language, state: "checking", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: null },
+      } : repair ? {
+        ...bundledAiReady,
+        releaseReady: false,
+        state: "corrupt",
+        ready: false,
+        repairRequired: true,
+        repairAction: "reinstall-candor",
+        speech: { ...bundledAiReady.speech, state: "corrupt", ready: false, verifiedAssets: 0, failureCode: "BUNDLED_AI_ASSET_HASH_MISMATCH" },
+      } : bundledAiReady}
+      models={baselineUnavailable ? [] : [{ modelId: "base.en", language: "English", installed: true, verified: true, bytes: 148_000_000, failureCode: "" }]}
       selectedModel="base.en"
       defaultModel="base.en"
-      aiMode="quality"
-      aiModeStatus="Best local model"
+      aiMode={baselineUnavailable ? "fast" : "quality"}
+      aiModeStatus={baselineUnavailable ? "Fast local analysis" : "Best local model"}
       instructSetupOpen={false}
-      instructAssetsReady
-      instructRunnerAsset={{ verified: true, bytes: 4_000_000 }}
-      instructModelAsset={{ verified: true, bytes: 1_900_000_000 }}
+      instructReady={!baselineUnavailable}
+      instructRunnerAsset={{ verified: !baselineUnavailable, bytes: baselineUnavailable ? 0 : 4_000_000 }}
+      instructModelAsset={{ verified: !baselineUnavailable, bytes: baselineUnavailable ? 0 : 1_900_000_000 }}
       instructAssetKind="runner"
       instructExpectedSha256=""
       instructAssetError=""
@@ -438,6 +471,8 @@ function renderScenario(scenario: VisualScenario): ReactNode {
   if (scenario === "export-failed") return <Shell view="export" error="The report could not be saved. Choose another local folder and try again."><Export /></Shell>;
   if (scenario === "settings-normal") return <Shell view="settings"><Settings advanced={false} /></Shell>;
   if (scenario === "settings-advanced") return <Shell view="settings"><Settings advanced /></Shell>;
+  if (scenario === "settings-local-ai-checking") return <Shell view="settings"><Settings advanced checking /></Shell>;
+  if (scenario === "settings-local-ai-repair") return <Shell view="settings"><Settings advanced repair /></Shell>;
   if (scenario === "permission-denied") return <Shell view="meeting" alerts={[{ id: "permission", severity: "error", title: "Microphone permission denied", message: "Allow microphone access in system settings before starting a recording.", actions: [{ label: "Review recording settings", primary: true, onActivate: noop }] }]}><Live active={false} consentReady={false} label="Recording unavailable" jobLabel="Permission required" /></Shell>;
   if (scenario === "model-unavailable") return <Shell view="detail" alerts={[{ id: "model", severity: "warning", title: "Local transcription is not set up", message: "Choose a speech model in Advanced Settings. Existing audio and notes remain available." }]}><MeetingDetail /></Shell>;
   if (scenario === "license-expired-existing-data") return <Shell view="library" alerts={[{ id: "license", severity: "warning", title: "Trial ended", message: "New premium operations are paused. Existing meetings remain available to open, export, or delete." }]}><Library total={12} /></Shell>;

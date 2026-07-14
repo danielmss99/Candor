@@ -60,6 +60,7 @@ interface CandorApiV2 {
   };
   ai: {
     getStatus(): Promise<JsonValue>;
+    getBundledAssetsStatus(): Promise<JsonValue>;
     getEnhancedAssetsStatus(): Promise<JsonValue>;
     getEnhancedStatus(): Promise<JsonValue>;
     getWorkloadStatus(): Promise<JsonValue>;

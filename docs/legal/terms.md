@@ -1,6 +1,6 @@
 # Candor Terms of Service
 
-Last updated: July 2, 2026
+Last updated: July 13, 2026
 
 ## Use of Candor
 
@@ -14,9 +14,9 @@ You are responsible for following all laws, workplace policies, and meeting rule
 
 Candor stores meeting data locally on your device and in folders you choose. You are responsible for backing up files you want to keep.
 
-## Third-party services
+## Optional network features
 
-Calendar providers and model download hosts are operated by third parties. Your use of those services is subject to their own terms and policies.
+License activation and manual update checks may contact separately disclosed third-party infrastructure only when those features are used. Recording, transcription, meeting summaries, and local export do not require those services.
 
 ## Accuracy
 

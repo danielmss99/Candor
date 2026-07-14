@@ -70,6 +70,7 @@ const api = Object.freeze({
   }),
   ai: Object.freeze({
     getStatus: () => invoke("candor-core:ai-status"),
+    getBundledAssetsStatus: () => invoke("candor-core:ai-bundled-assets-status"),
     getEnhancedAssetsStatus: () => invoke("candor-core:ai-instruct-assets-status"),
     getEnhancedStatus: () => invoke("candor-core:ai-instruct-status"),
     getWorkloadStatus: () => invoke("candor-core:ai-scheduler-status"),

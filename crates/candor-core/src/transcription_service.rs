@@ -6,7 +6,7 @@ use crate::local_model_scheduler::{
     LocalModelJobKind, LocalModelScheduler, LocalModelSchedulerError,
 };
 use crate::model_manager;
-use crate::model_manager::ModelManagerError;
+use crate::model_manager::{ModelManager, ModelManagerError};
 use crate::recording_store::{
     ExportRecordingParams, RecordingIdParams, RecordingStore, RecordingStoreError,
     StartRecordingParams, WriteAudioChunkParams, WriteTranscriptSegmentParams,
@@ -76,8 +76,14 @@ pub struct TranscriptionProofParams {
 pub struct TranscriptionService;
 
 impl TranscriptionService {
-    pub fn status(&self, store: &RecordingStore, scheduler: &LocalModelScheduler) -> Value {
+    pub fn status(
+        &self,
+        store: &RecordingStore,
+        scheduler: &LocalModelScheduler,
+        model_manager: &ModelManager,
+    ) -> Value {
         let scheduler_status = scheduler.status();
+        let model_status = model_manager.status(store);
         json!({
             "implemented": true,
             "active": scheduler_status
@@ -88,9 +94,11 @@ impl TranscriptionService {
             "cloudAi": false,
             "engine": "whisper-rs",
             "whisperFeatureEnabled": cfg!(feature = "local-whisper"),
-            "defaultModelId": model_manager::default_model_id(),
+            "defaultModelId": model_manager.selected_default_model_id(),
             "modelIds": model_manager::valid_model_ids(),
             "modelRootKind": store.root_kind(),
+            "bundledDefaultsSupported": true,
+            "bundledAssets": model_status.get("bundledAssets").cloned().unwrap_or(Value::Null),
             "modelPathAcceptedFromRenderer": false,
             "recordingInput": "recordingId+optionalChannel",
             "acceptedAudioFormat": "pcm_s16le",
@@ -105,10 +113,11 @@ impl TranscriptionService {
         &mut self,
         store: &RecordingStore,
         scheduler: &mut LocalModelScheduler,
+        model_manager: &ModelManager,
         params: TranscriptionRunLocalParams,
     ) -> Result<Value, TranscriptionError> {
         let job_id = scheduler.start_job(LocalModelJobKind::Whisper, "transcription.runLocal")?;
-        let result = self.run_local_inner(store, params);
+        let result = self.run_local_inner(store, model_manager, params);
         scheduler.finish_job(job_id);
         result
     }
@@ -116,9 +125,10 @@ impl TranscriptionService {
     fn run_local_inner(
         &self,
         store: &RecordingStore,
+        model_manager: &ModelManager,
         params: TranscriptionRunLocalParams,
     ) -> Result<Value, TranscriptionError> {
-        let model_id = model_manager::normalize_model_id(params.model_id)?;
+        let model_id = model_manager.resolve_model_id(params.model_id)?;
         let language = normalize_language(params.language)?;
         let initial_prompt = normalize_initial_prompt(params.initial_prompt)?;
         let channel = normalize_optional_channel(params.channel)?;
@@ -128,6 +138,7 @@ impl TranscriptionService {
         {
             run_whisper_track(
                 store,
+                model_manager,
                 &params.recording_id,
                 &model_id,
                 &language,
@@ -138,7 +149,7 @@ impl TranscriptionService {
 
         #[cfg(not(feature = "local-whisper"))]
         {
-            let _ = (language, initial_prompt, track);
+            let _ = (language, initial_prompt, track, model_manager);
             Err(TranscriptionError::new(
                 "TRANSCRIPTION_ENGINE_UNAVAILABLE",
                 format!(
@@ -315,6 +326,7 @@ fn normalize_optional_channel(value: Option<String>) -> Result<Option<String>, T
 #[cfg(feature = "local-whisper")]
 fn run_whisper_track(
     store: &RecordingStore,
+    model_manager: &ModelManager,
     recording_id: &str,
     model_id: &str,
     language: &str,
@@ -323,7 +335,7 @@ fn run_whisper_track(
 ) -> Result<Value, TranscriptionError> {
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
-    let verified_model = model_manager::verified_model_path(store, model_id)?;
+    let verified_model = model_manager.verified_model_path(store, model_id)?;
     let audio = pcm16le_to_mono_16k(&track)?;
     if audio.is_empty() {
         return Err(TranscriptionError::new(

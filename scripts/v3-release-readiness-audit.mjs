@@ -713,7 +713,8 @@ function validateGuiStateMatrix(payload) {
     "home-empty", "home-populated", "live-recording", "live-finalizing", "live-low-disk",
     "live-degraded-core", "meetings-1000", "meeting-no-transcript", "meeting-long-transcript",
     "review-desktop", "review-compact", "export-default", "export-failed", "settings-normal",
-    "settings-advanced", "core-unavailable", "core-incompatible", "permission-denied",
+    "settings-advanced", "settings-local-ai-checking", "settings-local-ai-repair",
+    "core-unavailable", "core-incompatible", "permission-denied",
     "model-unavailable", "license-expired-existing-data",
   ];
   const expectedViewports = ["1440x900-100", "1366x768-100", "1366x768-125", "1280x720-150", "960x600-minimum"];
@@ -743,8 +744,31 @@ function validateReleaseSbom(payload) {
   if (!/^Candor-0\.\d+\.\d+-SBOM\.spdx\.json$/.test(payload?.file ?? "")) failures.push("release SBOM filename is invalid");
   if (!/^[a-f0-9]{64}$/i.test(payload?.sha256 ?? "") || !(payload?.bytes > 0)) failures.push("release SBOM digest is invalid");
   if (!(payload?.packageCount > 1) || !(payload?.npmPackageCount > 0) || !(payload?.rustPackageCount > 0)) failures.push("release SBOM dependency inventory is incomplete");
+  if (!(payload?.bundledAiPackageCount >= 3)) failures.push("release SBOM does not inventory the bundled speech model, language runtime, and language model");
   if (payload?.networkAttempted !== false || payload?.rawPathExposed !== false) failures.push("release SBOM proof must be path-safe and offline");
   if (Array.isArray(payload?.failures) && payload.failures.length > 0) failures.push("release SBOM proof contains failures");
+  return failures;
+}
+
+function validateBundledAiRelease(payload) {
+  const failures = [];
+  if (payload?.proofKind !== "spec3-ai-bundle") failures.push("bundled AI proofKind is invalid");
+  if (payload?.ok !== true || payload?.mode !== "release-strict") failures.push("bundled AI strict release verification did not pass");
+  if (payload?.releaseReady !== true || payload?.fixture !== false) failures.push("bundled AI manifest is not a non-fixture release bundle");
+  if (!(payload?.verifiedAssetCount >= 3)) failures.push("bundled AI release is missing a verified speech model, language runtime, or language model");
+  if (Array.isArray(payload?.failures) && payload.failures.length > 0) failures.push("bundled AI release proof contains failures");
+  if (payload?.networkAttempted !== false || payload?.rawPathExposed !== false) failures.push("bundled AI release proof must be path-safe and offline");
+  return failures;
+}
+
+function validatePackagedAiRuntime(payload) {
+  const failures = [];
+  if (payload?.proofKind !== "spec3-packaged-ai-smoke" || payload?.ok !== true) failures.push("packaged AI runtime proof is invalid");
+  if (payload?.outsideAsar !== true) failures.push("bundled AI assets are not proven outside ASAR");
+  if (payload?.manifestReleaseReady !== true || payload?.runtimeReady !== true) failures.push("packaged AI runtime is not release-ready");
+  if (payload?.requiredDownload !== false || payload?.backgroundDownloads !== false) failures.push("packaged AI runtime exposes a download path");
+  if (payload?.meetingLibraryAccessible !== true) failures.push("packaged AI failure isolation is not proven");
+  if (payload?.networkAttempted !== false || payload?.rawPathExposed !== false) failures.push("packaged AI runtime proof must be path-safe and offline");
   return failures;
 }
 
@@ -775,6 +799,8 @@ const gates = [
   fromProof(files, /^v3-release-artifact-smoke-.+\.json$/, "V3 release artifact smoke", validateReleaseArtifactSmoke),
   fromProof(files, /^v3-release-checksums-.+\.json$/, "V3 release package checksums", validateReleaseChecksums),
   fromProof(files, /^v3-release-sbom-.+\.json$/, "V3 release SPDX SBOM", validateReleaseSbom),
+  fromProof(files, /^spec3-ai-bundle-release-strict-.+\.json$/, "SPEC-3 release-ready bundled AI", validateBundledAiRelease),
+  fromProof(files, /^spec3-packaged-ai-smoke-.+\.json$/, "SPEC-3 packaged local AI runtime", validatePackagedAiRuntime),
   fromProof(files, /^v3-icon-proof-.+\.json$/, "V3 packaged application icon proof", validateIconProof),
   fromProof(files, /^v3-release-signing-proof-.+\.json$/, "V3 signed release and installer proof", validateReleaseSigning),
   fromProof(files, /^v3-manual-release-matrix-.+\.json$/, "Windows clean-install, upgrade, hardware, and duration matrix", validateManualReleaseProof),

@@ -121,6 +121,9 @@ jobs:
       - name: Smoke release artifact contents
         run: npm run v3:release-artifact-smoke
 
+      - name: Prove packaged local AI boundary
+        run: npm run spec3:packaged-ai-smoke
+
       - name: Record release artifact provenance
         run: npm run m0:artifact-manifest
 

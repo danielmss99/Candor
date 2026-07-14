@@ -6,10 +6,32 @@ import {
   asString,
   type JsonObject,
   type LocalJsonValue,
+  type BundledAiStatus,
   type NetworkCapabilities,
 } from "../../core/contracts";
 
 type CoreApi = NonNullable<Window["candor"]>;
+
+const EMPTY_BUNDLED_AI_STATUS: BundledAiStatus = {
+  releaseReady: false,
+  fixture: false,
+  selectionStatus: "checking",
+  state: "checking",
+  ready: false,
+  repairRequired: false,
+  repairPolicy: "signed-installer-only",
+  repairAction: "none",
+  speech: { state: "checking", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: null },
+  language: { state: "checking", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: null },
+};
+
+const UNAVAILABLE_BUNDLED_AI_STATUS: BundledAiStatus = {
+  ...EMPTY_BUNDLED_AI_STATUS,
+  selectionStatus: "status-unavailable",
+  state: "unavailable",
+  speech: { ...EMPTY_BUNDLED_AI_STATUS.speech, state: "unavailable", failureCode: "BUNDLED_AI_STATUS_UNAVAILABLE" },
+  language: { ...EMPTY_BUNDLED_AI_STATUS.language, state: "unavailable", failureCode: "BUNDLED_AI_STATUS_UNAVAILABLE" },
+};
 
 interface DiagnosticTask {
   label: string;
@@ -45,6 +67,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const [vaultStatus, setVaultStatus] = useState<JsonObject>({});
   const [captureStatus, setCaptureStatus] = useState<JsonObject>({});
   const [aiStatus, setAiStatus] = useState<JsonObject>({});
+  const [bundledAiStatus, setBundledAiStatus] = useState<BundledAiStatus>(EMPTY_BUNDLED_AI_STATUS);
   const [instructAssetsStatus, setInstructAssetsStatus] = useState<JsonObject>({});
   const [instructStatus, setInstructStatus] = useState<JsonObject>({});
   const [schedulerStatus, setSchedulerStatus] = useState<JsonObject>({});
@@ -124,6 +147,14 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
       { label: "updates", run: async () => setUpdateStatus(await client.object("updates.status", () => api.settings.getUpdateStatus())) },
       { label: "legacy import", run: async () => setV2ImportStatus(await client.object("import.v2.status", () => api.meetings.getImportStatus())) },
       { label: "local AI", run: async () => setAiStatus(await client.object("ai.status", () => api.ai.getStatus())) },
+      { label: "bundled local AI", run: async () => {
+        try {
+          setBundledAiStatus(await client.bundledAiStatus());
+        } catch (error) {
+          setBundledAiStatus(UNAVAILABLE_BUNDLED_AI_STATUS);
+          throw error;
+        }
+      } },
       { label: "local AI assets", run: async () => setInstructAssetsStatus(await client.object("ai.instructAssetsStatus", () => api.ai.getEnhancedAssetsStatus())) },
       { label: "local AI readiness", run: async () => setInstructStatus(await client.object("ai.instructStatus", () => api.ai.getEnhancedStatus())) },
       { label: "model scheduler", run: async () => setSchedulerStatus(await client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus())) },
@@ -194,9 +225,10 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
 
   const refreshModelsAndAi = useCallback(async () => {
     if (!api || !client) return;
-    const [nextModels, nextAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription] = await Promise.all([
+    const [nextModels, nextAi, nextBundledAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription] = await Promise.all([
       client.models(),
       client.object("ai.status", () => api.ai.getStatus()),
+      client.bundledAiStatus().catch(() => UNAVAILABLE_BUNDLED_AI_STATUS),
       client.object("ai.instructAssetsStatus", () => api.ai.getEnhancedAssetsStatus()),
       client.object("ai.instructStatus", () => api.ai.getEnhancedStatus()),
       client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus()),
@@ -204,6 +236,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     ]);
     setModelStatus({ models: nextModels as unknown as LocalJsonValue });
     setAiStatus(nextAi);
+    setBundledAiStatus(nextBundledAi);
     setInstructAssetsStatus(nextInstructAssets);
     setInstructStatus(nextInstruct);
     setSchedulerStatus(nextScheduler);
@@ -244,6 +277,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     vaultStatus,
     captureStatus,
     aiStatus,
+    bundledAiStatus,
     instructAssetsStatus,
     instructStatus,
     schedulerStatus,

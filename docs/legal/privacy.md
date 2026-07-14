@@ -1,24 +1,22 @@
 # Candor Privacy Policy
 
-Last updated: July 2, 2026
+Last updated: July 13, 2026
 
 Candor is a local-first desktop app for recording, transcribing, organizing, and reviewing meeting notes.
 
 ## Data stored on your device
 
-Candor may store your name, profile picture, app settings, theme preferences, dictionary terms, calendar connection data, meeting recordings, transcripts, summaries, action items, and notes on your computer or in folders you choose.
+Candor may store app settings, recording preferences, meeting recordings, transcripts, summaries, action items, notes, and locally generated reports on your computer or in folders you choose.
 
 ## Recording and transcription
 
 Candor records audio only when you start recording. Transcription runs on your device using local Whisper models. Candor does not operate a cloud transcription service for your meetings.
 
-## Calendar connections
+## Local AI assets
 
-If you connect Microsoft Outlook, Google Calendar, or iCloud Calendar, Candor uses that connection to show and manage calendar events you request inside the app. Calendar credentials are stored locally using operating-system secret storage where available.
+The Complete installer is designed to include the local AI assets required for transcription and meeting summaries. Candor does not download required baseline models on first launch or in the background. A manual local model override is copied only after you select a file and Candor verifies its expected fingerprint.
 
-## Model downloads
-
-Candor downloads speech models from configured model hosts when needed. These downloads do not include your meeting audio, transcripts, or notes.
+Optional license activation and manual update checks are separate, disclosed actions. They do not include meeting audio, transcripts, notes, prompts, or model output.
 
 ## Data sharing
 

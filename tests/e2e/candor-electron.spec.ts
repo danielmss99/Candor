@@ -8,7 +8,7 @@ const expectedPreloadSurface = {
   capture: ["acknowledgeConsent", "getConsent", "getDevices", "getStatus", "recover", "start", "stop"],
   meetings: ["delete", "get", "getImportStatus", "getNotes", "getPrivacyReceipt", "getReplayManifest", "getStorageStatus", "getTranscript", "importLegacy", "list", "readAudioChunk", "search", "updateNotes"],
   transcript: ["cancel", "getStatus", "start"],
-  ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getEnhancedAssetsStatus", "getEnhancedStatus", "getStatus", "getWorkloadStatus", "listSpeechModels", "verifySpeechModel"],
+  ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getBundledAssetsStatus", "getEnhancedAssetsStatus", "getEnhancedStatus", "getStatus", "getWorkloadStatus", "listSpeechModels", "verifySpeechModel"],
   exports: ["cancel", "create", "saveCompleted"],
   settings: ["getNetworkPolicy", "getPrivacyAudit", "getRetentionStatus", "getStorageStatus", "getUpdateStatus", "openLocalStorage"],
   licensing: ["activate", "deactivate", "getPortalInfo", "getStatus", "startTrial"],

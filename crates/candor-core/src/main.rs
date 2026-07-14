@@ -1,3 +1,4 @@
+mod bundled_ai_assets;
 mod capture_service;
 mod consent_store;
 mod job_manager;
@@ -20,6 +21,7 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bundled_ai_assets::BundledAiAssets;
 use capture_service::{
     CaptureError, CaptureManager, CaptureStartMicAndSystemParams, CaptureStartParams,
 };
@@ -179,6 +181,7 @@ impl RecentRequestIds {
 
 struct CoreState {
     started_at_ms: u128,
+    bundled_ai_assets: BundledAiAssets,
     capture_manager: CaptureManager,
     consent_store: ConsentStore,
     local_ai_service: LocalAiService,
@@ -201,6 +204,7 @@ impl CoreState {
     fn new(started_at_ms: u128) -> Self {
         let recording_store = RecordingStore::from_env();
         let vault_store = VaultStore::from_env();
+        let bundled_ai_assets = BundledAiAssets::from_env();
         let startup_recovery = startup_recovery_status(
             recording_store
                 .recover()
@@ -209,15 +213,19 @@ impl CoreState {
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
         Self {
             started_at_ms,
+            bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
             consent_store: ConsentStore::from_env(),
             local_ai_service: LocalAiService,
             local_instruct_assets: LocalInstructAssetManager::with_root(
                 instruct_assets_root.clone(),
             ),
-            local_instruct_model: LocalInstructModelService::with_asset_root(instruct_assets_root),
+            local_instruct_model: LocalInstructModelService::with_sources(
+                instruct_assets_root,
+                bundled_ai_assets.clone(),
+            ),
             job_manager: JobManager::new(PROTOCOL_VERSION),
-            model_manager: ModelManager,
+            model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
             recent_request_ids: RecentRequestIds::default(),
@@ -245,17 +253,22 @@ impl CoreState {
                 .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
         );
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
+        let bundled_ai_assets = BundledAiAssets::disabled();
         Self {
             started_at_ms,
+            bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
             consent_store: ConsentStore::with_root(consent_root),
             local_ai_service: LocalAiService,
             local_instruct_assets: LocalInstructAssetManager::with_root(
                 instruct_assets_root.clone(),
             ),
-            local_instruct_model: LocalInstructModelService::with_asset_root(instruct_assets_root),
+            local_instruct_model: LocalInstructModelService::with_sources(
+                instruct_assets_root,
+                bundled_ai_assets.clone(),
+            ),
             job_manager: JobManager::new(PROTOCOL_VERSION),
-            model_manager: ModelManager,
+            model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
             recent_request_ids: RecentRequestIds::default(),
@@ -453,7 +466,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "durable-recording",
                 "encrypted-local-vault",
                 "local-transcription",
-                "local-ai"
+                "local-ai",
+                "bundled-local-ai-assets"
             ],
             "build": {
                 "commit": option_env!("CANDOR_BUILD_COMMIT"),
@@ -506,6 +520,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "models.importAbort",
                 "models.proofSynthetic",
                 "ai.status",
+                "ai.bundledAssetsStatus",
                 "ai.askHeuristic",
                 "ai.recapHeuristic",
                 "ai.instructStatus",
@@ -798,11 +813,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let store = state.recording_store.clone();
+            let model_manager = state.model_manager.clone();
             match state
                 .job_manager
                 .submit("speech-model-verification", false, move |context| {
                     context.progress("verifying", 0, Some(1), Some("model"));
-                    ModelManager
+                    model_manager
                         .verify_local(&store, params)
                         .map_err(|error| JobFailure::new(error.code, error.message, true))
                 }) {
@@ -855,11 +871,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let store = state.recording_store.clone();
+            let model_manager = state.model_manager.clone();
             match state
                 .job_manager
                 .submit("speech-model-import", false, move |context| {
                     context.progress("verifying-and-installing", 0, Some(1), Some("model"));
-                    ModelManager
+                    model_manager
                         .import_finish(&store, params)
                         .map_err(|error| JobFailure::new(error.code, error.message, true))
                 }) {
@@ -894,6 +911,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "ai.status" => state.local_ai_service.status(&state.model_scheduler),
+        "ai.bundledAssetsStatus" => state.model_manager.bundled_assets_status(),
         "ai.instructAssetsStatus" => state.local_instruct_assets.status(),
         "ai.instructAssetsImportFromPath" => {
             let params = match decode_params::<InstructAssetImportParams>(id.clone(), req.params) {
@@ -1065,12 +1083,14 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             };
             let store = state.recording_store.clone();
             let asset_root = store.models_root_for_core().join("instruct");
+            let bundled_ai_assets = state.bundled_ai_assets.clone();
             match state.job_manager.submit("recap", true, move |context| {
                 context.progress("preparing", 0, Some(3), Some("stage"));
                 let recording_id = params.recording_id;
                 let mut result = None;
                 if matches!(params.quality, AiJobQuality::Best) {
-                    let service = LocalInstructModelService::with_asset_root(asset_root);
+                    let service =
+                        LocalInstructModelService::with_sources(asset_root, bundled_ai_assets);
                     let mut scheduler = LocalModelScheduler::default();
                     if service.status(&scheduler)["ready"] == true {
                         context.progress("generating", 1, Some(3), Some("stage"));
@@ -1127,13 +1147,15 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             };
             let store = state.recording_store.clone();
             let asset_root = store.models_root_for_core().join("instruct");
+            let bundled_ai_assets = state.bundled_ai_assets.clone();
             match state.job_manager.submit("ask", true, move |context| {
                 context.progress("preparing", 0, Some(3), Some("stage"));
                 let recording_id = params.recording_id;
                 let question = params.question;
                 let mut result = None;
                 if matches!(params.quality, AiJobQuality::Best) {
-                    let service = LocalInstructModelService::with_asset_root(asset_root);
+                    let service =
+                        LocalInstructModelService::with_sources(asset_root, bundled_ai_assets);
                     let mut scheduler = LocalModelScheduler::default();
                     if service.status(&scheduler)["ready"] == true {
                         context.progress("answering", 1, Some(3), Some("stage"));
@@ -1185,9 +1207,11 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(error) => return make_job_error(id, error),
             }
         }
-        "transcription.status" => state
-            .transcription_service
-            .status(&state.recording_store, &state.model_scheduler),
+        "transcription.status" => state.transcription_service.status(
+            &state.recording_store,
+            &state.model_scheduler,
+            &state.model_manager,
+        ),
         "transcription.runLocal" => {
             let params = match decode_params::<TranscriptionRunLocalParams>(id.clone(), req.params)
             {
@@ -1198,6 +1222,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             let value = match state.transcription_service.run_local(
                 &state.recording_store,
                 &mut state.model_scheduler,
+                &state.model_manager,
                 params,
             ) {
                 Ok(value) => value,
@@ -1229,6 +1254,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let store = state.recording_store.clone();
+            let model_manager = state.model_manager.clone();
             match state
                 .job_manager
                 .submit("transcription", true, move |context| {
@@ -1238,7 +1264,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                     let mut service = TranscriptionService;
                     context.progress("transcribing", 1, Some(3), Some("stage"));
                     let value = service
-                        .run_local(&store, &mut scheduler, params)
+                        .run_local(&store, &mut scheduler, &model_manager, params)
                         .map_err(|error| JobFailure::new(error.code, error.message, true))?;
                     context.progress("saving-transcript", 2, Some(3), Some("stage"));
                     let model = value.get("model").and_then(Value::as_object);
@@ -2545,6 +2571,77 @@ mod tests {
             .as_str()
             .expect("markdown")
             .contains("Reliability is our moat."));
+    }
+
+    #[test]
+    fn corrupt_bundled_ai_does_not_block_existing_meetings() {
+        let mut state = core_state();
+        let started = handle_request(
+            request_with(
+                json!(30),
+                "recording.durable.start",
+                json!({ "label": "Existing meeting" }),
+            ),
+            &mut state,
+        );
+        let recording_id = started.result.expect("started recording")["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        assert!(
+            handle_request(
+                request_with(
+                    json!(31),
+                    "recording.durable.finish",
+                    json!({ "recordingId": recording_id.clone() }),
+                ),
+                &mut state,
+            )
+            .ok
+        );
+
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let bundle_root = std::env::temp_dir().join(format!(
+            "candor-corrupt-bundle-main-test-{}-{stamp}",
+            process::id()
+        ));
+        fs::create_dir_all(&bundle_root).expect("create corrupt bundle root");
+        fs::write(bundle_root.join("manifest.json"), b"{not-json")
+            .expect("write corrupt bundle manifest");
+        state.bundled_ai_assets = BundledAiAssets::with_root(bundle_root.clone());
+        state.model_manager = ModelManager::with_bundled_assets(state.bundled_ai_assets.clone());
+
+        let bundle_status = handle_request(request("ai.bundledAssetsStatus"), &mut state);
+        assert!(bundle_status.ok);
+        let status = bundle_status.result.expect("bundle status");
+        assert_eq!(status["state"], "corrupt");
+        assert_eq!(status["repairRequired"], true);
+        assert_eq!(status["rawPathExposed"], false);
+        assert_eq!(status["hashExposed"], false);
+        assert!(!serde_json::to_string(&status)
+            .expect("serialize bundle status")
+            .contains(bundle_root.to_string_lossy().as_ref()));
+
+        let list = handle_request(request("recording.durable.list"), &mut state);
+        assert!(list.ok);
+        assert_eq!(list.result.expect("meeting list")["recordingCount"], 1);
+        let read = handle_request(
+            request_with(
+                json!(32),
+                "recording.durable.read",
+                json!({ "recordingId": recording_id }),
+            ),
+            &mut state,
+        );
+        assert!(read.ok);
+        assert_eq!(
+            read.result.expect("meeting detail")["rawPathExposed"],
+            false
+        );
+        let _ = fs::remove_dir_all(bundle_root);
     }
 
     #[test]

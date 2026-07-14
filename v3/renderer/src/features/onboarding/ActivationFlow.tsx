@@ -1,4 +1,4 @@
-import { asBool, asNumber, asObject, metric, type JsonObject, type OnboardingStep } from "../../core/contracts";
+import { asBool, asNumber, asObject, metric, type BundledAiStatus, type JsonObject, type OnboardingStep } from "../../core/contracts";
 
 interface ActivationGateProps {
   licenseKey: string;
@@ -43,8 +43,9 @@ interface OnboardingSetupProps {
   consentStatus: JsonObject;
   vaultStatus: JsonObject;
   modelStatus: JsonObject;
+  bundledAiStatus: BundledAiStatus;
   aiModeStatus: string;
-  instructAssetsReady: boolean;
+  instructReady: boolean;
   busy: string;
   onStepChange: (step: OnboardingStep) => void;
   onCompleteMic: () => void;
@@ -60,7 +61,7 @@ function OnboardingProgress({ step }: { step: OnboardingStep }) {
   return <ol className="onboarding-progress" aria-label="Setup progress">{steps.map(([id, label], index) => <li key={id} data-active={id === step} data-complete={index < activeIndex}><span>{index + 1}</span><strong>{label}</strong></li>)}</ol>;
 }
 
-function SetupStep({ step, licenseState, licenseStatus, captureStatus, consentStatus, vaultStatus, modelStatus, aiModeStatus, instructAssetsReady, busy, onStepChange, onCompleteMic, onCompleteSystemAudio, onCompleteStorage, onImportSpeechModel, onFinish }: OnboardingSetupProps) {
+function SetupStep({ step, licenseState, licenseStatus, captureStatus, consentStatus, vaultStatus, modelStatus, bundledAiStatus, aiModeStatus, instructReady, busy, onStepChange, onCompleteMic, onCompleteSystemAudio, onCompleteStorage, onImportSpeechModel, onFinish }: OnboardingSetupProps) {
   const systemImplemented = asBool(asObject(asObject(captureStatus.sources).system).implemented);
   const verifiedModelCount = asNumber(modelStatus.verifiedModelCount);
   const trialDays = asNumber(licenseStatus.trialDaysRemaining, -1);
@@ -68,7 +69,24 @@ function SetupStep({ step, licenseState, licenseStatus, captureStatus, consentSt
   if (step === "microphone") return <section className="setup-card"><header><span>Step 2</span><h1>Microphone Permission</h1><p>Candor needs explicit local consent before recording microphone audio.</p></header><div className="setup-status-row"><span className={asBool(consentStatus.readyForMicRecording) ? "status-dot ok" : "status-dot"} /><strong>{asBool(consentStatus.readyForMicRecording) ? "Microphone consent saved" : "Microphone consent required"}</strong></div><div className="setup-actions"><button className="secondary-button" type="button" onClick={() => onStepChange("yours")}>Back</button><button className="primary-button" type="button" onClick={onCompleteMic} disabled={busy === "consent"}>{asBool(consentStatus.readyForMicRecording) ? "Continue" : "Acknowledge Microphone"}</button></div></section>;
   if (step === "system-audio") return <section className="setup-card"><header><span>Step 3</span><h1>System Audio</h1><p>Enable meeting audio capture from this computer when the OS capture path is available.</p></header><div className="setup-status-row"><span className={systemImplemented && asBool(consentStatus.readyForSystemAudioRecording) ? "status-dot ok" : "status-dot"} /><strong>{!systemImplemented ? "System audio capture unavailable on this OS build" : asBool(consentStatus.readyForSystemAudioRecording) ? "System audio consent saved" : "System audio consent required"}</strong></div><div className="setup-actions"><button className="secondary-button" type="button" onClick={() => onStepChange("microphone")}>Back</button><button className="primary-button" type="button" onClick={onCompleteSystemAudio} disabled={busy === "consent"}>{!systemImplemented || asBool(consentStatus.readyForSystemAudioRecording) ? "Continue" : "Acknowledge System Audio"}</button></div></section>;
   if (step === "storage") return <section className="setup-card"><header><span>Step 4</span><h1>Local Storage</h1><p>Candor protects recordings, notes, transcripts, and reports on this device.</p></header><dl className="setup-facts"><div><dt>Meeting data</dt><dd>{asBool(vaultStatus.encrypted) ? "Encrypted locally" : "Stored locally"}</dd></div><div><dt>Protection</dt><dd>Managed by this computer</dd></div><div><dt>Cloud upload</dt><dd>Off</dd></div></dl><div className="setup-actions"><button className="secondary-button" type="button" onClick={() => onStepChange("system-audio")}>Back</button><button className="primary-button" type="button" onClick={onCompleteStorage} disabled={busy === "storage"}>Use Local Storage</button></div></section>;
-  if (step === "local-ai") return <section className="setup-card"><header><span>Step 5</span><h1>Local AI Setup</h1><p>Choose a verified speech model now, or use fast local analysis and finish setup.</p></header><dl className="setup-facts"><div><dt>Speech models</dt><dd>{verifiedModelCount} verified</dd></div><div><dt>Recap mode</dt><dd>{aiModeStatus}</dd></div><div><dt>Enhanced summaries</dt><dd>{instructAssetsReady ? "Ready" : "Optional"}</dd></div></dl><div className="setup-actions"><button className="secondary-button" type="button" onClick={onImportSpeechModel} disabled={Boolean(busy)}>Choose Speech Model</button><button className="primary-button" type="button" onClick={onFinish}>Finish Setup</button></div></section>;
+  if (step === "local-ai") {
+    const speechReady = bundledAiStatus.speech.ready || verifiedModelCount > 0;
+    const repairRequired = bundledAiStatus.repairRequired;
+    const checking = bundledAiStatus.state === "checking";
+    const statusUnavailable = bundledAiStatus.state === "unavailable";
+    const description = checking
+      ? "Checking the included local AI tools on this device."
+      : repairRequired
+      ? "Local AI needs an app repair, but your existing meetings remain available."
+      : bundledAiStatus.speech.ready
+        ? "Local transcription is included and verified for offline use."
+        : statusUnavailable
+          ? "Included AI status is unavailable. Recording, notes, and existing meetings still work locally."
+          : "Add a verified speech model now, or finish setup and use local notes and recording.";
+    const transcriptionLabel = checking ? "Checking..." : speechReady ? "Ready on this device" : "Not set up";
+    const summaryLabel = checking ? "Checking..." : instructReady ? "Ready" : repairRequired ? "Needs app repair" : "Fast local mode available";
+    return <section className="setup-card"><header><span>Step 5</span><h1>Local AI Setup</h1><p>{description}</p></header><dl className="setup-facts"><div><dt>Transcription</dt><dd>{transcriptionLabel}</dd></div><div><dt>Recap mode</dt><dd>{aiModeStatus}</dd></div><div><dt>Enhanced summaries</dt><dd>{summaryLabel}</dd></div></dl><div className="setup-actions">{!speechReady && !repairRequired && !checking ? <button className="secondary-button" type="button" onClick={onImportSpeechModel} disabled={Boolean(busy)}>Choose Speech Model</button> : null}<button className="primary-button" type="button" onClick={onFinish}>Finish Setup</button></div></section>;
+  }
   return <section className="setup-card"><header><span>Step 1</span><h1>Candor is yours</h1><p>{licenseLabel}. Normal app use does not require a persistent account or sign-in.</p></header><dl className="setup-facts"><div><dt>Plan</dt><dd>{metric(licenseStatus.planName, "Candor Professional")}</dd></div><div><dt>License</dt><dd>{metric(licenseStatus.licenseId, "Local trial")}</dd></div><div><dt>Verification</dt><dd>{metric(licenseStatus.productionVerification, "pending")}</dd></div></dl><div className="setup-actions"><button className="secondary-button" type="button" onClick={onFinish}>Open App</button><button className="primary-button" type="button" onClick={() => onStepChange("microphone")}>Continue Setup</button></div></section>;
 }
 
