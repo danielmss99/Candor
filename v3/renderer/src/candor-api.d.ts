@@ -2,23 +2,94 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 
 interface JobAccepted {
   jobId: string;
-  type: string;
+  type: BackgroundTaskKind;
   state: "queued";
   createdAt: string;
   rawPathExposed: false;
 }
 
-interface CandorApiV2 {
-  version: 2;
+type BackgroundTaskKind =
+  | "transcription"
+  | "recap"
+  | "ask"
+  | "export"
+  | "legacy-import"
+  | "local-ai-benchmark"
+  | "local-ai-component-import"
+  | "speech-model-import"
+  | "speech-model-verification"
+  | "dictionary-import"
+  | "dictionary-index";
+type BackgroundTaskState = "queued" | "running" | "paused" | "cancelling" | "completed" | "failed" | "cancelled";
+type BackgroundProgressUnit = "percent" | "seconds" | "chunks" | "bytes";
+type AiExecutionMode = "local-llm" | "heuristic-fallback";
+type AiFallbackPolicy = "allow-disclosed" | "require-local-llm";
+
+interface AiProvenance {
+  engine: "local-llm" | "heuristic";
+  modelId?: string | null;
+  fallbackUsed: boolean;
+  fallbackReason?: "llm-unavailable" | "runtime-failed" | "model-corrupt" | "resource-policy" | "user-requested" | null;
+  promptVersion: string;
+  generatedAt: string;
+}
+
+interface ExportCreateInput {
+  recordingId: string;
+  format?: "markdown" | "docx" | "pdf" | "wav";
+  channel?: string;
+  report?: JsonValue;
+  options?: JsonValue;
+}
+
+interface BackgroundTask {
+  jobId: string;
+  type: BackgroundTaskKind;
+  state: BackgroundTaskState;
+  createdAt: string;
+  updatedAt: string;
+  stage?: string | null;
+  progress?: { completed: number; total?: number | null; unit: BackgroundProgressUnit } | null;
+  estimatedRemainingMs?: number | null;
+  recordingId?: string | null;
+  parentJobId?: string | null;
+  result?: JsonValue;
+  resultAvailableAfterRestart?: boolean;
+  error?: {
+    code: string;
+    title: string;
+    message: string;
+    retryable: boolean;
+    severity: "error";
+    correlationId: string;
+    rawPathExposed: false;
+  } | null;
+  provenance?: AiProvenance | null;
+  cancelRequested: boolean;
+  retryCount: number;
+  retryable: boolean;
+  terminal: boolean;
+  sourceDataPreserved: true;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface BackgroundTaskList {
+  jobs: BackgroundTask[];
+  activeCount: number;
+}
+
+interface CandorApiV3 {
+  version: 3;
   app: {
     getStatus(): Promise<JsonValue>;
     getConnectionStatus(): Promise<JsonValue>;
     getVersion(): Promise<JsonValue>;
     getCapabilities(): Promise<JsonValue>;
     retryCore(): Promise<JsonValue>;
-    listJobs(): Promise<JsonValue>;
-    getActiveJobs(): Promise<JsonValue>;
-    getJob(jobId: string): Promise<JsonValue>;
+    listJobs(): Promise<BackgroundTaskList & { jobCount: number }>;
+    getActiveJobs(): Promise<BackgroundTaskList>;
+    getJob(jobId: string): Promise<BackgroundTask>;
     cancelJob(jobId: string): Promise<JsonValue>;
     cancelAllJobs(): Promise<JsonValue>;
     retryJob(jobId: string): Promise<JobAccepted>;
@@ -68,7 +139,6 @@ interface CandorApiV2 {
   terminology: {
     getStatus(recordingId?: string): Promise<JsonValue>;
     importDictionary(): Promise<JsonValue>;
-    importDictionaryPackage(sourceFileName: string, archiveBytes: Uint8Array): Promise<JsonValue>;
     setEnabled(dictionaryId: string, enabled: boolean): Promise<JsonValue>;
     assignToMeeting(recordingId: string, dictionaryId: string, enabled: boolean): Promise<JsonValue>;
     getCorrectionProposals(recordingId: string): Promise<JsonValue>;
@@ -88,12 +158,12 @@ interface CandorApiV2 {
     verifySpeechModel(modelId?: string): Promise<JobAccepted>;
     chooseSpeechModel(modelId: string): Promise<JobAccepted | JsonValue>;
     chooseEnhancedComponent(input: { component: "engine" | "model"; expectedSha256: string }): Promise<JobAccepted | JsonValue>;
-    generateRecap(recordingId: string, quality: "fast" | "best"): Promise<JobAccepted>;
-    ask(recordingId: string, question: string, quality: "fast" | "best"): Promise<JobAccepted>;
+    generateRecap(input: { recordingId: string; mode: AiExecutionMode; fallbackPolicy: AiFallbackPolicy }): Promise<JobAccepted>;
+    ask(input: { recordingId: string; question: string; mode: AiExecutionMode; fallbackPolicy: AiFallbackPolicy }): Promise<JobAccepted>;
     cancel(jobId: string): Promise<JsonValue>;
   };
   exports: {
-    create(input: JsonValue): Promise<JobAccepted>;
+    create(input: ExportCreateInput): Promise<JobAccepted>;
     saveCompleted(jobId: string): Promise<JsonValue>;
     cancel(jobId: string): Promise<JsonValue>;
   };
@@ -113,10 +183,10 @@ interface CandorApiV2 {
     getPortalInfo(): Promise<JsonValue>;
   };
   events: {
-    subscribe(eventName: "jobs.changed", listener: (payload: JsonValue) => void): () => void;
+    subscribe(eventName: "jobs.changed", listener: (payload: BackgroundTask) => void): () => void;
   };
 }
 
 interface Window {
-  candor?: CandorApiV2;
+  candor?: CandorApiV3;
 }

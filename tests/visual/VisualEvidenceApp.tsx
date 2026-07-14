@@ -4,7 +4,7 @@ import { EmptyState } from "../../v3/renderer/src/components/EmptyState";
 import {
   type AppView,
   type BundledAiStatus,
-  type JsonObject,
+  type LocalAiRecap,
   type MeetingPrivacyReceipt,
   type NetworkCapabilities,
   type PersistentAlert,
@@ -34,6 +34,7 @@ export const VISUAL_SCENARIOS = [
   "meetings-1000",
   "meeting-no-transcript",
   "meeting-long-transcript",
+  "meeting-fallback-notice",
   "review-desktop",
   "review-compact",
   "export-default",
@@ -63,8 +64,8 @@ const bundledAiReady: BundledAiStatus = {
   repairRequired: false,
   repairPolicy: "signed-installer-only",
   repairAction: "none",
-  speech: { state: "ready", ready: true, available: true, requiredAssets: 1, verifiedAssets: 1, modelId: "base.en", failureCode: null },
-  language: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "candor-local", failureCode: null },
+  speech: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "large-v3-turbo", failureCode: null },
+  language: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "Qwen3-4B-GGUF-Q4_K_M", failureCode: null },
 };
 
 const transcriptionQuality: TranscriptionQualityStatus = {
@@ -91,7 +92,25 @@ const terminologyStatus: TerminologyStatus = {
   dictionaryCount: 1,
   entryCount: 1842,
   encryptedAtRest: true,
-  dictionaries: [{ dictionaryId: "pharmaceutics", name: "Pharmaceutics", entryCount: 1842, enabled: true, assignedToMeeting: true }],
+  projectScopeAvailable: false,
+  dictionaries: [{
+    dictionaryId: "pharmaceutics",
+    name: "Pharmaceutics",
+    entryCount: 1842,
+    enabled: true,
+    assignedToRecording: true,
+    packageId: "candor.pharmaceutics",
+    packageVersion: "1.2.0",
+    publisher: "Candor",
+    language: "en",
+    signatureKeyId: "candor-dictionary-publisher-v1",
+    trustLabel: "verified-candor",
+    signatureVerified: true,
+    scope: "specialist",
+    scopeTargetId: null,
+    explicitPreference: 0,
+    approvedCorrectionCount: 24,
+  }],
 };
 
 const allMeetings: RecordingSummary[] = Array.from({ length: 1_000 }, (_, index) => ({
@@ -138,8 +157,8 @@ const decisions = [recapItem("Decision", "Keep the report editable and local.", 
 const actions = [recapItem("Action", "Validate keyboard access on the desktop workflow.", 2), recapItem("Action", "Run the recovery matrix before beta.", 5)];
 const risks = [recapItem("Risk", "A disconnected capture service must not hide the Stop action.", 6)];
 const questions = [recapItem("Question", "Which speech model should be the default for first run?", 7)];
-const recap = {
-  engine: "local",
+const recap: LocalAiRecap = {
+  engine: "local-llm",
   summary: "The team aligned on an editable local report, a clear review step, and recovery validation before beta.",
   markdown: "## Summary\nLocal report and recovery validation.",
   decisions,
@@ -147,6 +166,28 @@ const recap = {
   risks,
   questions,
   citations: [...decisions, ...actions],
+  provenance: {
+    engine: "local-llm",
+    modelId: "Qwen3-4B-GGUF-Q4_K_M",
+    fallbackUsed: false,
+    fallbackReason: null,
+    promptVersion: "recap-v3",
+    generatedAt: "2026-07-13T15:30:00.000Z",
+  },
+};
+
+const fallbackRecap: LocalAiRecap = {
+  ...recap,
+  engine: "heuristic",
+  summary: "A local fallback created this recap after the packaged model became unavailable.",
+  provenance: {
+    engine: "heuristic",
+    modelId: null,
+    fallbackUsed: true,
+    fallbackReason: "llm-unavailable",
+    promptVersion: "recap-v3",
+    generatedAt: "2026-07-13T15:31:00.000Z",
+  },
 };
 
 const network: NetworkCapabilities = {
@@ -199,7 +240,7 @@ interface ShellProps {
   alerts?: PersistentAlert[];
   error?: string;
   recordings?: RecordingSummary[];
-  jobs?: JsonObject[];
+  jobs?: BackgroundTask[];
 }
 
 function Shell({ view, children, activeCapture = false, alerts = [], error = "", recordings = allMeetings.slice(0, 12), jobs = [] }: ShellProps) {
@@ -233,29 +274,61 @@ function BackgroundActivityFixture() {
   useEffect(() => {
     document.querySelector<HTMLDetailsElement>(".background-activity")?.setAttribute("open", "");
   }, []);
-  const jobs: JsonObject[] = [
-    {
-      jobId: "a".repeat(32),
-      type: "transcription",
-      state: "running",
+  const task = (
+    id: string,
+    type: BackgroundTaskKind,
+    state: BackgroundTaskState,
+    overrides: Partial<BackgroundTask> = {},
+  ): BackgroundTask => ({
+    jobId: id.repeat(32),
+    type,
+    state,
+    createdAt: "2026-07-13T15:20:00.000Z",
+    updatedAt: "2026-07-13T15:30:00.000Z",
+    stage: state,
+    progress: null,
+    estimatedRemainingMs: null,
+    recordingId: primaryMeeting.recordingId,
+    parentJobId: null,
+    resultAvailableAfterRestart: state === "completed",
+    error: null,
+    provenance: null,
+    cancelRequested: state === "cancelling",
+    retryCount: 0,
+    retryable: state === "paused" || state === "failed" || state === "cancelled",
+    terminal: state === "completed" || state === "failed" || state === "cancelled",
+    sourceDataPreserved: true,
+    rawPathExposed: false,
+    keyMaterialExposedToRenderer: false,
+    ...overrides,
+  });
+  const failedJobId = "f".repeat(32);
+  const jobs: BackgroundTask[] = [
+    task("a", "transcription", "running", {
       stage: "transcribing",
-      recordingId: primaryMeeting.recordingId,
-      progress: { completed: 3, total: 5, unit: "stage" },
+      progress: { completed: 62, total: 100, unit: "percent" },
       estimatedRemainingMs: 180_000,
-      terminal: false,
-      retryable: false,
-    },
-    {
-      jobId: "b".repeat(32),
-      type: "recap",
-      state: "queued",
-      stage: "queued",
-      recordingId: primaryMeeting.recordingId,
-      progress: { completed: 0, total: 1, unit: "job" },
-      estimatedRemainingMs: null,
-      terminal: false,
-      retryable: false,
-    },
+    }),
+    task("b", "recap", "queued"),
+    task("c", "ask", "paused", { stage: "recording-priority" }),
+    task("d", "export", "cancelling", {
+      progress: { completed: 8, total: 10, unit: "chunks" },
+    }),
+    task("e", "legacy-import", "completed", {
+      progress: { completed: 4_194_304, total: 4_194_304, unit: "bytes" },
+    }),
+    task("f", "dictionary-import", "failed", {
+      error: {
+        code: "DICTIONARY_PACKAGE_INVALID",
+        title: "Local operation failed",
+        message: "The dictionary package could not be verified.",
+        retryable: true,
+        severity: "error",
+        correlationId: failedJobId,
+        rawPathExposed: false,
+      },
+    }),
+    task("1", "local-ai-benchmark", "cancelled"),
   ];
   return <Shell view="home" jobs={jobs}><Home populated /></Shell>;
 }
@@ -274,7 +347,7 @@ function Home({ populated, storageLevel = "ok" }: { populated: boolean; storageL
       recordingTitle="Product Strategy Sync"
       instructReady={populated}
       verifiedModelCount={populated ? 1 : 0}
-      aiModeStatus={populated ? "Best local model" : "Fast local analysis"}
+      aiModeStatus={populated ? "Local AI ready" : "Local AI with disclosed fallback"}
       onStartRecording={noop}
       onOpenLibrary={noop}
       onImport={noop}
@@ -310,8 +383,10 @@ function Live({ active, busy = false, consentReady = true, label, jobLabel }: Li
       notesDirty={false}
       notesSaved
       recapSuggestions={[...decisions, ...actions]}
-      aiMode="quality"
-      aiModeStatus="Best local model"
+      aiMode="local"
+      aiModeStatus="Local AI ready"
+      transcriptionQualityLabel="Balanced"
+      localAiReadyLabel="Ready"
       captureStatusLabel={label}
       jobStatusLabel={jobLabel}
       busy={busy}
@@ -332,7 +407,7 @@ function Live({ active, busy = false, consentReady = true, label, jobLabel }: Li
   );
 }
 
-function MeetingDetail({ long = false, empty = false }: { long?: boolean; empty?: boolean }) {
+function MeetingDetail({ long = false, empty = false, fallback = false }: { long?: boolean; empty?: boolean; fallback?: boolean }) {
   return (
     <MeetingDetailView
       title="Product Strategy Sync"
@@ -343,10 +418,10 @@ function MeetingDetail({ long = false, empty = false }: { long?: boolean; empty?
       transcriptTotalCount={empty ? 0 : long ? 80 : transcriptSegments.length}
       notesMarkdown="Keep the report editable and validate recovery."
       notesDirty={false}
-      recap={empty ? null : recap}
+      recap={empty ? null : fallback ? fallbackRecap : recap}
       askQuestion=""
       askAnswer={null}
-      aiModeStatus="Best local model"
+      aiModeStatus={fallback ? "Local AI with disclosed fallback" : "Local AI ready"}
       privacyReceipt={receipt}
       networkCapabilities={network}
       busy={false}
@@ -356,8 +431,10 @@ function MeetingDetail({ long = false, empty = false }: { long?: boolean; empty?
       onNotesChange={noop}
       onSaveNotes={noop}
       onGenerateRecap={noop}
+      onRetryRecapWithLocalAi={noop}
       onAskQuestionChange={noop}
       onAsk={noop}
+      onRetryAskWithLocalAi={noop}
     />
   );
 }
@@ -460,8 +537,8 @@ function Settings({ advanced, repair = false, checking = false, localAi = false 
       models={baselineUnavailable ? [] : [{ modelId: "base.en", language: "English", installed: true, verified: true, bytes: 148_000_000, failureCode: "" }]}
       selectedModel="base.en"
       defaultModel="base.en"
-      aiMode={baselineUnavailable ? "fast" : "quality"}
-      aiModeStatus={baselineUnavailable ? "Fast local analysis" : "Best local model"}
+      aiMode={baselineUnavailable ? "quick" : "local"}
+      aiModeStatus={baselineUnavailable ? "Quick fallback available" : "Local AI ready"}
       instructSetupOpen={false}
       instructReady={!baselineUnavailable}
       instructRunnerAsset={{ verified: !baselineUnavailable, bytes: baselineUnavailable ? 0 : 4_000_000 }}
@@ -542,6 +619,7 @@ function renderScenario(scenario: VisualScenario): ReactNode {
   if (scenario === "meetings-1000") return <Shell view="library"><Library /></Shell>;
   if (scenario === "meeting-no-transcript") return <Shell view="detail"><MeetingDetail empty /></Shell>;
   if (scenario === "meeting-long-transcript") return <Shell view="detail"><MeetingDetail long /></Shell>;
+  if (scenario === "meeting-fallback-notice") return <Shell view="detail"><MeetingDetail fallback /></Shell>;
   if (scenario === "review-desktop" || scenario === "review-compact") return <Shell view="review"><Review /></Shell>;
   if (scenario === "export-default") return <Shell view="export"><Export /></Shell>;
   if (scenario === "export-failed") return <Shell view="export" error="The report could not be saved. Choose another local folder and try again."><Export /></Shell>;

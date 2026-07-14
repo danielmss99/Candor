@@ -36,6 +36,46 @@ describe("core operation registry", () => {
       state: "completed",
       result: { format: "pdf", fileName: "report.pdf", bytes: 10, rawPathExposed: false },
     })).toMatchObject({ result: { format: "pdf", bytes: 10 } });
+    expect(validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "export",
+      state: "completed",
+      result: {
+        format: "wav",
+        fileName: "meeting.wav",
+        bytes: 10,
+        dataBase64: "UklGRg==",
+        rawPathExposed: false,
+        unexpected: "must not cross",
+      },
+    })).toEqual(expect.objectContaining({
+      result: expect.objectContaining({ dataBase64: "UklGRg==" }),
+    }));
+    expect(validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "export",
+      state: "completed",
+      result: {
+        format: "wav",
+        fileName: "meeting.wav",
+        bytes: 10,
+        dataBase64: "UklGRg==",
+        rawPathExposed: false,
+        unexpected: "must not cross",
+      },
+    })).not.toHaveProperty("result.unexpected");
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "export",
+      state: "completed",
+      result: {
+        format: "pdf",
+        fileName: "report.pdf",
+        bytes: 10,
+        rawPathExposed: false,
+        metadata: { transcript: "must not cross" },
+      },
+    })).toThrow("forbidden transcript");
     expect(() => validateCompletedJobResult({
       jobId: "a".repeat(32),
       type: "export",
@@ -60,6 +100,148 @@ describe("core operation registry", () => {
         rawPathExposed: false,
       },
     })).toMatchObject({ result: { benchmarkState: "measured", passed: true } });
+    expect(validateCompletedJobResult({
+      jobId: "b".repeat(32),
+      type: "dictionary-import",
+      state: "completed",
+      result: {
+        imported: true,
+        dictionaryId: "dict-1",
+        name: "Pharmaceutics",
+        entryCount: 10,
+        enabled: true,
+        trustLabel: "community-unverified",
+        scope: "specialist",
+        encryptedAtRest: true,
+        localOnly: true,
+        rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
+      },
+    })).toMatchObject({ result: { dictionaryId: "dict-1", entryCount: 10 } });
+    expect(validateCompletedJobResult({
+      jobId: "c".repeat(32),
+      type: "dictionary-index",
+      state: "completed",
+      result: {
+        state: "ready",
+        dictionaryCount: 1,
+        entryCount: 10,
+        indexedDictionaryId: "dict-1",
+        encryptedAtRest: true,
+        localOnly: true,
+        rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
+      },
+    })).toMatchObject({ result: { indexedDictionaryId: "dict-1" } });
+  });
+
+  it("rejects completed results with contradictory local custody or dictionary trust", () => {
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "transcription",
+      state: "completed",
+      result: {
+        recordingId: "recording-1",
+        engine: "whisper-rs",
+        segmentCount: 2,
+        rawPathExposed: true,
+      },
+    })).toThrow("rawPathExposed");
+    expect(() => validateCompletedJobResult({
+      jobId: "b".repeat(32),
+      type: "local-ai-benchmark",
+      state: "completed",
+      result: {
+        benchmarkState: "measured",
+        tier: "balanced",
+        passed: true,
+        whisperMeasured: true,
+        localLlmMeasured: true,
+        localOnly: false,
+        cloudAi: false,
+        rawModelNamesExposed: false,
+        rawHashExposed: false,
+        rawMetricExposed: false,
+        rawPathExposed: false,
+      },
+    })).toThrow("localOnly");
+    expect(() => validateCompletedJobResult({
+      jobId: "c".repeat(32),
+      type: "dictionary-import",
+      state: "completed",
+      result: {
+        imported: true,
+        dictionaryId: "dict-1",
+        name: "Pharmaceutics",
+        entryCount: 10,
+        enabled: true,
+        trustLabel: "verified-organization",
+        scope: "specialist",
+        encryptedAtRest: true,
+        localOnly: true,
+        rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
+      },
+    })).toThrow("dictionary trust result");
+    expect(() => validateCompletedJobResult({
+      jobId: "d".repeat(32),
+      type: "dictionary-import",
+      state: "completed",
+      result: {
+        imported: true,
+        dictionaryId: "dict-1",
+        name: "Pharmaceutics",
+        entryCount: 10,
+        enabled: true,
+        trustLabel: "verified-candor",
+        scope: "project",
+        encryptedAtRest: true,
+        localOnly: true,
+        rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
+      },
+    })).toThrow("dictionary trust result");
+  });
+
+  it("preserves the safe fields required to save completed local exports", () => {
+    expect(validateCompletedJobResult({
+      jobId: "e".repeat(32),
+      type: "export",
+      state: "completed",
+      result: {
+        format: "markdown",
+        mimeType: "text/markdown; charset=utf-8",
+        fileName: "report.md",
+        markdown: "# Report\n",
+        bytes: 9,
+        generatedLocally: true,
+        networkAttempted: false,
+        localOnly: true,
+        cloudAi: false,
+        rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
+      },
+    })).toMatchObject({
+      result: {
+        markdown: "# Report\n",
+        generatedLocally: true,
+        networkAttempted: false,
+      },
+    });
+  });
+
+  it("rejects contradictory fallback policy combinations", () => {
+    const operation = CORE_OPERATIONS.get("ai.recap.start");
+    expect(() => operation?.paramsSchema.parse({
+      recordingId: "recording-1",
+      mode: "heuristic-fallback",
+      fallbackPolicy: "require-local-llm",
+    })).toThrow("Invalid parameters");
+    expect(operation?.paramsSchema.parse({
+      recordingId: "recording-1",
+      mode: "heuristic-fallback",
+      fallbackPolicy: "allow-disclosed",
+    })).toMatchObject({ mode: "heuristic-fallback", fallbackPolicy: "allow-disclosed" });
   });
 
   it("keeps benchmark inputs tier-only at the private boundary", () => {
@@ -121,12 +303,23 @@ describe("core operation registry", () => {
       sourceIds: ["s0"],
       localOnly: true,
       rawPathExposed: false,
+      keyMaterialExposedToRenderer: false,
+      cloudAi: false,
       outputSchemaVersion: 1,
       strictOutputValidated: true,
       groundingMethod: "strict-source-id-and-exact-critical-evidence-v1",
       modelOutputGrounded: true,
       citationsAddedByCore: false,
       unsupportedClaimsRemoved: 0,
+      provenance: {
+        engine: "local-llm",
+        modelId: "qwen3-4b-official-q4_k_m",
+        fallbackUsed: false,
+        fallbackReason: null,
+        promptVersion: "candor-grounded-v1",
+        generatedAt: "2026-07-14T12:00:01Z",
+        transcript: "must not cross",
+      },
     };
     expect(() => validateCompletedJobResult({
       jobId: "a".repeat(32),
@@ -146,6 +339,43 @@ describe("core operation registry", () => {
       state: "completed",
       result: { ...grounded, strictOutputValidated: false },
     })).toThrow("strict grounding metadata");
+    const canonical = validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "recap",
+      state: "completed",
+      result: grounded,
+    });
+    expect(canonical).not.toHaveProperty("result.provenance.transcript");
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "recap",
+      state: "completed",
+      result: {
+        ...grounded,
+        provenance: {
+          engine: "local-llm",
+          modelId: "qwen3-4b-official-q4_k_m",
+          fallbackUsed: false,
+          fallbackReason: null,
+          generatedAt: "2026-07-14T12:00:01Z",
+        },
+      },
+    })).toThrow("provenance");
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "recap",
+      state: "completed",
+      result: {
+        ...grounded,
+        provenance: {
+          ...grounded.provenance,
+          engine: "heuristic",
+          modelId: null,
+          fallbackUsed: true,
+          fallbackReason: "user-requested",
+        },
+      },
+    })).toThrow("provenance engine");
   });
 
   it("is the complete source for renderer and private allowlists", () => {

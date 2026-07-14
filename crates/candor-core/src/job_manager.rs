@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
@@ -15,24 +15,33 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
+use crate::dictionary_staging::DictionaryStaging;
 use crate::os_key_store;
 
 const MAX_RETAINED_JOBS: usize = 256;
-const JOB_STORE_SCHEMA_VERSION: u32 = 1;
+const JOB_STORE_SCHEMA_VERSION: u32 = 2;
 const JOB_STORE_FILE: &str = "background-jobs.bin";
 const JOB_STORE_BACKUP_FILE: &str = "background-jobs.bin.bak";
 const JOB_STORE_TEMP_FILE: &str = "background-jobs.bin.tmp";
+const JOB_STORE_MIGRATION_BACKUP_FILE: &str = "background-jobs.bin.migration.bak";
 const JOB_STORE_MAGIC: &[u8] = b"candor-jobs-v1\0";
 const JOB_STORE_AAD: &[u8] = b"candor-background-jobs-v1";
 const JOB_STORE_KEY_LABEL: &[u8] = b"candor-background-jobs-v1";
 const NONCE_BYTES: usize = 12;
 const MAX_JOB_STORE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PERSISTED_RESULT_BYTES: usize = 1024 * 1024;
+const ASK_QUESTION_RETENTION_MS: u128 = 24 * 60 * 60 * 1000;
+const TERMINAL_JOB_RETENTION_MS: u128 = 7 * 24 * 60 * 60 * 1000;
+const RETRYABLE_DICTIONARY_STAGING_RETENTION_MS: u128 = 72 * 60 * 60 * 1000;
 
 #[derive(Clone, Debug)]
 pub struct JobManagerError {
     pub code: &'static str,
     pub message: String,
+}
+
+pub struct JobAcknowledgement {
+    pub response: Value,
 }
 
 impl JobManagerError {
@@ -91,12 +100,27 @@ impl JobState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
-pub enum JobQuality {
-    #[default]
+pub enum LegacyJobQuality {
     Fast,
     Best,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiExecutionMode {
+    #[default]
+    LocalLlm,
+    HeuristicFallback,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum AiFallbackPolicy {
+    #[default]
+    AllowDisclosed,
+    RequireLocalLlm,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -114,20 +138,46 @@ pub enum JobDescriptor {
     Recap {
         recording_id: String,
         #[serde(default)]
-        quality: JobQuality,
+        mode: AiExecutionMode,
+        #[serde(default)]
+        fallback_policy: AiFallbackPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "quality")]
+        legacy_quality: Option<LegacyJobQuality>,
     },
     Ask {
         recording_id: String,
         question: String,
         #[serde(default)]
-        quality: JobQuality,
+        mode: AiExecutionMode,
+        #[serde(default)]
+        fallback_policy: AiFallbackPolicy,
+        #[serde(default, skip_serializing_if = "Option::is_none", rename = "quality")]
+        legacy_quality: Option<LegacyJobQuality>,
     },
     Export {
         params: Value,
     },
     DictionaryImport {
-        source_file_name: String,
-        archive_base64: String,
+        #[serde(default)]
+        staging_token: String,
+        #[serde(default)]
+        expected_sha256: String,
+        #[serde(default)]
+        original_display_name: String,
+        #[serde(default)]
+        bytes: u64,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "source_file_name"
+        )]
+        legacy_source_file_name: Option<String>,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "archive_base64"
+        )]
+        legacy_archive_base64: Option<String>,
     },
     DictionaryIndex {
         dictionary_id: String,
@@ -273,7 +323,7 @@ impl JobEntry {
         let mut state = value.state;
         let mut stage = value.stage;
         let mut error = value.error;
-        let mut cancel_requested = false;
+        let mut cancel_requested = state == JobState::Cancelled;
         if !state.terminal() {
             if value.descriptor.is_some() {
                 state = JobState::Paused;
@@ -346,6 +396,9 @@ impl JobEntry {
     }
 
     fn estimated_remaining_ms(&self) -> Option<u128> {
+        if self.state != JobState::Running {
+            return None;
+        }
         let progress = self.progress.as_ref()?;
         let total = progress.total?;
         if progress.completed == 0 || progress.completed >= total {
@@ -367,14 +420,33 @@ impl JobEntry {
     }
 
     fn value(&self, include_result: bool) -> Value {
-        let retryable = self.descriptor.is_some()
-            && (self.state == JobState::Paused
+        let cancelled_dictionary_import = self.state == JobState::Cancelled
+            && matches!(
+                self.descriptor,
+                Some(JobDescriptor::DictionaryImport { .. })
+            );
+        let retryable = !cancelled_dictionary_import
+            && self.descriptor.is_some()
+            && (matches!(self.state, JobState::Paused | JobState::Cancelled)
                 || self
                     .error
                     .as_ref()
                     .and_then(|value| value.get("retryable"))
                     .and_then(Value::as_bool)
                     .unwrap_or(false));
+        let provenance = self
+            .result
+            .as_ref()
+            .and_then(|result| result.get("provenance"))
+            .cloned();
+        let engine = provenance
+            .as_ref()
+            .and_then(|value| value.get("engine"))
+            .cloned();
+        let fallback_used = provenance
+            .as_ref()
+            .and_then(|value| value.get("fallbackUsed"))
+            .cloned();
         json!({
             "jobId": self.job_id,
             "type": self.job_type,
@@ -389,6 +461,9 @@ impl JobEntry {
             "result": if include_result { self.result.clone() } else { None },
             "resultAvailableAfterRestart": self.result_persisted,
             "error": self.error,
+            "engine": engine,
+            "fallbackUsed": fallback_used,
+            "provenance": provenance,
             "cancelRequested": self.cancel_requested,
             "retryCount": self.retry_count,
             "retryable": retryable,
@@ -444,6 +519,15 @@ impl JobContext {
     }
 
     pub fn progress(&self, stage: &str, completed: u64, total: Option<u64>, unit: Option<&str>) {
+        let (completed, total, unit) = match (unit, total) {
+            (Some("stage" | "job"), Some(total)) if total > 0 => (
+                completed.saturating_mul(100) / total,
+                Some(100),
+                Some("percent"),
+            ),
+            (Some("stage" | "job"), _) => (completed.min(100), None, Some("percent")),
+            _ => (completed, total, unit),
+        };
         self.manager.update_progress(
             &self.job_id,
             stage,
@@ -468,10 +552,15 @@ enum WorkerGate {
 impl JobManager {
     #[cfg(test)]
     pub fn new(protocol_version: &'static str) -> Self {
-        Self::build(protocol_version, None)
+        Self::build(protocol_version, None, None)
     }
 
-    pub fn with_roots(protocol_version: &'static str, root: PathBuf, key_root: PathBuf) -> Self {
+    pub fn with_roots_and_staging(
+        protocol_version: &'static str,
+        root: PathBuf,
+        key_root: PathBuf,
+        staging: &DictionaryStaging,
+    ) -> Self {
         Self::build(
             protocol_version,
             Some(JobPersistence {
@@ -480,6 +569,7 @@ impl JobManager {
                 #[cfg(test)]
                 test_key: None,
             }),
+            Some(staging),
         )
     }
 
@@ -496,14 +586,39 @@ impl JobManager {
                 key_root,
                 test_key: Some([0x39; 32]),
             }),
+            None,
         )
     }
 
-    fn build(protocol_version: &'static str, persistence: Option<JobPersistence>) -> Self {
+    #[cfg(test)]
+    pub fn with_test_roots_and_staging(
+        protocol_version: &'static str,
+        root: PathBuf,
+        key_root: PathBuf,
+        staging: &DictionaryStaging,
+    ) -> Self {
+        Self::build(
+            protocol_version,
+            Some(JobPersistence {
+                root,
+                key_root,
+                test_key: Some([0x39; 32]),
+            }),
+            Some(staging),
+        )
+    }
+
+    fn build(
+        protocol_version: &'static str,
+        persistence: Option<JobPersistence>,
+        staging: Option<&DictionaryStaging>,
+    ) -> Self {
         let mut persistence_error = None;
         let mut jobs = HashMap::new();
         if let Some(config) = persistence.as_ref() {
-            match read_job_document(config) {
+            match read_job_document_with_recovery(config)
+                .and_then(|document| prepare_job_document(config, document, staging))
+            {
                 Ok(document) => {
                     for value in document.jobs {
                         if validate_job_id(&value.job_id).is_ok() {
@@ -591,11 +706,7 @@ impl JobManager {
             updated_at_ms: created_at_ms,
             started_at_ms: None,
             stage: Some("queued".to_string()),
-            progress: Some(JobProgress {
-                completed: 0,
-                total: Some(1),
-                unit: Some("job".to_string()),
-            }),
+            progress: None,
             result: None,
             result_persisted: false,
             error: None,
@@ -812,6 +923,9 @@ impl JobManager {
     }
 
     pub fn cancel_all(&self) -> Result<Value, JobManagerError> {
+        let active_workers = self.inner.workers.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
         let ids = {
             let mut jobs = self.inner.jobs.lock().map_err(|_| {
                 JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
@@ -822,14 +936,20 @@ impl JobManager {
                 entry.preempt_requested = false;
                 entry.shutdown_pause_requested = false;
                 entry.cancellation.store(true, Ordering::SeqCst);
-                entry.state = JobState::Cancelled;
-                entry.stage = Some("cancelled".to_string());
+                if active_workers.contains(&entry.job_id) {
+                    entry.state = JobState::Cancelling;
+                    entry.stage = Some("cancelling".to_string());
+                } else {
+                    entry.state = JobState::Cancelled;
+                    entry.stage = Some("cancelled".to_string());
+                }
                 entry.updated_at = timestamp();
                 entry.updated_at_ms = now_ms();
                 ids.push(entry.job_id.clone());
             }
             ids
         };
+        drop(active_workers);
         self.persist()?;
         self.inner.priority_changed.notify_all();
         for job_id in &ids {
@@ -900,7 +1020,10 @@ impl JobManager {
             let entry = jobs
                 .get_mut(job_id)
                 .ok_or_else(|| JobManagerError::new("JOB_NOT_FOUND", "local job was not found"))?;
-            if !entry.state.terminal() && entry.state != JobState::Paused {
+            if !matches!(
+                entry.state,
+                JobState::Failed | JobState::Cancelled | JobState::Paused
+            ) {
                 return Err(JobManagerError::new(
                     "JOB_NOT_RETRYABLE",
                     "only failed, cancelled, or paused work can be retried",
@@ -911,11 +1034,7 @@ impl JobManager {
             })?;
             entry.state = JobState::Queued;
             entry.stage = Some("queued-for-retry".to_string());
-            entry.progress = Some(JobProgress {
-                completed: 0,
-                total: Some(1),
-                unit: Some("job".to_string()),
-            });
+            entry.progress = None;
             entry.result = None;
             entry.result_persisted = false;
             entry.error = None;
@@ -934,7 +1053,7 @@ impl JobManager {
         self.get(job_id)
     }
 
-    pub fn acknowledge(&self, job_id: &str) -> Result<Value, JobManagerError> {
+    pub fn acknowledge(&self, job_id: &str) -> Result<JobAcknowledgement, JobManagerError> {
         validate_job_id(job_id)?;
         let removed = {
             let mut jobs = self.inner.jobs.lock().map_err(|_| {
@@ -952,11 +1071,221 @@ impl JobManager {
             jobs.remove(job_id).is_some()
         };
         self.persist_best_effort();
-        Ok(json!({
-            "jobId": job_id,
-            "acknowledged": removed,
-            "rawPathExposed": false
-        }))
+        Ok(JobAcknowledgement {
+            response: json!({
+                "jobId": job_id,
+                "acknowledged": removed,
+                "rawPathExposed": false
+            }),
+        })
+    }
+
+    pub fn dictionary_staging_references(&self) -> HashSet<String> {
+        self.inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter_map(|entry| match entry.descriptor.as_ref() {
+                Some(JobDescriptor::DictionaryImport { staging_token, .. })
+                    if !staging_token.is_empty() =>
+                {
+                    Some(staging_token.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn dictionary_staging_reference(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<String>, JobManagerError> {
+        validate_job_id(job_id)?;
+        let jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        Ok(jobs
+            .get(job_id)
+            .and_then(|entry| match entry.descriptor.as_ref() {
+                Some(JobDescriptor::DictionaryImport { staging_token, .. }) => {
+                    Some(staging_token.clone())
+                }
+                _ => None,
+            }))
+    }
+
+    pub fn terminal_dictionary_staging_reference(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<String>, JobManagerError> {
+        validate_job_id(job_id)?;
+        let jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        let entry = jobs
+            .get(job_id)
+            .ok_or_else(|| JobManagerError::new("JOB_NOT_FOUND", "local job was not found"))?;
+        if !entry.state.terminal() {
+            return Err(JobManagerError::new(
+                "JOB_NOT_TERMINAL",
+                "a running local job cannot be acknowledged",
+            ));
+        }
+        Ok(match entry.descriptor.as_ref() {
+            Some(JobDescriptor::DictionaryImport { staging_token, .. }) => {
+                Some(staging_token.clone())
+            }
+            _ => None,
+        })
+    }
+
+    pub fn discard_dictionary_staging(&self, job_id: &str) -> Option<String> {
+        let token = {
+            // Cleanup follows a successful physical delete. Recovering a poisoned
+            // mutex here prevents a deleted staging file from retaining a ghost
+            // descriptor until the next retention sweep.
+            let mut jobs = self
+                .inner
+                .jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let entry = jobs.get_mut(job_id)?;
+            match entry.descriptor.take() {
+                Some(JobDescriptor::DictionaryImport { staging_token, .. }) => Some(staging_token),
+                Some(descriptor) => {
+                    entry.descriptor = Some(descriptor);
+                    None
+                }
+                None => None,
+            }
+        };
+        if token.is_some() {
+            self.persist_best_effort();
+            self.emit(job_id);
+        }
+        token
+    }
+
+    pub fn discard_all_dictionary_staging(&self) -> Vec<String> {
+        let (tokens, changed_job_ids) = {
+            let mut jobs = self
+                .inner
+                .jobs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut tokens = Vec::new();
+            let mut changed_job_ids = Vec::new();
+            for (job_id, entry) in jobs.iter_mut() {
+                if let Some(JobDescriptor::DictionaryImport { staging_token, .. }) =
+                    entry.descriptor.as_ref()
+                {
+                    tokens.push(staging_token.clone());
+                    entry.descriptor = None;
+                    changed_job_ids.push(job_id.clone());
+                }
+            }
+            (tokens, changed_job_ids)
+        };
+        if !tokens.is_empty() {
+            self.persist_best_effort();
+            for job_id in changed_job_ids {
+                self.emit(&job_id);
+            }
+        }
+        tokens
+    }
+
+    pub fn apply_retention(&self) -> Result<Vec<String>, JobManagerError> {
+        let now = now_ms();
+        let (tokens, changed) = {
+            let mut jobs = self.inner.jobs.lock().map_err(|_| {
+                JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+            })?;
+            let mut tokens = Vec::new();
+            let mut changed = false;
+            let expired_ids = jobs
+                .iter()
+                .filter(|(_, entry)| {
+                    entry.state.terminal()
+                        && now.saturating_sub(entry.updated_at_ms) >= TERMINAL_JOB_RETENTION_MS
+                })
+                .map(|(job_id, _)| job_id.clone())
+                .collect::<Vec<_>>();
+            for job_id in expired_ids {
+                if let Some(entry) = jobs.remove(&job_id) {
+                    if let Some(JobDescriptor::DictionaryImport { staging_token, .. }) =
+                        entry.descriptor
+                    {
+                        tokens.push(staging_token);
+                    }
+                    changed = true;
+                }
+            }
+            for entry in jobs.values_mut() {
+                let lifetime_age = now.saturating_sub(entry.created_at_ms);
+                if lifetime_age >= ASK_QUESTION_RETENTION_MS {
+                    if let Some(JobDescriptor::Ask { question, .. }) = entry.descriptor.as_mut() {
+                        if !question.is_empty() {
+                            question.clear();
+                            changed = true;
+                        }
+                    }
+                    if let Some(result) = entry.result.as_mut().and_then(Value::as_object_mut) {
+                        if result.get("question").is_some_and(|value| !value.is_null()) {
+                            result.insert("question".to_string(), Value::Null);
+                            changed = true;
+                        }
+                    }
+                }
+                let dictionary_cancelled = entry.state == JobState::Cancelled
+                    && matches!(
+                        entry.descriptor,
+                        Some(JobDescriptor::DictionaryImport { .. })
+                    );
+                if dictionary_cancelled {
+                    if let Some(JobDescriptor::DictionaryImport { staging_token, .. }) =
+                        entry.descriptor.take()
+                    {
+                        tokens.push(staging_token);
+                        changed = true;
+                    }
+                    continue;
+                }
+                let dictionary_expired = lifetime_age >= RETRYABLE_DICTIONARY_STAGING_RETENTION_MS
+                    && matches!(entry.state, JobState::Paused | JobState::Failed)
+                    && matches!(
+                        entry.descriptor,
+                        Some(JobDescriptor::DictionaryImport { .. })
+                    );
+                if dictionary_expired {
+                    if let Some(JobDescriptor::DictionaryImport { staging_token, .. }) =
+                        entry.descriptor.take()
+                    {
+                        tokens.push(staging_token);
+                    }
+                    entry.state = JobState::Failed;
+                    entry.stage = Some("staging-expired".to_string());
+                    entry.error = Some(job_error_value(
+                        &entry.job_id,
+                        &entry.job_type,
+                        JobFailure::new(
+                            "DICTIONARY_STAGING_EXPIRED",
+                            "the staged dictionary package expired and must be selected again",
+                            false,
+                        ),
+                    ));
+                    entry.updated_at = timestamp();
+                    entry.updated_at_ms = now;
+                    changed = true;
+                }
+            }
+            (tokens, changed)
+        };
+        if changed {
+            self.persist()?;
+        }
+        Ok(tokens)
     }
 
     pub fn set_recording_active(&self, active: bool) {
@@ -1070,7 +1399,9 @@ impl JobManager {
                 }
             } else {
                 match result {
-                    Ok(value) => manager.finish_completed(&job_id, value),
+                    Ok(value) => {
+                        manager.finish_completed(&job_id, value);
+                    }
                     Err(error) => manager.finish_failed(&job_id, error),
                 }
             }
@@ -1149,9 +1480,11 @@ impl JobManager {
                 }
                 match result {
                     Ok(value) => {
-                        manager.finish_completed(&job_id, value);
-                        if let Some(follow_up) = descriptor.follow_up() {
-                            let _ = manager.submit_follow_up(&job_id, follow_up, executor.clone());
+                        if manager.finish_completed(&job_id, value) {
+                            if let Some(follow_up) = descriptor.follow_up() {
+                                let _ =
+                                    manager.submit_follow_up(&job_id, follow_up, executor.clone());
+                            }
                         }
                     }
                     Err(error) => manager.finish_failed(&job_id, error),
@@ -1356,35 +1689,63 @@ impl JobManager {
         });
     }
 
-    fn finish_completed(&self, job_id: &str, result: Value) {
+    fn finish_completed(&self, job_id: &str, result: Value) -> bool {
+        let mut completed = false;
         self.mutate(job_id, |entry| {
-            if entry.state == JobState::Cancelled {
+            if entry.cancel_requested
+                || matches!(entry.state, JobState::Cancelling | JobState::Cancelled)
+            {
+                finish_entry_cancelled(entry);
                 return;
             }
             entry.state = JobState::Completed;
             entry.stage = Some("completed".to_string());
             entry.progress = Some(JobProgress {
-                completed: 1,
-                total: Some(1),
-                unit: Some("job".to_string()),
+                completed: 100,
+                total: Some(100),
+                unit: Some("percent".to_string()),
             });
             entry.result = Some(result);
+            if matches!(
+                entry.descriptor,
+                Some(JobDescriptor::DictionaryImport { .. })
+            ) {
+                entry.descriptor = None;
+            }
             entry.error = None;
             entry.cancel_requested = false;
             entry.preempt_requested = false;
             entry.updated_at = timestamp();
             entry.updated_at_ms = now_ms();
+            completed = true;
         });
+        completed
     }
 
     fn finish_failed(&self, job_id: &str, failure: JobFailure) {
         self.mutate(job_id, |entry| {
-            if entry.state == JobState::Cancelled {
+            if entry.cancel_requested
+                || matches!(entry.state, JobState::Cancelling | JobState::Cancelled)
+            {
+                finish_entry_cancelled(entry);
                 return;
             }
             entry.state = JobState::Failed;
             entry.stage = Some("failed".to_string());
+            let retryable = failure.retryable && entry.descriptor.is_some();
+            let failure = JobFailure {
+                retryable,
+                ..failure
+            };
             entry.error = Some(job_error_value(&entry.job_id, &entry.job_type, failure));
+            if !retryable
+                && matches!(
+                    entry.descriptor,
+                    Some(JobDescriptor::DictionaryImport { .. })
+                )
+            {
+                entry.descriptor = None;
+            }
             entry.cancel_requested = false;
             entry.preempt_requested = false;
             entry.updated_at = timestamp();
@@ -1394,12 +1755,7 @@ impl JobManager {
 
     fn finish_cancelled(&self, job_id: &str) {
         self.mutate(job_id, |entry| {
-            entry.state = JobState::Cancelled;
-            entry.stage = Some("cancelled".to_string());
-            entry.cancel_requested = true;
-            entry.preempt_requested = false;
-            entry.updated_at = timestamp();
-            entry.updated_at_ms = now_ms();
+            finish_entry_cancelled(entry);
         });
     }
 
@@ -1549,6 +1905,19 @@ impl JobManager {
     }
 }
 
+fn finish_entry_cancelled(entry: &mut JobEntry) {
+    entry.state = JobState::Cancelled;
+    entry.stage = Some("cancelled".to_string());
+    entry.result = None;
+    entry.result_persisted = false;
+    entry.error = None;
+    entry.cancel_requested = true;
+    entry.preempt_requested = false;
+    entry.shutdown_pause_requested = false;
+    entry.updated_at = timestamp();
+    entry.updated_at_ms = now_ms();
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreEvent<'a> {
@@ -1601,12 +1970,270 @@ fn job_store_capacity_error() -> JobManagerError {
     )
 }
 
+fn prepare_job_document(
+    config: &JobPersistence,
+    mut document: JobStoreDocument,
+    staging: Option<&DictionaryStaging>,
+) -> Result<JobStoreDocument, JobManagerError> {
+    if document.schema_version == JOB_STORE_SCHEMA_VERSION {
+        validate_current_job_document(&document, staging)?;
+        let migration_backup = config.root.join(JOB_STORE_MIGRATION_BACKUP_FILE);
+        if migration_backup.exists() {
+            let _ = fs::remove_file(migration_backup);
+        }
+        return Ok(document);
+    }
+    if document.schema_version != 1 {
+        return Err(JobManagerError::new(
+            "JOB_STORE_SCHEMA_UNSUPPORTED",
+            "local job state uses an unsupported schema",
+        ));
+    }
+    let staging = staging.ok_or_else(|| {
+        JobManagerError::new(
+            "JOB_STORE_MIGRATION_REQUIRED",
+            "local background tasks require secure dictionary staging migration",
+        )
+    })?;
+    let target = config.root.join(JOB_STORE_FILE);
+    let migration_backup = config.root.join(JOB_STORE_MIGRATION_BACKUP_FILE);
+    let _ = fs::remove_file(&migration_backup);
+    fs::copy(&target, &migration_backup).map_err(|_| {
+        JobManagerError::new(
+            "JOB_STORE_MIGRATION_BACKUP_FAILED",
+            "local background task migration could not create a rollback backup",
+        )
+    })?;
+
+    let mut staged_tokens = Vec::new();
+    let migration_result = (|| {
+        for entry in &mut document.jobs {
+            if let Some(descriptor) = entry.descriptor.as_mut() {
+                migrate_descriptor(descriptor, staging, false, &mut staged_tokens)?;
+            }
+        }
+        document.schema_version = JOB_STORE_SCHEMA_VERSION;
+        write_job_document(config, &document)?;
+        let verified = read_job_document(config)?;
+        if verified.schema_version != JOB_STORE_SCHEMA_VERSION {
+            return Err(JobManagerError::new(
+                "JOB_STORE_MIGRATION_VERIFY_FAILED",
+                "local background task migration did not verify",
+            ));
+        }
+        validate_current_job_document(&verified, Some(staging))?;
+        Ok(verified)
+    })();
+
+    match migration_result {
+        Ok(verified) => Ok(verified),
+        Err(error) => {
+            for token in staged_tokens {
+                let _ = staging.delete(&token);
+            }
+            let _ = fs::remove_file(&target);
+            if fs::rename(&migration_backup, &target).is_err() {
+                return Err(JobManagerError::new(
+                    "JOB_STORE_MIGRATION_ROLLBACK_FAILED",
+                    "local background task migration failed and its rollback could not be restored",
+                ));
+            }
+            Err(error)
+        }
+    }
+}
+
+fn validate_current_job_document(
+    document: &JobStoreDocument,
+    staging: Option<&DictionaryStaging>,
+) -> Result<(), JobManagerError> {
+    for entry in &document.jobs {
+        if let Some(descriptor) = entry.descriptor.as_ref() {
+            validate_current_descriptor(descriptor, staging)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_current_descriptor(
+    descriptor: &JobDescriptor,
+    staging: Option<&DictionaryStaging>,
+) -> Result<(), JobManagerError> {
+    match descriptor {
+        JobDescriptor::Transcription { follow_up, .. } => {
+            if let Some(follow_up) = follow_up.as_deref() {
+                validate_current_descriptor(follow_up, staging)?;
+            }
+        }
+        JobDescriptor::DictionaryImport {
+            staging_token,
+            expected_sha256,
+            original_display_name,
+            bytes,
+            legacy_source_file_name,
+            legacy_archive_base64,
+        } => {
+            if legacy_source_file_name.is_some() || legacy_archive_base64.is_some() {
+                return Err(JobManagerError::new(
+                    "JOB_STORE_LEGACY_DICTIONARY_DATA_REJECTED",
+                    "current local background task state contained a legacy dictionary archive",
+                ));
+            }
+            let staging = staging.ok_or_else(|| {
+                JobManagerError::new(
+                    "JOB_STORE_DICTIONARY_STAGING_UNAVAILABLE",
+                    "secure dictionary staging is required by saved background work",
+                )
+            })?;
+            staging
+                .validate_descriptor(
+                    staging_token,
+                    expected_sha256,
+                    *bytes,
+                    original_display_name,
+                )
+                .map_err(|_| {
+                    JobManagerError::new(
+                        "JOB_STORE_DICTIONARY_DESCRIPTOR_INVALID",
+                        "saved dictionary staging metadata is invalid",
+                    )
+                })?;
+        }
+        JobDescriptor::Recap { .. }
+        | JobDescriptor::Ask { .. }
+        | JobDescriptor::Export { .. }
+        | JobDescriptor::DictionaryIndex { .. } => {}
+    }
+    Ok(())
+}
+
+fn migrate_descriptor(
+    descriptor: &mut JobDescriptor,
+    staging: &DictionaryStaging,
+    is_follow_up: bool,
+    staged_tokens: &mut Vec<String>,
+) -> Result<(), JobManagerError> {
+    match descriptor {
+        JobDescriptor::Transcription { follow_up, .. } => {
+            if let Some(follow_up) = follow_up.as_deref_mut() {
+                migrate_descriptor(follow_up, staging, true, staged_tokens)?;
+            }
+        }
+        JobDescriptor::Recap {
+            mode,
+            fallback_policy,
+            legacy_quality,
+            ..
+        } => {
+            if let Some(quality) = legacy_quality.take() {
+                *mode = match (quality, is_follow_up) {
+                    (LegacyJobQuality::Fast, false) => AiExecutionMode::HeuristicFallback,
+                    _ => AiExecutionMode::LocalLlm,
+                };
+                *fallback_policy = AiFallbackPolicy::AllowDisclosed;
+            }
+        }
+        JobDescriptor::Ask {
+            mode,
+            fallback_policy,
+            legacy_quality,
+            ..
+        } => {
+            if let Some(quality) = legacy_quality.take() {
+                *mode = match quality {
+                    LegacyJobQuality::Fast => AiExecutionMode::HeuristicFallback,
+                    LegacyJobQuality::Best => AiExecutionMode::LocalLlm,
+                };
+                *fallback_policy = AiFallbackPolicy::AllowDisclosed;
+            }
+        }
+        JobDescriptor::DictionaryImport {
+            staging_token,
+            expected_sha256,
+            original_display_name,
+            bytes,
+            legacy_source_file_name,
+            legacy_archive_base64,
+        } => {
+            if staging_token.is_empty() {
+                let display_name = legacy_source_file_name.take().ok_or_else(|| {
+                    JobManagerError::new(
+                        "JOB_STORE_MIGRATION_INVALID",
+                        "a queued dictionary import omitted its display name",
+                    )
+                })?;
+                let archive = legacy_archive_base64.take().ok_or_else(|| {
+                    JobManagerError::new(
+                        "JOB_STORE_MIGRATION_INVALID",
+                        "a queued dictionary import omitted its package",
+                    )
+                })?;
+                let staged = staging
+                    .stage_base64(&display_name, &archive)
+                    .map_err(|error| {
+                        let code = if error.code == "DICTIONARY_ARCHIVE_TOO_LARGE" {
+                            "JOB_STORE_MIGRATION_ARCHIVE_TOO_LARGE"
+                        } else {
+                            error.code
+                        };
+                        JobManagerError::new(code, error.message)
+                    })?;
+                staged_tokens.push(staged.staging_token.clone());
+                *staging_token = staged.staging_token;
+                *expected_sha256 = staged.expected_sha256;
+                *original_display_name = staged.original_display_name;
+                *bytes = staged.bytes;
+            } else {
+                *legacy_source_file_name = None;
+                *legacy_archive_base64 = None;
+            }
+        }
+        JobDescriptor::Export { .. } | JobDescriptor::DictionaryIndex { .. } => {}
+    }
+    Ok(())
+}
+
 fn read_job_document(config: &JobPersistence) -> Result<JobStoreDocument, JobManagerError> {
     let target = config.root.join(JOB_STORE_FILE);
     if !target.exists() {
         return Ok(JobStoreDocument::default());
     }
-    let metadata = fs::metadata(&target).map_err(|_| {
+    read_job_document_from_path(config, &target)
+}
+
+fn read_job_document_with_recovery(
+    config: &JobPersistence,
+) -> Result<JobStoreDocument, JobManagerError> {
+    let target = config.root.join(JOB_STORE_FILE);
+    let primary = if target.exists() {
+        match read_job_document_from_path(config, &target) {
+            Ok(document) => return Ok(document),
+            Err(error) => Some(error),
+        }
+    } else {
+        None
+    };
+
+    for backup_name in [JOB_STORE_MIGRATION_BACKUP_FILE, JOB_STORE_BACKUP_FILE] {
+        let backup = config.root.join(backup_name);
+        if !backup.exists() || read_job_document_from_path(config, &backup).is_err() {
+            continue;
+        }
+        restore_job_store_backup(config, &backup)?;
+        return read_job_document_from_path(config, &target);
+    }
+
+    match primary {
+        Some(error) => Err(error),
+        None => Ok(JobStoreDocument::default()),
+    }
+}
+
+fn read_job_document_from_path(
+    config: &JobPersistence,
+    target: &Path,
+) -> Result<JobStoreDocument, JobManagerError> {
+    let metadata = fs::metadata(target).map_err(|_| {
         JobManagerError::new(
             "JOB_STORE_READ_FAILED",
             "local job state could not be inspected",
@@ -1619,7 +2246,7 @@ fn read_job_document(config: &JobPersistence) -> Result<JobStoreDocument, JobMan
         ));
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(&target)
+    File::open(target)
         .and_then(|mut file| file.read_to_end(&mut bytes))
         .map_err(|_| {
             JobManagerError::new("JOB_STORE_READ_FAILED", "local job state could not be read")
@@ -1655,7 +2282,7 @@ fn read_job_document(config: &JobPersistence) -> Result<JobStoreDocument, JobMan
         })?;
     let document: JobStoreDocument = serde_json::from_slice(&plaintext)
         .map_err(|_| JobManagerError::new("JOB_STORE_CORRUPT", "local job state is not valid"))?;
-    if document.schema_version != JOB_STORE_SCHEMA_VERSION
+    if !matches!(document.schema_version, 1 | JOB_STORE_SCHEMA_VERSION)
         || document.jobs.len() > MAX_RETAINED_JOBS
     {
         return Err(JobManagerError::new(
@@ -1664,6 +2291,52 @@ fn read_job_document(config: &JobPersistence) -> Result<JobStoreDocument, JobMan
         ));
     }
     Ok(document)
+}
+
+fn restore_job_store_backup(config: &JobPersistence, backup: &Path) -> Result<(), JobManagerError> {
+    fs::create_dir_all(&config.root).map_err(|_| {
+        JobManagerError::new(
+            "JOB_STORE_RECOVERY_FAILED",
+            "local job recovery storage could not be created",
+        )
+    })?;
+    let target = config.root.join(JOB_STORE_FILE);
+    let temporary = config.root.join(".background-jobs.recovery.tmp");
+    let _ = fs::remove_file(&temporary);
+    fs::copy(backup, &temporary).map_err(|_| {
+        JobManagerError::new(
+            "JOB_STORE_RECOVERY_FAILED",
+            "local job state could not be restored from its rollback backup",
+        )
+    })?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&temporary)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| {
+            let _ = fs::remove_file(&temporary);
+            JobManagerError::new(
+                "JOB_STORE_RECOVERY_FAILED",
+                "restored local job state could not be committed",
+            )
+        })?;
+    if target.exists() {
+        fs::remove_file(&target).map_err(|_| {
+            let _ = fs::remove_file(&temporary);
+            JobManagerError::new(
+                "JOB_STORE_RECOVERY_FAILED",
+                "the interrupted local job state could not be replaced",
+            )
+        })?;
+    }
+    fs::rename(&temporary, &target).map_err(|_| {
+        let _ = fs::remove_file(&temporary);
+        JobManagerError::new(
+            "JOB_STORE_RECOVERY_FAILED",
+            "the restored local job state could not be promoted",
+        )
+    })
 }
 
 fn write_job_document(
@@ -1719,9 +2392,16 @@ fn write_job_document(
     let temporary = config.root.join(JOB_STORE_TEMP_FILE);
     let target = config.root.join(JOB_STORE_FILE);
     let backup = config.root.join(JOB_STORE_BACKUP_FILE);
+    if temporary.exists() {
+        fs::remove_file(&temporary).map_err(|_| {
+            JobManagerError::new(
+                "JOB_STORE_WRITE_FAILED",
+                "stale local job staging could not be removed",
+            )
+        })?;
+    }
     let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
         .open(&temporary)
         .map_err(|_| {
@@ -1850,6 +2530,9 @@ fn job_type_priority(job_type: &str) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use std::path::Path;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn test_root(label: &str) -> PathBuf {
@@ -1907,21 +2590,323 @@ mod tests {
         })
     }
 
+    fn test_persistence(root: &Path) -> JobPersistence {
+        JobPersistence {
+            root: root.join("jobs"),
+            key_root: root.join("keys"),
+            test_key: Some([0x39; 32]),
+        }
+    }
+
+    fn persisted_entry(job_id: &str, descriptor: JobDescriptor) -> PersistedJobEntry {
+        PersistedJobEntry {
+            job_id: job_id.to_string(),
+            job_type: descriptor.job_type().to_string(),
+            state: JobState::Paused,
+            created_at: timestamp(),
+            updated_at: timestamp(),
+            created_at_ms: now_ms(),
+            updated_at_ms: now_ms(),
+            started_at_ms: None,
+            stage: Some("restart-recovery".to_string()),
+            progress: None,
+            result: None,
+            result_persisted: false,
+            error: None,
+            cancel_requested: false,
+            exclusive_inference: descriptor.exclusive_inference(),
+            descriptor: Some(descriptor),
+            retry_count: 0,
+            parent_job_id: None,
+            follow_up_queued: false,
+        }
+    }
+
+    #[test]
+    fn persisted_cancelled_task_retains_cancellation_semantics() {
+        let descriptor = JobDescriptor::Recap {
+            recording_id: "recording-cancelled".to_string(),
+            mode: AiExecutionMode::LocalLlm,
+            fallback_policy: AiFallbackPolicy::RequireLocalLlm,
+            legacy_quality: None,
+        };
+        let mut persisted = persisted_entry(&"a".repeat(32), descriptor);
+        persisted.state = JobState::Cancelled;
+        persisted.stage = Some("cancelled".to_string());
+        persisted.cancel_requested = false;
+
+        let restored = JobEntry::from_persisted(persisted).value(false);
+
+        assert_eq!(restored["state"], "cancelled");
+        assert_eq!(restored["cancelRequested"], true);
+        assert_eq!(restored["terminal"], true);
+    }
+
     #[test]
     fn jobs_remain_queryable_until_acknowledged() {
         let manager = JobManager::new("test-protocol");
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
         let accepted = manager
-            .submit("export", false, |context| {
+            .submit("export", false, move |context| {
                 context.progress("rendering", 1, Some(2), Some("stage"));
+                progress_tx.send(()).expect("progress signal");
+                release_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("completion release");
                 Ok(json!({ "format": "markdown", "rawPathExposed": false }))
             })
             .expect("accepted job");
         let job_id = accepted["jobId"].as_str().expect("job id");
+        progress_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("progress update");
+        let running = manager.get(job_id).expect("running job status");
+        assert_eq!(running["progress"]["completed"], 50);
+        assert_eq!(running["progress"]["total"], 100);
+        assert_eq!(running["progress"]["unit"], "percent");
+        release_tx.send(()).expect("release completion");
         let completed = wait_for_terminal(&manager, job_id);
         assert_eq!(completed["state"], "completed");
         assert_eq!(completed["result"]["format"], "markdown");
-        assert_eq!(manager.acknowledge(job_id).unwrap()["acknowledged"], true);
+        assert_eq!(completed["progress"]["completed"], 100);
+        assert_eq!(completed["progress"]["total"], 100);
+        assert_eq!(completed["progress"]["unit"], "percent");
+        assert_eq!(
+            manager.acknowledge(job_id).unwrap().response["acknowledged"],
+            true
+        );
         assert_eq!(manager.get(job_id).unwrap_err().code, "JOB_NOT_FOUND");
+    }
+
+    #[test]
+    fn legacy_stage_progress_without_a_positive_total_remains_wire_safe() {
+        let manager = JobManager::new("test-protocol");
+        let (progress_tx, progress_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let accepted = manager
+            .submit("export", false, move |context| {
+                context.progress("preparing", 7, None, Some("stage"));
+                progress_tx.send(()).expect("progress signal");
+                release_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("completion release");
+                Ok(json!({ "format": "markdown", "rawPathExposed": false }))
+            })
+            .expect("accepted job");
+        let job_id = accepted["jobId"].as_str().expect("job id");
+        progress_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("progress update");
+
+        let running = manager.get(job_id).expect("running job status");
+        assert_eq!(running["progress"]["completed"], 7);
+        assert_eq!(running["progress"]["total"], Value::Null);
+        assert_eq!(running["progress"]["unit"], "percent");
+
+        release_tx.send(()).expect("release completion");
+        wait_for_terminal(&manager, job_id);
+    }
+
+    #[test]
+    fn completed_work_cannot_be_retried() {
+        let manager = JobManager::new("test-protocol");
+        let (job_id, _) = manager
+            .insert_job(
+                "export",
+                false,
+                Some(JobDescriptor::Export {
+                    params: json!({ "format": "markdown" }),
+                }),
+                None,
+            )
+            .expect("export job");
+        manager.finish_completed(
+            &job_id,
+            json!({ "format": "markdown", "rawPathExposed": false }),
+        );
+
+        let error = manager
+            .retry(&job_id, executor(Arc::new(AtomicUsize::new(0))))
+            .expect_err("completed work must not restart");
+
+        assert_eq!(error.code, "JOB_NOT_RETRYABLE");
+        assert_eq!(manager.get(&job_id).unwrap()["state"], "completed");
+    }
+
+    #[test]
+    fn retryability_requires_a_restart_descriptor() {
+        let manager = JobManager::new("test-protocol");
+        let (job_id, _) = manager
+            .insert_job("export", false, None, None)
+            .expect("nonrestartable job");
+
+        manager.finish_failed(
+            &job_id,
+            JobFailure::new("EXPORT_FAILED", "local export failed", true),
+        );
+
+        let failed = manager.get(&job_id).expect("failed job status");
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["retryable"], false);
+        assert_eq!(failed["error"]["retryable"], false);
+    }
+
+    #[test]
+    fn acknowledging_terminal_dictionary_work_removes_the_job() {
+        let manager = JobManager::new("test-protocol");
+        let staging_token = "a".repeat(64);
+        let (job_id, _) = manager
+            .insert_job(
+                "dictionary-import",
+                false,
+                Some(JobDescriptor::DictionaryImport {
+                    staging_token: staging_token.clone(),
+                    expected_sha256: "b".repeat(64),
+                    original_display_name: "terms.candordict".to_string(),
+                    bytes: 128,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                }),
+                None,
+            )
+            .expect("dictionary job");
+        manager.cancel_all().expect("cancel queued job");
+
+        assert_eq!(
+            manager
+                .terminal_dictionary_staging_reference(&job_id)
+                .expect("terminal staging reference")
+                .as_deref(),
+            Some(staging_token.as_str())
+        );
+
+        let acknowledgement = manager.acknowledge(&job_id).expect("acknowledge job");
+
+        assert_eq!(acknowledgement.response["acknowledged"], true);
+        assert_eq!(manager.get(&job_id).unwrap_err().code, "JOB_NOT_FOUND");
+    }
+
+    #[test]
+    fn deleting_cancelled_dictionary_staging_removes_retryability() {
+        let manager = JobManager::new("test-protocol");
+        let staging_token = "c".repeat(64);
+        let (job_id, _) = manager
+            .insert_job(
+                "dictionary-import",
+                false,
+                Some(JobDescriptor::DictionaryImport {
+                    staging_token: staging_token.clone(),
+                    expected_sha256: "d".repeat(64),
+                    original_display_name: "cancelled.candordict".to_string(),
+                    bytes: 128,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                }),
+                None,
+            )
+            .expect("dictionary job");
+        manager.cancel_all().expect("cancel queued job");
+
+        let deleted_token = manager.discard_dictionary_staging(&job_id);
+        let cancelled = manager.get(&job_id).expect("cancelled task");
+
+        assert_eq!(deleted_token.as_deref(), Some(staging_token.as_str()));
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["retryable"], false);
+        assert_eq!(
+            manager
+                .retry(&job_id, executor(Arc::new(AtomicUsize::new(0))))
+                .expect_err("deleted staging cannot be retried")
+                .code,
+            "JOB_NOT_RETRYABLE"
+        );
+    }
+
+    #[test]
+    fn dictionary_cleanup_recovers_a_poisoned_job_lock_after_physical_delete() {
+        let manager = JobManager::new("test-protocol");
+        let staging_token = "9".repeat(64);
+        let (job_id, _) = manager
+            .insert_job(
+                "dictionary-import",
+                false,
+                Some(JobDescriptor::DictionaryImport {
+                    staging_token: staging_token.clone(),
+                    expected_sha256: "8".repeat(64),
+                    original_display_name: "cleanup.candordict".to_string(),
+                    bytes: 128,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                }),
+                None,
+            )
+            .expect("dictionary job");
+        let inner = manager.inner.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = inner.jobs.lock().expect("job lock");
+            panic!("poison job lock for cleanup regression");
+        });
+
+        let deleted_token = manager.discard_dictionary_staging(&job_id);
+        let jobs = manager
+            .inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        assert_eq!(deleted_token.as_deref(), Some(staging_token.as_str()));
+        assert!(jobs
+            .get(&job_id)
+            .expect("job remains available")
+            .descriptor
+            .is_none());
+    }
+
+    #[test]
+    fn active_dictionary_cancellation_preserves_token_for_immediate_cleanup() {
+        let manager = JobManager::new("test-protocol");
+        let staging_token = "e".repeat(64);
+        let accepted = manager
+            .submit_descriptor(
+                JobDescriptor::DictionaryImport {
+                    staging_token: staging_token.clone(),
+                    expected_sha256: "f".repeat(64),
+                    original_display_name: "active.candordict".to_string(),
+                    bytes: 128,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                },
+                Arc::new(|_, context| {
+                    while !context.cancelled() {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(json!({ "rawPathExposed": false }))
+                }),
+            )
+            .expect("active dictionary job");
+        let job_id = accepted["jobId"].as_str().expect("job id");
+        wait_for_state(&manager, job_id, "running");
+
+        assert_eq!(
+            manager
+                .terminal_dictionary_staging_reference(job_id)
+                .expect_err("active staging cannot be acknowledged")
+                .code,
+            "JOB_NOT_TERMINAL"
+        );
+
+        manager.cancel(job_id).expect("cancel active job");
+        let cancelled = wait_for_terminal(&manager, job_id);
+        let deleted_token = manager.discard_dictionary_staging(job_id);
+
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["retryable"], false);
+        assert_eq!(deleted_token.as_deref(), Some(staging_token.as_str()));
+        assert_eq!(
+            manager.get(job_id).expect("updated task")["retryable"],
+            false
+        );
     }
 
     #[test]
@@ -1979,6 +2964,79 @@ mod tests {
     }
 
     #[test]
+    fn cancel_all_reports_cancelling_until_an_active_worker_stops() {
+        let manager = JobManager::new("test-protocol");
+        let (job_id, _) = manager
+            .insert_job(
+                "export",
+                false,
+                Some(JobDescriptor::Export {
+                    params: json!({ "format": "pdf" }),
+                }),
+                None,
+            )
+            .expect("insert active fixture");
+        assert!(manager.claim_worker(&job_id));
+
+        manager.cancel_all().expect("request cancellation");
+        assert_eq!(manager.get(&job_id).unwrap()["state"], "cancelling");
+        assert_eq!(manager.get(&job_id).unwrap()["terminal"], false);
+
+        manager.finish_cancelled(&job_id);
+        manager.release_worker(&job_id);
+        assert_eq!(manager.get(&job_id).unwrap()["state"], "cancelled");
+        assert_eq!(manager.get(&job_id).unwrap()["terminal"], true);
+        assert_eq!(manager.get(&job_id).unwrap()["retryable"], true);
+    }
+
+    #[test]
+    fn cancellation_wins_atomically_over_worker_completion_or_failure() {
+        let manager = JobManager::new("test-protocol");
+        let descriptor = || JobDescriptor::Export {
+            params: json!({ "format": "pdf" }),
+        };
+
+        let (completed_job_id, _) = manager
+            .insert_job("export", false, Some(descriptor()), None)
+            .expect("insert completion fixture");
+        assert!(manager.claim_worker(&completed_job_id));
+        manager
+            .cancel_all()
+            .expect("request completion cancellation");
+        assert!(
+            !manager.finish_completed(&completed_job_id, json!({ "path": "should-not-survive" }))
+        );
+        manager.release_worker(&completed_job_id);
+
+        let completed = manager
+            .get(&completed_job_id)
+            .expect("cancelled completion");
+        assert_eq!(completed["state"], "cancelled");
+        assert_eq!(completed["terminal"], true);
+        assert_eq!(completed["retryable"], true);
+        assert!(completed["result"].is_null());
+        assert!(completed["error"].is_null());
+
+        let (failed_job_id, _) = manager
+            .insert_job("export", false, Some(descriptor()), None)
+            .expect("insert failure fixture");
+        assert!(manager.claim_worker(&failed_job_id));
+        manager.cancel_all().expect("request failure cancellation");
+        manager.finish_failed(
+            &failed_job_id,
+            JobFailure::new("WORKER_FAILED", "failure after cancellation", true),
+        );
+        manager.release_worker(&failed_job_id);
+
+        let failed = manager.get(&failed_job_id).expect("cancelled failure");
+        assert_eq!(failed["state"], "cancelled");
+        assert_eq!(failed["terminal"], true);
+        assert_eq!(failed["retryable"], true);
+        assert!(failed["result"].is_null());
+        assert!(failed["error"].is_null());
+    }
+
+    #[test]
     fn oversized_descriptor_is_rejected_without_poisoning_the_job_store() {
         let root = test_root("descriptor-capacity");
         let manager =
@@ -1988,11 +3046,13 @@ mod tests {
         for index in 0..5 {
             let (job_id, _) = manager
                 .insert_job(
-                    "dictionary-import",
+                    "export",
                     false,
-                    Some(JobDescriptor::DictionaryImport {
-                        source_file_name: format!("pack-{index}.candordict"),
-                        archive_base64: archive_base64.clone(),
+                    Some(JobDescriptor::Export {
+                        params: json!({
+                            "capacityFixture": archive_base64.clone(),
+                            "index": index
+                        }),
                     }),
                     None,
                 )
@@ -2001,11 +3061,10 @@ mod tests {
         }
         let error = manager
             .insert_job(
-                "dictionary-import",
+                "export",
                 false,
-                Some(JobDescriptor::DictionaryImport {
-                    source_file_name: "pack-overflow.candordict".to_string(),
-                    archive_base64,
+                Some(JobDescriptor::Export {
+                    params: json!({ "capacityFixture": archive_base64 }),
                 }),
                 None,
             )
@@ -2021,7 +3080,9 @@ mod tests {
             .submit_descriptor(
                 JobDescriptor::Recap {
                     recording_id: "recording-after-capacity".to_string(),
-                    quality: JobQuality::Fast,
+                    mode: AiExecutionMode::HeuristicFallback,
+                    fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                    legacy_quality: None,
                 },
                 executor(Arc::new(AtomicUsize::new(0))),
             )
@@ -2099,7 +3160,9 @@ mod tests {
                 JobDescriptor::Ask {
                     recording_id: "sensitive-recording-id".to_string(),
                     question: "What dosage did the patient discuss?".to_string(),
-                    quality: JobQuality::Fast,
+                    mode: AiExecutionMode::HeuristicFallback,
+                    fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                    legacy_quality: None,
                 },
                 executor(Arc::new(AtomicUsize::new(0))),
             )
@@ -2171,7 +3234,9 @@ mod tests {
                 JobDescriptor::Ask {
                     recording_id: "recording-5".to_string(),
                     question: "What was decided?".to_string(),
-                    quality: JobQuality::Fast,
+                    mode: AiExecutionMode::HeuristicFallback,
+                    fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                    legacy_quality: None,
                 },
                 ordered_executor.clone(),
             )
@@ -2215,7 +3280,9 @@ mod tests {
                     model_id: None,
                     follow_up: Some(Box::new(JobDescriptor::Recap {
                         recording_id: "recording-3".to_string(),
-                        quality: JobQuality::Fast,
+                        mode: AiExecutionMode::LocalLlm,
+                        fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                        legacy_quality: None,
                     })),
                 },
                 executor(attempts.clone()),
@@ -2246,13 +3313,510 @@ mod tests {
             .submit_descriptor(
                 JobDescriptor::Recap {
                     recording_id: "recording-4".to_string(),
-                    quality: JobQuality::Fast,
+                    mode: AiExecutionMode::HeuristicFallback,
+                    fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                    legacy_quality: None,
                 },
                 executor(Arc::new(AtomicUsize::new(0))),
             )
             .expect_err("corrupt store must block persisted jobs");
         assert_eq!(error.code, "JOB_STORE_CORRUPT");
         assert_eq!(manager.list().unwrap()["persistenceState"], "unavailable");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn encrypted_job_store_replaces_stale_temp_file_exclusively() {
+        let root = test_root("stale-job-temp");
+        let persistence = test_persistence(&root);
+        fs::create_dir_all(&persistence.root).expect("jobs root");
+        let temporary = persistence.root.join(JOB_STORE_TEMP_FILE);
+        fs::write(&temporary, b"stale encrypted staging").expect("stale temp fixture");
+        let document = JobStoreDocument {
+            schema_version: JOB_STORE_SCHEMA_VERSION,
+            jobs: Vec::new(),
+        };
+
+        write_job_document(&persistence, &document).expect("replace stale temp");
+
+        assert!(!temporary.exists());
+        assert_eq!(
+            read_job_document(&persistence)
+                .expect("read committed job store")
+                .schema_version,
+            JOB_STORE_SCHEMA_VERSION
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_dictionary_descriptor_migrates_to_encrypted_staging_with_backup() {
+        let root = test_root("dictionary-migration");
+        let persistence = test_persistence(&root);
+        let staging =
+            DictionaryStaging::with_test_roots(root.join("dictionary-staging"), root.join("keys"));
+        let archive = b"legacy dictionary archive";
+        let document = JobStoreDocument {
+            schema_version: 1,
+            jobs: vec![persisted_entry(
+                "11111111111111111111111111111111",
+                JobDescriptor::DictionaryImport {
+                    staging_token: String::new(),
+                    expected_sha256: String::new(),
+                    original_display_name: String::new(),
+                    bytes: 0,
+                    legacy_source_file_name: Some("legacy.candordict".to_string()),
+                    legacy_archive_base64: Some(STANDARD.encode(archive)),
+                },
+            )],
+        };
+        write_job_document(&persistence, &document).expect("legacy job store");
+
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        assert_eq!(
+            manager.list().expect("migrated jobs")["persistenceState"],
+            "encrypted"
+        );
+        let migrated = read_job_document(&persistence).expect("migrated document");
+        assert_eq!(migrated.schema_version, JOB_STORE_SCHEMA_VERSION);
+        let descriptor = migrated.jobs[0].descriptor.as_ref().expect("descriptor");
+        let JobDescriptor::DictionaryImport {
+            staging_token,
+            expected_sha256,
+            original_display_name,
+            bytes,
+            legacy_source_file_name,
+            legacy_archive_base64,
+        } = descriptor
+        else {
+            panic!("expected migrated dictionary descriptor");
+        };
+        assert!(!staging_token.is_empty());
+        assert_eq!(original_display_name, "legacy.candordict");
+        assert_eq!(*bytes, archive.len() as u64);
+        assert!(legacy_source_file_name.is_none());
+        assert!(legacy_archive_base64.is_none());
+        assert_eq!(
+            staging
+                .read_verified(
+                    staging_token,
+                    expected_sha256,
+                    *bytes,
+                    original_display_name
+                )
+                .expect("staged archive"),
+            archive
+        );
+        assert!(persistence
+            .root
+            .join(JOB_STORE_MIGRATION_BACKUP_FILE)
+            .exists());
+
+        drop(manager);
+        let _next_launch = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        assert!(!persistence
+            .root
+            .join(JOB_STORE_MIGRATION_BACKUP_FILE)
+            .exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn interrupted_dictionary_migration_restores_rollback_backup_before_retrying() {
+        let root = test_root("dictionary-migration-interrupted");
+        let persistence = test_persistence(&root);
+        let staging =
+            DictionaryStaging::with_test_roots(root.join("dictionary-staging"), root.join("keys"));
+        let document = JobStoreDocument {
+            schema_version: 1,
+            jobs: vec![persisted_entry(
+                "12121212121212121212121212121212",
+                JobDescriptor::DictionaryImport {
+                    staging_token: String::new(),
+                    expected_sha256: String::new(),
+                    original_display_name: String::new(),
+                    bytes: 0,
+                    legacy_source_file_name: Some("interrupted.candordict".to_string()),
+                    legacy_archive_base64: Some(STANDARD.encode(b"interrupted archive")),
+                },
+            )],
+        };
+        write_job_document(&persistence, &document).expect("legacy job store");
+        let target = persistence.root.join(JOB_STORE_FILE);
+        let migration_backup = persistence.root.join(JOB_STORE_MIGRATION_BACKUP_FILE);
+        fs::copy(&target, &migration_backup).expect("migration rollback backup");
+        fs::remove_file(&target).expect("simulate interrupted promotion");
+
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+
+        let recovered_jobs = manager.list().expect("recovered jobs");
+        assert_eq!(recovered_jobs["jobCount"], 1, "{recovered_jobs}");
+        let recovered = read_job_document(&persistence).expect("recovered job store");
+        assert_eq!(recovered.schema_version, JOB_STORE_SCHEMA_VERSION);
+        assert_eq!(recovered.jobs.len(), 1);
+        assert!(migration_backup.exists());
+        let JobDescriptor::DictionaryImport {
+            staging_token,
+            legacy_archive_base64,
+            ..
+        } = recovered.jobs[0]
+            .descriptor
+            .as_ref()
+            .expect("recovered descriptor")
+        else {
+            panic!("expected recovered dictionary descriptor");
+        };
+        assert!(!staging_token.is_empty());
+        assert!(legacy_archive_base64.is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn current_job_store_rejects_legacy_dictionary_archive_fields() {
+        let root = test_root("dictionary-current-schema-legacy-data");
+        let persistence = test_persistence(&root);
+        let staging =
+            DictionaryStaging::with_test_roots(root.join("dictionary-staging"), root.join("keys"));
+        let document = JobStoreDocument {
+            schema_version: JOB_STORE_SCHEMA_VERSION,
+            jobs: vec![persisted_entry(
+                "abababababababababababababababab",
+                JobDescriptor::DictionaryImport {
+                    staging_token: "a".repeat(64),
+                    expected_sha256: "b".repeat(64),
+                    original_display_name: "legacy.candordict".to_string(),
+                    bytes: 12,
+                    legacy_source_file_name: Some("legacy.candordict".to_string()),
+                    legacy_archive_base64: Some(STANDARD.encode(b"legacy bytes")),
+                },
+            )],
+        };
+        write_job_document(&persistence, &document).expect("current job store fixture");
+        let original = fs::read(persistence.root.join(JOB_STORE_FILE)).expect("original bytes");
+
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        assert_eq!(
+            manager.list().expect("store status")["persistenceState"],
+            "unavailable"
+        );
+        assert_eq!(
+            fs::read(persistence.root.join(JOB_STORE_FILE)).expect("unchanged store"),
+            original
+        );
+        let error = manager
+            .submit_descriptor(
+                JobDescriptor::Recap {
+                    recording_id: "recording-legacy".to_string(),
+                    mode: AiExecutionMode::LocalLlm,
+                    fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                    legacy_quality: None,
+                },
+                executor(Arc::new(AtomicUsize::new(0))),
+            )
+            .expect_err("unsafe current-schema store must stay fail closed");
+        assert_eq!(error.code, "JOB_STORE_LEGACY_DICTIONARY_DATA_REJECTED");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn failed_dictionary_migration_restores_original_store_and_removes_staging() {
+        let root = test_root("dictionary-migration-rollback");
+        let persistence = test_persistence(&root);
+        let staging_root = root.join("dictionary-staging");
+        let staging = DictionaryStaging::with_test_roots(staging_root.clone(), root.join("keys"));
+        let valid = JobDescriptor::DictionaryImport {
+            staging_token: String::new(),
+            expected_sha256: String::new(),
+            original_display_name: String::new(),
+            bytes: 0,
+            legacy_source_file_name: Some("valid.candordict".to_string()),
+            legacy_archive_base64: Some(STANDARD.encode(b"valid archive")),
+        };
+        let invalid = JobDescriptor::DictionaryImport {
+            staging_token: String::new(),
+            expected_sha256: String::new(),
+            original_display_name: String::new(),
+            bytes: 0,
+            legacy_source_file_name: Some("invalid.candordict".to_string()),
+            legacy_archive_base64: None,
+        };
+        let document = JobStoreDocument {
+            schema_version: 1,
+            jobs: vec![
+                persisted_entry("22222222222222222222222222222222", valid),
+                persisted_entry("33333333333333333333333333333333", invalid),
+            ],
+        };
+        write_job_document(&persistence, &document).expect("legacy job store");
+        let original = fs::read(persistence.root.join(JOB_STORE_FILE)).expect("original bytes");
+
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        assert_eq!(
+            manager.list().expect("failed migration status")["persistenceState"],
+            "unavailable"
+        );
+        assert_eq!(
+            fs::read(persistence.root.join(JOB_STORE_FILE)).expect("restored store"),
+            original
+        );
+        assert!(!persistence
+            .root
+            .join(JOB_STORE_MIGRATION_BACKUP_FILE)
+            .exists());
+        let staged_count = fs::read_dir(staging_root)
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or_default();
+        assert_eq!(staged_count, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn oversized_legacy_dictionary_migration_rolls_back_without_data_loss() {
+        let root = test_root("dictionary-migration-oversized");
+        let persistence = test_persistence(&root);
+        let staging_root = root.join("dictionary-staging");
+        let staging = DictionaryStaging::with_test_roots(staging_root.clone(), root.join("keys"));
+        let oversized_archive = vec![0x5a; 2_500_001];
+        let document = JobStoreDocument {
+            schema_version: 1,
+            jobs: vec![
+                persisted_entry(
+                    "44444444444444444444444444444444",
+                    JobDescriptor::DictionaryImport {
+                        staging_token: String::new(),
+                        expected_sha256: String::new(),
+                        original_display_name: String::new(),
+                        bytes: 0,
+                        legacy_source_file_name: Some("oversized.candordict".to_string()),
+                        legacy_archive_base64: Some(STANDARD.encode(oversized_archive)),
+                    },
+                ),
+                persisted_entry(
+                    "55555555555555555555555555555555",
+                    JobDescriptor::Recap {
+                        recording_id: "recording-preserved".to_string(),
+                        mode: AiExecutionMode::LocalLlm,
+                        fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                        legacy_quality: None,
+                    },
+                ),
+            ],
+        };
+        write_job_document(&persistence, &document).expect("legacy job store");
+        let original = fs::read(persistence.root.join(JOB_STORE_FILE)).expect("original bytes");
+
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        let status = manager.list().expect("migration failure status");
+        assert_eq!(status["persistenceState"], "unavailable");
+        assert_eq!(
+            status["persistenceFailureCode"],
+            "JOB_STORE_MIGRATION_ARCHIVE_TOO_LARGE"
+        );
+        assert_eq!(
+            fs::read(persistence.root.join(JOB_STORE_FILE)).expect("restored store"),
+            original
+        );
+        assert!(!persistence
+            .root
+            .join(JOB_STORE_MIGRATION_BACKUP_FILE)
+            .exists());
+        let staged_count = fs::read_dir(staging_root)
+            .map(|entries| entries.filter_map(Result::ok).count())
+            .unwrap_or_default();
+        assert_eq!(staged_count, 0);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn retention_scrubs_questions_expires_staging_and_purges_terminal_jobs() {
+        let root = test_root("retention");
+        let persistence = test_persistence(&root);
+        let staging =
+            DictionaryStaging::with_test_roots(root.join("dictionary-staging"), root.join("keys"));
+        let staged = staging
+            .stage_bytes("retry.candordict", b"retry archive")
+            .expect("stage dictionary");
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        let (ask_id, _) = manager
+            .insert_job(
+                "ask",
+                true,
+                Some(JobDescriptor::Ask {
+                    recording_id: "recording-retention".to_string(),
+                    question: "What dosage was discussed?".to_string(),
+                    mode: AiExecutionMode::LocalLlm,
+                    fallback_policy: AiFallbackPolicy::AllowDisclosed,
+                    legacy_quality: None,
+                }),
+                None,
+            )
+            .expect("ask job");
+        let (dictionary_id, _) = manager
+            .insert_job(
+                "dictionary-import",
+                false,
+                Some(JobDescriptor::DictionaryImport {
+                    staging_token: staged.staging_token.clone(),
+                    expected_sha256: staged.expected_sha256.clone(),
+                    original_display_name: staged.original_display_name.clone(),
+                    bytes: staged.bytes,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                }),
+                None,
+            )
+            .expect("dictionary job");
+        let (terminal_id, _) = manager
+            .insert_job(
+                "export",
+                false,
+                Some(JobDescriptor::Export { params: json!({}) }),
+                None,
+            )
+            .expect("terminal job");
+        {
+            let mut jobs = manager.inner.jobs.lock().expect("jobs");
+            let ask = jobs.get_mut(&ask_id).expect("ask");
+            ask.state = JobState::Paused;
+            ask.result = Some(json!({
+                "question": "What dosage was discussed?",
+                "answer": "A retained answer"
+            }));
+            ask.created_at_ms = now_ms().saturating_sub(ASK_QUESTION_RETENTION_MS + 1);
+            ask.updated_at_ms = now_ms();
+            let dictionary = jobs.get_mut(&dictionary_id).expect("dictionary");
+            dictionary.state = JobState::Failed;
+            dictionary.created_at_ms =
+                now_ms().saturating_sub(RETRYABLE_DICTIONARY_STAGING_RETENTION_MS + 1);
+            dictionary.updated_at_ms = now_ms();
+            let terminal = jobs.get_mut(&terminal_id).expect("terminal");
+            terminal.state = JobState::Completed;
+            terminal.updated_at_ms = now_ms().saturating_sub(TERMINAL_JOB_RETENTION_MS + 1);
+        }
+        manager.persist().expect("aged jobs");
+
+        let tokens = manager.apply_retention().expect("apply retention");
+        assert_eq!(tokens, vec![staged.staging_token.clone()]);
+        for token in tokens {
+            staging.delete(&token).expect("delete expired staging");
+        }
+        {
+            let jobs = manager.inner.jobs.lock().expect("jobs");
+            let ask = jobs.get(&ask_id).expect("retained ask");
+            let Some(JobDescriptor::Ask { question, .. }) = ask.descriptor.as_ref() else {
+                panic!("expected Ask descriptor");
+            };
+            assert!(question.is_empty());
+            assert_eq!(
+                ask.result.as_ref().and_then(|value| value.get("question")),
+                Some(&Value::Null)
+            );
+            assert_eq!(
+                ask.result.as_ref().and_then(|value| value.get("answer")),
+                Some(&Value::String("A retained answer".to_string()))
+            );
+            let dictionary = jobs
+                .get(&dictionary_id)
+                .expect("retained dictionary result");
+            assert!(dictionary.descriptor.is_none());
+            assert_eq!(dictionary.stage.as_deref(), Some("staging-expired"));
+            assert_eq!(
+                dictionary
+                    .error
+                    .as_ref()
+                    .and_then(|value| value["code"].as_str()),
+                Some("DICTIONARY_STAGING_EXPIRED")
+            );
+            assert!(!jobs.contains_key(&terminal_id));
+        }
+        assert!(staging
+            .read_verified(
+                &staged.staging_token,
+                &staged.expected_sha256,
+                staged.bytes,
+                &staged.original_display_name,
+            )
+            .is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn startup_retention_discards_staging_left_by_interrupted_cancellation() {
+        let root = test_root("cancelled-dictionary-retention");
+        let persistence = test_persistence(&root);
+        let staging =
+            DictionaryStaging::with_test_roots(root.join("dictionary-staging"), root.join("keys"));
+        let staged = staging
+            .stage_bytes("cancelled.candordict", b"cancelled archive")
+            .expect("stage dictionary");
+        let manager = JobManager::with_test_roots_and_staging(
+            "test-protocol",
+            persistence.root.clone(),
+            persistence.key_root.clone(),
+            &staging,
+        );
+        let (job_id, _) = manager
+            .insert_job(
+                "dictionary-import",
+                false,
+                Some(JobDescriptor::DictionaryImport {
+                    staging_token: staged.staging_token.clone(),
+                    expected_sha256: staged.expected_sha256.clone(),
+                    original_display_name: staged.original_display_name.clone(),
+                    bytes: staged.bytes,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                }),
+                None,
+            )
+            .expect("dictionary job");
+        {
+            let mut jobs = manager.inner.jobs.lock().expect("jobs");
+            finish_entry_cancelled(jobs.get_mut(&job_id).expect("dictionary"));
+        }
+        manager.persist().expect("cancelled state");
+
+        let tokens = manager.apply_retention().expect("startup retention");
+        let cancelled = manager.get(&job_id).expect("cancelled task");
+
+        assert_eq!(tokens, vec![staged.staging_token]);
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["retryable"], false);
         let _ = fs::remove_dir_all(root);
     }
 

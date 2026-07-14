@@ -23,7 +23,23 @@ const receipt: MeetingPrivacyReceipt = {
   capture: { channels: ["mic", "system"], audioChunkCount: 2, channelAttribution: true },
   storage: { rootKind: "local-user-data", encryptedAudioChunkCount: 2, allAudioEncrypted: true, cipher: "chacha20poly1305" },
   content: { transcriptSegmentCount: 4, notesSavedLocally: true },
-  processing: [],
+  processing: [{
+    eventType: "local-ai-recap",
+    engine: "heuristic",
+    modelId: null,
+    sha256: null,
+    format: null,
+    bytes: null,
+    aiProvenance: {
+      engine: "heuristic",
+      modelId: null,
+      fallbackUsed: true,
+      fallbackReason: "llm-unavailable",
+      promptVersion: "candor-heuristic-v1",
+      generatedAt: "2026-07-14T12:00:00Z",
+    },
+    createdAtMs: 2,
+  }],
   exports: [],
   retention: { policy: "manual-delete-only", automaticDeletion: false },
   network,
@@ -66,6 +82,7 @@ const terminologyStatus: TerminologyStatus = {
   dictionaryCount: 1,
   entryCount: 1842,
   encryptedAtRest: true,
+  projectScopeAvailable: false,
   dictionaries: [{
     dictionaryId: "dict-pharma",
     name: "Pharmaceutics",
@@ -77,8 +94,12 @@ const terminologyStatus: TerminologyStatus = {
     publisher: "Candor",
     language: "en",
     signatureKeyId: "candor-dictionary-1",
-    trustLabel: "verified-candor-bundle",
+    trustLabel: "verified-candor",
     signatureVerified: true,
+    scope: "specialist",
+    scopeTargetId: null,
+    explicitPreference: 0,
+    approvedCorrectionCount: 12,
   }],
 };
 
@@ -128,6 +149,8 @@ describe("simplified product surface", () => {
     expect(markup).toContain("Private on this computer");
     expect(markup).toContain("No external calls");
     expect(markup).toContain("Encrypted");
+    expect(markup).toContain("Fallback disclosed: Local AI unavailable");
+    expect(markup).toContain("Prompt candor-heuristic-v1");
     expect(markup).not.toMatch(/[A-Z]:\\|\/Users\//);
   });
 
@@ -159,8 +182,8 @@ describe("simplified product surface", () => {
       models: [],
       selectedModel: "tiny.en",
       defaultModel: "tiny.en",
-      aiMode: "fast" as const,
-      aiModeStatus: "Fast local",
+      aiMode: "heuristic-fallback" as const,
+      aiModeStatus: "Quick local fallback",
       instructSetupOpen: false,
       instructReady: false,
       instructRunnerAsset: {},
@@ -294,7 +317,7 @@ describe("simplified product surface", () => {
 
   it("provides compact Transcript, Notes, and AI panes without splitting the meeting workflow", () => {
     const markup = renderToStaticMarkup(
-      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="" activeCapture={false} consentReady durationMs={0} audioUrl="" markers={[]} compactPane="notes" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="fast" aiModeStatus="Fast local" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Ready" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
+      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="" activeCapture={false} consentReady durationMs={0} audioUrl="" markers={[]} compactPane="notes" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="heuristic-fallback" aiModeStatus="Quick local fallback" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Ready" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
     );
     expect(markup).toContain("Meeting workspace panes");
     expect(markup).toContain("Transcript");
@@ -306,7 +329,7 @@ describe("simplified product surface", () => {
     expect(markup).toContain("Local AI");
 
     const activeMarkup = renderToStaticMarkup(
-      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="rec-1" activeCapture consentReady durationMs={5_000} audioUrl="" markers={[]} compactPane="transcript" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="fast" aiModeStatus="Fast local" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Recording" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
+      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="rec-1" activeCapture consentReady durationMs={5_000} audioUrl="" markers={[]} compactPane="transcript" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="heuristic-fallback" aiModeStatus="Quick local fallback" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Recording" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
     );
     expect(activeMarkup).not.toContain("Review meeting");
     expect(activeMarkup).not.toContain("Load audio");
@@ -316,7 +339,7 @@ describe("simplified product surface", () => {
 
   it("offers permanent deletion only for a finished local meeting", () => {
     const markup = renderToStaticMarkup(
-      <MeetingDetailView title="Finished meeting" selectedRecording={{ recordingId: "rec-1", label: "Finished meeting", state: "finished", audioDurationMs: 10, audioChunkCount: 1, transcriptSegmentCount: 1, updatedAtMs: 2 }} selectedRecordingId="rec-1" detailSection="summary" transcriptContent={<div />} transcriptTotalCount={1} notesMarkdown="" notesDirty={false} recap={null} askQuestion="" askAnswer={null} aiModeStatus="Fast local" privacyReceipt={receipt} networkCapabilities={network} busy={false} onDetailSectionChange={vi.fn()} onReview={vi.fn()} onDelete={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAskQuestionChange={vi.fn()} onAsk={vi.fn()} />,
+      <MeetingDetailView title="Finished meeting" selectedRecording={{ recordingId: "rec-1", label: "Finished meeting", state: "finished", audioDurationMs: 10, audioChunkCount: 1, transcriptSegmentCount: 1, updatedAtMs: 2 }} selectedRecordingId="rec-1" detailSection="summary" transcriptContent={<div />} transcriptTotalCount={1} notesMarkdown="" notesDirty={false} recap={null} askQuestion="" askAnswer={null} aiModeStatus="Quick local fallback" privacyReceipt={receipt} networkCapabilities={network} busy={false} onDetailSectionChange={vi.fn()} onReview={vi.fn()} onDelete={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onRetryRecapWithLocalAi={vi.fn()} onAskQuestionChange={vi.fn()} onAsk={vi.fn()} onRetryAskWithLocalAi={vi.fn()} />,
     );
     expect(markup).toContain("Delete meeting");
     expect(markup).toContain("Review report");

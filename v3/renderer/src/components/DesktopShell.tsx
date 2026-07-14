@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { RecordAction } from "./RecordAction";
 import { BackgroundActivity } from "../features/jobs/BackgroundActivity";
-import type { AppView, JsonObject, PersistentAlert, RecordingSummary } from "../core/contracts";
+import type { AppView, PersistentAlert, RecordingSummary } from "../core/contracts";
 
 interface DesktopShellProps {
   view: AppView;
@@ -14,7 +14,7 @@ interface DesktopShellProps {
   notice: string;
   error: string;
   persistentAlerts?: PersistentAlert[];
-  jobs?: JsonObject[];
+  jobs?: BackgroundTask[];
   children: ReactNode;
   onHome: () => void;
   onStartRecording: () => void;

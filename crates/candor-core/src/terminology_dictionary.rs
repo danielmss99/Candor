@@ -1,4 +1,4 @@
-use std::cmp::Reverse;
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
 use getrandom::getrandom;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -105,6 +106,39 @@ struct TerminologyDictionary {
     signature_key_id: Option<String>,
     #[serde(default)]
     trust_label: Option<String>,
+    #[serde(default)]
+    scope: DictionaryScope,
+    #[serde(default)]
+    scope_target_id: Option<String>,
+    #[serde(default)]
+    explicit_preference: i16,
+    #[serde(default)]
+    approved_correction_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum DictionaryScope {
+    Meeting,
+    Project,
+    Organization,
+    #[default]
+    Personal,
+    Specialist,
+    General,
+}
+
+impl DictionaryScope {
+    fn precedence(self) -> u8 {
+        match self {
+            Self::Meeting => 0,
+            Self::Project => 1,
+            Self::Organization => 2,
+            Self::Personal => 3,
+            Self::Specialist => 4,
+            Self::General => 5,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -223,6 +257,7 @@ struct DictionaryPackageMetadata {
     language: Option<String>,
     signature_key_id: Option<String>,
     trust_label: Option<String>,
+    scope: DictionaryScope,
 }
 
 #[derive(Debug, Deserialize)]
@@ -249,7 +284,12 @@ struct SelectedEntry {
     dictionary_id: String,
     assigned: bool,
     entry: TerminologyEntry,
-    score: usize,
+    effective_scope: DictionaryScope,
+    explicit_preference: i16,
+    context_relevance: u8,
+    category_match: bool,
+    approved_correction_count: u64,
+    package_version: Option<Version>,
 }
 
 #[derive(Clone, Debug)]
@@ -325,6 +365,7 @@ impl TerminologyService {
                 "dictionaryCount": 0,
                 "entryCount": 0,
                 "dictionaries": [],
+                "projectScopeAvailable": false,
                 "encryptedAtRest": true,
                 "promptWritingRequired": false,
                 "automaticCorrection": false,
@@ -366,6 +407,27 @@ impl TerminologyService {
         &self,
         package: VerifiedDictionaryPackage,
     ) -> Result<Value, TerminologyError> {
+        self.import_verified_package_with_scope(package, DictionaryScope::Specialist)
+    }
+
+    pub(crate) fn import_bundled_general_package(
+        &self,
+        package: VerifiedDictionaryPackage,
+    ) -> Result<Value, TerminologyError> {
+        if package.trust_label != "verified-candor" {
+            return Err(TerminologyError::new(
+                "TERMINOLOGY_BUNDLED_TRUST_REQUIRED",
+                "the bundled general dictionary is not signed by Candor",
+            ));
+        }
+        self.import_verified_package_with_scope(package, DictionaryScope::General)
+    }
+
+    fn import_verified_package_with_scope(
+        &self,
+        package: VerifiedDictionaryPackage,
+        scope: DictionaryScope,
+    ) -> Result<Value, TerminologyError> {
         let fallback_name = clean_text(
             &package.name,
             MAX_DICTIONARY_NAME_CHARS,
@@ -393,6 +455,7 @@ impl TerminologyService {
             language: Some(package.language),
             signature_key_id: Some(package.key_id),
             trust_label: Some(package.trust_label),
+            scope,
         };
         let mut value = self.import_parsed_dictionary(
             fallback_name.clone(),
@@ -486,6 +549,8 @@ impl TerminologyService {
                     "language": existing.language,
                     "signatureKeyId": existing.signature_key_id,
                     "trustLabel": existing.trust_label,
+                    "scope": existing.scope,
+                    "explicitPreference": existing.explicit_preference,
                     "encryptedAtRest": true,
                     "rawPathExposed": false,
                     "keyMaterialExposedToRenderer": false
@@ -524,6 +589,10 @@ impl TerminologyService {
             language: package.language.clone(),
             signature_key_id: package.signature_key_id.clone(),
             trust_label: package.trust_label.clone(),
+            scope: package.scope,
+            scope_target_id: None,
+            explicit_preference: 0,
+            approved_correction_count: 0,
         });
         self.write_document_unlocked(&document)?;
         Ok(json!({
@@ -538,6 +607,8 @@ impl TerminologyService {
             "language": package.language,
             "signatureKeyId": package.signature_key_id,
             "trustLabel": package.trust_label,
+            "scope": package.scope,
+            "explicitPreference": 0,
             "encryptedAtRest": true,
             "rawPathExposed": false,
             "keyMaterialExposedToRenderer": false
@@ -656,6 +727,16 @@ impl TerminologyService {
             !(decision.recording_id == params.recording_id
                 && decision.proposal_id == params.proposal_id)
         });
+        if params.decision == CorrectionDecisionValue::Accepted {
+            if let Some(dictionary) = document
+                .dictionaries
+                .iter_mut()
+                .find(|dictionary| dictionary.id == proposal.dictionary_id)
+            {
+                dictionary.approved_correction_count =
+                    dictionary.approved_correction_count.saturating_add(1);
+            }
+        }
         document.decisions.push(CorrectionDecision {
             recording_id: params.recording_id.clone(),
             proposal_id: params.proposal_id.clone(),
@@ -858,7 +939,11 @@ impl TerminologyService {
                     "language": dictionary.language,
                     "signatureKeyId": dictionary.signature_key_id,
                     "trustLabel": dictionary.trust_label,
-                    "signatureVerified": dictionary.signature_key_id.is_some()
+                    "signatureVerified": dictionary.signature_key_id.is_some(),
+                    "scope": dictionary.scope,
+                    "scopeTargetId": dictionary.scope_target_id,
+                    "explicitPreference": dictionary.explicit_preference,
+                    "approvedCorrectionCount": dictionary.approved_correction_count
                 })
             })
             .collect::<Vec<_>>();
@@ -871,6 +956,8 @@ impl TerminologyService {
             "decisionCount": document.decisions.len(),
             "dictionaries": dictionaries,
             "supportedFormats": ["candordict", "txt", "csv", "json"],
+            "scopePrecedence": ["meeting", "project", "organization", "personal", "specialist", "general"],
+            "projectScopeAvailable": false,
             "encryptedAtRest": true,
             "promptWritingRequired": false,
             "automaticCorrection": false,
@@ -1072,12 +1159,14 @@ impl TerminologyService {
                     "the encrypted terminology store is invalid and was not changed",
                 )
             })?;
-        let document: TerminologyDocument = serde_json::from_slice(&plaintext).map_err(|_| {
-            TerminologyError::new(
-                "TERMINOLOGY_STORE_CORRUPT",
-                "the encrypted terminology store is invalid and was not changed",
-            )
-        })?;
+        let mut document: TerminologyDocument =
+            serde_json::from_slice(&plaintext).map_err(|_| {
+                TerminologyError::new(
+                    "TERMINOLOGY_STORE_CORRUPT",
+                    "the encrypted terminology store is invalid and was not changed",
+                )
+            })?;
+        normalize_legacy_dictionary_metadata(&mut document);
         validate_document(&document)?;
         Ok(document)
     }
@@ -1494,10 +1583,15 @@ fn validate_document(document: &TerminologyDocument) -> Result<(), TerminologyEr
     let valid = document.schema_version == STORE_SCHEMA_VERSION
         && document.dictionaries.len() <= MAX_DICTIONARIES
         && entry_count <= MAX_TOTAL_ENTRIES
-        && document
-            .dictionaries
-            .iter()
-            .all(|dictionary| dictionary.entries.len() <= MAX_ENTRIES_PER_DICTIONARY);
+        && document.dictionaries.iter().all(|dictionary| {
+            dictionary.entries.len() <= MAX_ENTRIES_PER_DICTIONARY
+                && (-1_000..=1_000).contains(&dictionary.explicit_preference)
+                && dictionary_scope_is_valid(dictionary)
+                && matches!(
+                    dictionary.trust_label.as_deref(),
+                    None | Some("community-unverified") | Some("verified-candor")
+                )
+        });
     if !valid {
         return Err(TerminologyError::new(
             "TERMINOLOGY_STORE_CORRUPT",
@@ -1505,6 +1599,37 @@ fn validate_document(document: &TerminologyDocument) -> Result<(), TerminologyEr
         ));
     }
     Ok(())
+}
+
+fn normalize_legacy_dictionary_metadata(document: &mut TerminologyDocument) {
+    for dictionary in &mut document.dictionaries {
+        match dictionary.trust_label.as_deref() {
+            Some("verified-candor") | Some("community-unverified") | None => {}
+            Some("verified-candor-bundle") => {
+                dictionary.scope = DictionaryScope::General;
+                dictionary.trust_label = Some("community-unverified".to_string());
+            }
+            Some(_) => {
+                dictionary.trust_label = dictionary
+                    .signature_key_id
+                    .as_ref()
+                    .map(|_| "community-unverified".to_string());
+            }
+        }
+    }
+}
+
+fn dictionary_scope_is_valid(dictionary: &TerminologyDictionary) -> bool {
+    match dictionary.scope {
+        DictionaryScope::Project => false,
+        DictionaryScope::Meeting | DictionaryScope::Organization => dictionary
+            .scope_target_id
+            .as_deref()
+            .is_some_and(|value| validate_id(value, "TERMINOLOGY_SCOPE_TARGET_INVALID").is_ok()),
+        DictionaryScope::Personal | DictionaryScope::Specialist | DictionaryScope::General => {
+            dictionary.scope_target_id.is_none()
+        }
+    }
 }
 
 fn selected_entries(
@@ -1547,28 +1672,61 @@ fn selected_entries(
                         .category
                         .as_deref()
                         .is_some_and(|category| lower_text_contains_term(context_lower, category));
-                    let score = usize::from(dictionary.enabled)
-                        + usize::from(dictionary_assigned) * 8
-                        + usize::from(dictionary_name_matches) * 4
-                        + usize::from(category_matches) * 6
-                        + usize::from(term_matches) * 16;
+                    let context_relevance = if term_matches {
+                        2
+                    } else if dictionary_name_matches {
+                        1
+                    } else {
+                        0
+                    };
                     SelectedEntry {
                         dictionary_id: dictionary.id.clone(),
                         assigned: dictionary_assigned,
                         entry: entry.clone(),
-                        score,
+                        effective_scope: if dictionary_assigned {
+                            DictionaryScope::Meeting
+                        } else {
+                            dictionary.scope
+                        },
+                        explicit_preference: dictionary.explicit_preference,
+                        context_relevance,
+                        category_match: category_matches,
+                        approved_correction_count: dictionary.approved_correction_count,
+                        package_version: dictionary
+                            .package_version
+                            .as_deref()
+                            .and_then(|value| Version::parse(value).ok()),
                     }
                 })
         })
         .collect::<Vec<_>>();
-    selected.sort_by_key(|entry| {
-        (
-            Reverse(entry.score),
-            entry.entry.canonical_term.to_lowercase(),
-        )
-    });
+    selected.sort_by(selected_entry_order);
+    let mut canonical_terms = HashSet::new();
+    selected.retain(|entry| canonical_terms.insert(entry.entry.canonical_term.to_lowercase()));
     selected.truncate(limit);
     selected
+}
+
+fn selected_entry_order(left: &SelectedEntry, right: &SelectedEntry) -> Ordering {
+    left.effective_scope
+        .precedence()
+        .cmp(&right.effective_scope.precedence())
+        .then_with(|| right.explicit_preference.cmp(&left.explicit_preference))
+        .then_with(|| right.context_relevance.cmp(&left.context_relevance))
+        .then_with(|| right.category_match.cmp(&left.category_match))
+        .then_with(|| {
+            right
+                .approved_correction_count
+                .cmp(&left.approved_correction_count)
+        })
+        .then_with(|| right.package_version.cmp(&left.package_version))
+        .then_with(|| left.dictionary_id.cmp(&right.dictionary_id))
+        .then_with(|| {
+            left.entry
+                .canonical_term
+                .to_lowercase()
+                .cmp(&right.entry.canonical_term.to_lowercase())
+        })
 }
 
 fn lower_text_contains_term(text: &str, term: &str) -> bool {
@@ -1794,7 +1952,7 @@ mod tests {
             language: "en".to_string(),
             minimum_candor_version: "0.4.0".to_string(),
             key_id: "candor-test-key".to_string(),
-            trust_label: "candor-verified".to_string(),
+            trust_label: "community-unverified".to_string(),
             entries: vec![DictionaryPackageTerm {
                 canonical_term: term.to_string(),
                 aliases: Vec::new(),
@@ -1804,6 +1962,42 @@ mod tests {
                 case_sensitive: false,
                 enabled: true,
             }],
+        }
+    }
+
+    fn dictionary_for_ordering(
+        id: &str,
+        scope: DictionaryScope,
+        preference: i16,
+        approved: u64,
+        version: &str,
+        category: Option<&str>,
+    ) -> TerminologyDictionary {
+        TerminologyDictionary {
+            id: id.to_string(),
+            name: format!("{id} dictionary"),
+            enabled: true,
+            imported_at_ms: 1,
+            entries: vec![TerminologyEntry {
+                id: format!("entry-{id}"),
+                canonical_term: "shared term".to_string(),
+                aliases: Vec::new(),
+                pronunciation_hints: Vec::new(),
+                definition: None,
+                category: category.map(str::to_string),
+                case_sensitive: false,
+                enabled: true,
+            }],
+            package_id: Some(format!("org.test.{id}")),
+            package_version: Some(version.to_string()),
+            publisher: Some("Test".to_string()),
+            language: Some("en".to_string()),
+            signature_key_id: Some("community-key".to_string()),
+            trust_label: Some("community-unverified".to_string()),
+            scope,
+            scope_target_id: None,
+            explicit_preference: preference,
+            approved_correction_count: approved,
         }
     }
 
@@ -1819,10 +2013,105 @@ mod tests {
         let status = service.status(TerminologyStatusParams { recording_id: None });
         assert_eq!(status["state"], "ready");
         assert_eq!(status["entryCount"], 1);
+        assert_eq!(status["dictionaries"][0]["scope"], "personal");
+        assert_eq!(status["projectScopeAvailable"], false);
         assert_eq!(status["encryptedAtRest"], true);
         let bytes = fs::read(root.join(STORE_FILE)).expect("encrypted store");
         assert!(!String::from_utf8_lossy(&bytes).contains("pharmacokinetics"));
         assert_eq!(status["rawPathExposed"], false);
+    }
+
+    #[test]
+    fn dictionary_conflicts_follow_scope_then_fixed_tie_breakers() {
+        let mut document = TerminologyDocument {
+            dictionaries: vec![
+                dictionary_for_ordering(
+                    "general",
+                    DictionaryScope::General,
+                    1_000,
+                    100,
+                    "9.0.0",
+                    Some("oncology"),
+                ),
+                dictionary_for_ordering(
+                    "specialist",
+                    DictionaryScope::Specialist,
+                    0,
+                    0,
+                    "1.0.0",
+                    None,
+                ),
+                dictionary_for_ordering(
+                    "personal",
+                    DictionaryScope::Personal,
+                    -10,
+                    0,
+                    "1.0.0",
+                    None,
+                ),
+            ],
+            ..Default::default()
+        };
+        let selected = selected_entries(&document, Some("recording-1"), "oncology", 10);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].dictionary_id, "personal");
+
+        document.assignments.push(DictionaryAssignment {
+            recording_id: "recording-1".to_string(),
+            dictionary_id: "general".to_string(),
+            enabled: true,
+        });
+        let selected = selected_entries(&document, Some("recording-1"), "oncology", 10);
+        assert_eq!(selected[0].dictionary_id, "general");
+
+        let left = SelectedEntry {
+            dictionary_id: "a".to_string(),
+            assigned: false,
+            entry: document.dictionaries[0].entries[0].clone(),
+            effective_scope: DictionaryScope::Specialist,
+            explicit_preference: 5,
+            context_relevance: 2,
+            category_match: true,
+            approved_correction_count: 3,
+            package_version: Version::parse("2.0.0").ok(),
+        };
+        let mut right = left.clone();
+        right.dictionary_id = "b".to_string();
+        right.explicit_preference = 4;
+        assert_eq!(selected_entry_order(&left, &right), Ordering::Less);
+        right.explicit_preference = left.explicit_preference;
+        right.context_relevance = 1;
+        assert_eq!(selected_entry_order(&left, &right), Ordering::Less);
+        right.context_relevance = left.context_relevance;
+        right.category_match = false;
+        assert_eq!(selected_entry_order(&left, &right), Ordering::Less);
+        right.category_match = left.category_match;
+        right.approved_correction_count = 2;
+        assert_eq!(selected_entry_order(&left, &right), Ordering::Less);
+        right.approved_correction_count = left.approved_correction_count;
+        right.package_version = Version::parse("1.9.0").ok();
+        assert_eq!(selected_entry_order(&left, &right), Ordering::Less);
+        right.package_version = left.package_version.clone();
+        assert_eq!(selected_entry_order(&left, &right), Ordering::Less);
+    }
+
+    #[test]
+    fn legacy_trust_is_downgraded_and_project_scope_is_reserved() {
+        let mut document = TerminologyDocument::default();
+        let mut legacy =
+            dictionary_for_ordering("legacy", DictionaryScope::Personal, 0, 0, "1.0.0", None);
+        legacy.trust_label = Some("verified-organization".to_string());
+        document.dictionaries.push(legacy);
+        normalize_legacy_dictionary_metadata(&mut document);
+        assert_eq!(
+            document.dictionaries[0].trust_label.as_deref(),
+            Some("community-unverified")
+        );
+
+        document.dictionaries[0].scope = DictionaryScope::Project;
+        document.dictionaries[0].scope_target_id = Some("project-1".to_string());
+        let error = validate_document(&document).expect_err("project scope remains reserved");
+        assert_eq!(error.code, "TERMINOLOGY_STORE_CORRUPT");
     }
 
     #[test]

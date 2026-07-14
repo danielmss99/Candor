@@ -19,6 +19,7 @@ const EMPTY_STATUS: TerminologyStatus = {
   entryCount: 0,
   dictionaries: [],
   encryptedAtRest: true,
+  projectScopeAvailable: false,
 };
 
 interface UseTerminologyWorkspaceOptions {
@@ -104,26 +105,6 @@ export function useTerminologyWorkspace(options: UseTerminologyWorkspaceOptions)
     }, "terminology");
   }, [api, refreshTerminology, run, setNotice]);
 
-  const importDictionaryFile = useCallback(async (file: File) => {
-    if (!api) return;
-    if (!file.name.toLowerCase().endsWith(".candordict")) {
-      setError("Drop a signed CANDORDICT package here.");
-      return;
-    }
-    await run("dictionary import", async () => {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const result = asObject(await api.terminology.importDictionaryPackage(file.name, bytes));
-      setNotice("Dictionary verification is running in the background");
-      void waitForJob(api, result)
-        .then(async (completed) => {
-          const imported = asObject(completed);
-          setNotice(dictionaryImportNotice(imported));
-          await refreshTerminology();
-        })
-        .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
-    }, "terminology");
-  }, [api, refreshTerminology, run, setError, setNotice]);
-
   const setEnabled = useCallback(async (dictionaryId: string, enabled: boolean) => {
     if (!api) return;
     await run("dictionary update", async () => {
@@ -177,7 +158,6 @@ export function useTerminologyWorkspace(options: UseTerminologyWorkspaceOptions)
     proposals,
     refreshTerminology,
     importDictionary,
-    importDictionaryFile,
     setEnabled,
     assignToMeeting,
     loadProposals,

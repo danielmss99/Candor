@@ -114,12 +114,13 @@ function verifyRendererSurface() {
   rendererSurface.bridgeImplemented = true;
 
   requireSource(rendererSource, 'aria-label="Local AI mode"', "renderer mode control");
-  requireSource(rendererSource, 'aria-pressed={aiMode === "quality"}', "renderer quality mode");
-  requireSource(rendererSource, 'aria-pressed={aiMode === "fast"}', "renderer fast mode");
+  requireSource(rendererSource, 'aria-pressed={aiMode === "local-llm"}', "renderer local LLM mode");
+  requireSource(rendererSource, 'aria-pressed={aiMode === "heuristic-fallback"}', "renderer explicit fallback mode");
   rendererSurface.qualityModeImplemented = true;
 
-  requireSource(rendererSource, "Fast local fallback", "renderer fallback status");
-  requireSource(rendererSource, 'aiMode === "quality" && instructReady', "renderer fallback branch");
+  requireSource(rendererSource, "Local AI with disclosed fallback", "renderer fallback status");
+  requireSource(rendererSource, 'fallbackPolicy: "require-local-llm"', "renderer strict retry policy");
+  requireSource(rendererSource, "Retry with Local AI", "renderer fallback retry action");
   rendererSurface.fallbackImplemented = true;
 
   requireSource(rendererSource, "recapMarkdown", "renderer model recap parser");

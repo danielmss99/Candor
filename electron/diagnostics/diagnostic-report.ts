@@ -17,6 +17,7 @@ export interface DiagnosticReportInput {
   captureStatus: JsonValue;
   privacyAudit: JsonValue;
   updateStatus: JsonValue;
+  backgroundJobs: JsonValue;
 }
 
 function safeToken(value: unknown, fallback = "unavailable"): string {
@@ -55,6 +56,29 @@ export function buildDiagnosticReport(input: DiagnosticReportInput): JsonValue {
   const capture = objectValue(input.captureStatus);
   const privacy = objectValue(input.privacyAudit);
   const updates = objectValue(input.updateStatus);
+  const backgroundJobs = objectValue(input.backgroundJobs);
+  const safeJobs = Array.isArray(backgroundJobs.jobs)
+    ? backgroundJobs.jobs.slice(0, 32).flatMap((value) => {
+      const job = objectValue(value as JsonValue);
+      const provenance = objectValue((job.provenance ?? null) as JsonValue);
+      const generatedAt = typeof provenance.generatedAt === "string"
+        && provenance.generatedAt.length <= 64
+        && /^[\x20-\x7E]+$/.test(provenance.generatedAt)
+        && !Number.isNaN(Date.parse(provenance.generatedAt))
+        ? provenance.generatedAt
+        : null;
+      return [{
+        type: safeToken(job.type),
+        state: safeToken(job.state),
+        engine: safeToken(provenance.engine),
+        modelId: provenance.modelId === null ? null : safeToken(provenance.modelId),
+        fallbackUsed: safeBoolean(provenance.fallbackUsed),
+        fallbackReason: provenance.fallbackReason === null ? null : safeToken(provenance.fallbackReason),
+        promptVersion: safeToken(provenance.promptVersion),
+        generatedAt,
+      }];
+    })
+    : [];
 
   return {
     schemaVersion: 1,
@@ -96,6 +120,11 @@ export function buildDiagnosticReport(input: DiagnosticReportInput): JsonValue {
     capture: {
       active: safeBoolean(capture.active),
       implementation: safeToken(capture.implementation),
+    },
+    backgroundTasks: {
+      activeCount: safeInteger(backgroundJobs.activeCount),
+      recent: safeJobs,
+      userContentIncluded: false,
     },
     privacy: {
       networkPolicy: safeToken(core.networkPolicy),

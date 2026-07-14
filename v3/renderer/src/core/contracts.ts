@@ -7,7 +7,7 @@ export type LocalJsonValue =
   | { [key: string]: LocalJsonValue };
 
 export type JsonObject = Record<string, LocalJsonValue>;
-export type AiMode = "quality" | "fast";
+export type AiMode = "local-llm" | "heuristic-fallback";
 export type InstructAssetKind = "runner" | "model";
 export type AppView = "home" | "meeting" | "library" | "detail" | "review" | "settings" | "export";
 export type DetailSection = "summary" | "transcript" | "notes";
@@ -134,6 +134,10 @@ export interface TerminologyDictionaryRow {
   signatureKeyId: string | null;
   trustLabel: string | null;
   signatureVerified: boolean;
+  scope: "meeting" | "project" | "organization" | "personal" | "specialist" | "general";
+  scopeTargetId: string | null;
+  explicitPreference: number;
+  approvedCorrectionCount: number;
 }
 
 export interface TerminologyStatus {
@@ -142,6 +146,7 @@ export interface TerminologyStatus {
   entryCount: number;
   dictionaries: TerminologyDictionaryRow[];
   encryptedAtRest: boolean;
+  projectScopeAvailable: false;
 }
 
 export interface TerminologyCorrectionProposal {
@@ -213,6 +218,7 @@ export interface LocalAiRecap {
   risks: RecapItem[];
   questions: RecapItem[];
   citations: RecapItem[];
+  provenance: AiProvenance;
 }
 
 export interface LocalAiAnswer {
@@ -222,6 +228,16 @@ export interface LocalAiAnswer {
   answerFound: boolean;
   intent: string;
   citations: RecapItem[];
+  provenance: AiProvenance;
+}
+
+export interface AiProvenance {
+  engine: "local-llm" | "heuristic";
+  modelId: string | null;
+  fallbackUsed: boolean;
+  fallbackReason: "llm-unavailable" | "runtime-failed" | "model-corrupt" | "resource-policy" | "user-requested" | null;
+  promptVersion: string;
+  generatedAt: string;
 }
 
 export interface NetworkCapability {
@@ -245,6 +261,7 @@ export interface PrivacyEvent {
   sha256: string | null;
   format: string | null;
   bytes: number | null;
+  aiProvenance: AiProvenance | null;
   createdAtMs: number;
 }
 
@@ -636,6 +653,26 @@ export function parseTerminologyStatus(value: unknown): TerminologyStatus {
   const dictionaries = expectArray(object.dictionaries, "terminology.status.dictionaries")
     .map((item, index): TerminologyDictionaryRow => {
       const dictionary = expectObject(item, `terminology.status.dictionaries[${index}]`);
+      const scope = stringField(dictionary.scope, `terminology.status.dictionaries[${index}].scope`);
+      if (!new Set(["meeting", "project", "organization", "personal", "specialist", "general"]).has(scope)) {
+        throw new ProtocolValidationError(
+          `terminology.status.dictionaries[${index}].scope`,
+          "meeting, project, organization, personal, specialist, or general",
+        );
+      }
+      const signatureVerified = booleanField(
+        dictionary.signatureVerified,
+        `terminology.status.dictionaries[${index}].signatureVerified`,
+      );
+      const rawTrustLabel = nullableStringField(
+        dictionary.trustLabel,
+        `terminology.status.dictionaries[${index}].trustLabel`,
+      );
+      const trustLabel = rawTrustLabel === "verified-candor" && signatureVerified
+        ? "verified-candor"
+        : rawTrustLabel !== null || signatureVerified
+          ? "community-unverified"
+          : null;
       return {
         dictionaryId: stringField(dictionary.dictionaryId, `terminology.status.dictionaries[${index}].dictionaryId`),
         name: stringField(dictionary.name, `terminology.status.dictionaries[${index}].name`),
@@ -650,10 +687,14 @@ export function parseTerminologyStatus(value: unknown): TerminologyStatus {
         publisher: nullableStringField(dictionary.publisher, `terminology.status.dictionaries[${index}].publisher`),
         language: nullableStringField(dictionary.language, `terminology.status.dictionaries[${index}].language`),
         signatureKeyId: nullableStringField(dictionary.signatureKeyId, `terminology.status.dictionaries[${index}].signatureKeyId`),
-        trustLabel: nullableStringField(dictionary.trustLabel, `terminology.status.dictionaries[${index}].trustLabel`),
-        signatureVerified: booleanField(
-          dictionary.signatureVerified,
-          `terminology.status.dictionaries[${index}].signatureVerified`,
+        trustLabel,
+        signatureVerified,
+        scope: scope as TerminologyDictionaryRow["scope"],
+        scopeTargetId: nullableStringField(dictionary.scopeTargetId, `terminology.status.dictionaries[${index}].scopeTargetId`),
+        explicitPreference: numberField(dictionary.explicitPreference, `terminology.status.dictionaries[${index}].explicitPreference`),
+        approvedCorrectionCount: numberField(
+          dictionary.approvedCorrectionCount,
+          `terminology.status.dictionaries[${index}].approvedCorrectionCount`,
         ),
       };
     });
@@ -663,6 +704,9 @@ export function parseTerminologyStatus(value: unknown): TerminologyStatus {
     entryCount: numberField(object.entryCount, "terminology.status.entryCount"),
     dictionaries,
     encryptedAtRest: booleanField(object.encryptedAtRest, "terminology.status.encryptedAtRest"),
+    projectScopeAvailable: object.projectScopeAvailable === false
+      ? false
+      : (() => { throw new ProtocolValidationError("terminology.status.projectScopeAvailable", "false until projects have stable identifiers"); })(),
   };
 }
 
@@ -859,6 +903,39 @@ function recapItems(object: JsonObject, key: string): RecapItem[] {
     .map((item, index) => parseRecapItem(item, `ai.recap.${key}[${index}]`));
 }
 
+function parseAiProvenance(value: unknown, field: string): AiProvenance {
+  const object = expectObject(value, field);
+  const engine = stringField(object.engine, `${field}.engine`);
+  if (engine !== "local-llm" && engine !== "heuristic") {
+    throw new ProtocolValidationError(`${field}.engine`, "local-llm or heuristic");
+  }
+  const modelId = nullableStringField(object.modelId, `${field}.modelId`);
+  const fallbackUsed = booleanField(object.fallbackUsed, `${field}.fallbackUsed`);
+  const rawReason = nullableStringField(object.fallbackReason, `${field}.fallbackReason`);
+  const reasons = ["llm-unavailable", "runtime-failed", "model-corrupt", "resource-policy", "user-requested"] as const;
+  if (rawReason !== null && !reasons.includes(rawReason as typeof reasons[number])) {
+    throw new ProtocolValidationError(`${field}.fallbackReason`, "an approved fallback reason");
+  }
+  if (fallbackUsed !== (rawReason !== null)) {
+    throw new ProtocolValidationError(field, "fallback status matching its reason");
+  }
+  if (engine === "local-llm" && !modelId) {
+    throw new ProtocolValidationError(`${field}.modelId`, "a local model identifier");
+  }
+  const generatedAt = stringField(object.generatedAt, `${field}.generatedAt`);
+  if (Number.isNaN(Date.parse(generatedAt))) {
+    throw new ProtocolValidationError(`${field}.generatedAt`, "an RFC 3339 timestamp");
+  }
+  return {
+    engine,
+    modelId,
+    fallbackUsed,
+    fallbackReason: rawReason as AiProvenance["fallbackReason"],
+    promptVersion: stringField(object.promptVersion, `${field}.promptVersion`),
+    generatedAt,
+  };
+}
+
 export function parseRecap(value: unknown): LocalAiRecap {
   const object = expectObject(value, "ai.recap");
   const markdown = stringField(object.recapMarkdown, "ai.recap.recapMarkdown", "");
@@ -882,6 +959,7 @@ export function parseRecap(value: unknown): LocalAiRecap {
     questions: recapItems(object, "questions"),
     citations: optionalArray(object.citations, "ai.recap.citations")
       .map((item, index) => parseCitation(item, `ai.recap.citations[${index}]`)),
+    provenance: parseAiProvenance(object.provenance, "ai.recap.provenance"),
   };
 }
 
@@ -906,6 +984,7 @@ export function parseAnswer(value: unknown): LocalAiAnswer {
     intent: stringField(object.intent, "ai.ask.intent", engine === "llama-cpp-local" ? "cited local answer" : "general"),
     citations: optionalArray(object.citations, "ai.ask.citations")
       .map((item, index) => parseCitation(item, `ai.ask.citations[${index}]`)),
+    provenance: parseAiProvenance(object.provenance, "ai.ask.provenance"),
   };
 }
 
@@ -940,6 +1019,9 @@ function parsePrivacyEvent(value: unknown, field: string): PrivacyEvent {
   if (!(["transcription", "local-ai-recap", "local-ai-ask", "export"] as string[]).includes(eventType)) {
     throw new ProtocolValidationError(`${field}.eventType`, "a known privacy event type");
   }
+  const aiProvenance = object.aiProvenance === null || object.aiProvenance === undefined
+    ? null
+    : parseAiProvenance(object.aiProvenance, `${field}.aiProvenance`);
   return {
     eventType: eventType as PrivacyEvent["eventType"],
     engine: nullableStringField(object.engine, `${field}.engine`),
@@ -947,6 +1029,7 @@ function parsePrivacyEvent(value: unknown, field: string): PrivacyEvent {
     sha256: nullableStringField(object.sha256, `${field}.sha256`),
     format: nullableStringField(object.format, `${field}.format`),
     bytes: nullableNumberField(object.bytes, `${field}.bytes`),
+    aiProvenance,
     createdAtMs: numberField(object.createdAtMs, `${field}.createdAtMs`),
   };
 }

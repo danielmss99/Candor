@@ -1,4 +1,4 @@
-import { asBool, asObject, asString, type JsonObject, type LocalJsonValue } from "./contracts";
+import { asObject, asString, type LocalJsonValue } from "./contracts";
 
 type CandorApi = NonNullable<Window["candor"]>;
 
@@ -6,7 +6,7 @@ export interface WaitForJobOptions {
   acknowledge?: boolean;
   pollIntervalMs?: number;
   signal?: AbortSignal;
-  onProgress?: (job: JsonObject) => void;
+  onProgress?: (job: BackgroundTask) => void;
 }
 
 function acceptedJobId(value: unknown): string {
@@ -33,23 +33,22 @@ export async function waitForJob(
       unsubscribe();
       options.signal?.removeEventListener("abort", onAbort);
     };
-    const finish = async (job: JsonObject) => {
-      if (settled || !asBool(job.terminal)) return false;
+    const finish = async (job: BackgroundTask) => {
+      if (settled || !job.terminal) return false;
       cleanup();
-      const state = asString(job.state);
+      const state = job.state;
       if (state === "completed") {
         const result = (job.result ?? null) as LocalJsonValue;
         if (options.acknowledge !== false) await api.app.acknowledgeJob(jobId).catch(() => undefined);
         resolve(result);
       } else {
-        const error = asObject(job.error);
-        reject(new Error(asString(error.message, state === "cancelled" ? "Local work was cancelled." : "Local work failed.")));
+        reject(new Error(job.error?.message ?? (state === "cancelled" ? "Local work was cancelled." : "Local work failed.")));
       }
       return true;
     };
     const inspect = async () => {
       try {
-        const job = asObject(await api.app.getJob(jobId));
+        const job = await api.app.getJob(jobId);
         options.onProgress?.(job);
         if (await finish(job)) return;
       } catch (error) {
@@ -68,10 +67,9 @@ export async function waitForJob(
       });
     };
     const unsubscribe = api.events.subscribe("jobs.changed", (payload) => {
-      const job = asObject(payload as LocalJsonValue);
-      if (asString(job.jobId) !== jobId) return;
-      options.onProgress?.(job);
-      if (asBool(job.terminal)) void inspect();
+      if (payload.jobId !== jobId) return;
+      options.onProgress?.(payload);
+      if (payload.terminal) void inspect();
     });
     options.signal?.addEventListener("abort", onAbort, { once: true });
     if (options.signal?.aborted) onAbort();

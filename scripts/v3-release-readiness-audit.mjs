@@ -710,10 +710,11 @@ function validateMainArchitecture(payload) {
 function validateGuiStateMatrix(payload) {
   const failures = [];
   const expectedScenarios = [
-    "home-empty", "home-populated", "live-recording", "live-finalizing", "live-low-disk",
+    "home-empty", "home-populated", "background-activity", "live-recording", "live-finalizing", "live-low-disk",
     "live-degraded-core", "meetings-1000", "meeting-no-transcript", "meeting-long-transcript",
+    "meeting-fallback-notice",
     "review-desktop", "review-compact", "export-default", "export-failed", "settings-normal",
-    "settings-advanced", "settings-local-ai-checking", "settings-local-ai-repair",
+    "settings-advanced", "settings-local-ai-ready", "settings-local-ai-checking", "settings-local-ai-repair",
     "core-unavailable", "core-incompatible", "permission-denied",
     "model-unavailable", "license-expired-existing-data",
   ];

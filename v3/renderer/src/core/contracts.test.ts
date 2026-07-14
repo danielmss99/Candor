@@ -8,9 +8,28 @@ import {
   parseProtocolVersion,
   parseRecap,
   parseRecordingPage,
+  parseTerminologyStatus,
   parseTranscriptPage,
   parseTranscriptionQualityStatus,
 } from "./contracts";
+
+const heuristicProvenance = {
+  engine: "heuristic",
+  modelId: null,
+  fallbackUsed: true,
+  fallbackReason: "user-requested",
+  promptVersion: "candor-heuristic-v1",
+  generatedAt: "2026-07-14T12:00:00Z",
+};
+
+const localLlmProvenance = {
+  engine: "local-llm",
+  modelId: "qwen3-4b-official-q4_k_m",
+  fallbackUsed: false,
+  fallbackReason: null,
+  promptVersion: "candor-grounded-v1",
+  generatedAt: "2026-07-14T12:00:00Z",
+};
 
 describe("versioned Candor contracts", () => {
   it("accepts the expected core protocol", () => {
@@ -131,7 +150,16 @@ describe("versioned Candor contracts", () => {
       capture: { channels: ["mic", "system"], audioChunkCount: 2, channelAttribution: true },
       storage: { rootKind: "local-user-data", encryptedAudioChunkCount: 2, allAudioEncrypted: true, cipher: "chacha20poly1305" },
       content: { transcriptSegmentCount: 4, notesSavedLocally: true },
-      processing: [],
+      processing: [{
+        eventType: "local-ai-recap",
+        engine: "heuristic",
+        modelId: null,
+        sha256: null,
+        format: null,
+        bytes: null,
+        aiProvenance: heuristicProvenance,
+        createdAtMs: 2,
+      }],
       exports: [],
       retention: { policy: "manual-delete-only", automaticDeletion: false },
       network: { policy: "disabled-by-default", externalCallsAttempted: 0, capabilities: [] },
@@ -140,6 +168,44 @@ describe("versioned Candor contracts", () => {
     });
     expect(receipt.capture.channels).toEqual(["mic", "system"]);
     expect(receipt.network.externalCallsAttempted).toBe(0);
+    expect(receipt.processing[0].aiProvenance).toEqual(heuristicProvenance);
+  });
+
+  it("downgrades unknown signed dictionary trust labels at the renderer boundary", () => {
+    const status = parseTerminologyStatus({
+      implemented: true,
+      state: "ready",
+      dictionaryCount: 1,
+      entryCount: 1,
+      dictionaries: [{
+        dictionaryId: "dictionary-1",
+        name: "Community terms",
+        enabled: true,
+        assignedToRecording: false,
+        entryCount: 1,
+        packageId: "org.example.terms",
+        packageVersion: "1.0.0",
+        publisher: "Example",
+        language: "en",
+        signatureKeyId: "unknown-key",
+        trustLabel: "verified-organization",
+        signatureVerified: true,
+        scope: "specialist",
+        scopeTargetId: null,
+        explicitPreference: 0,
+        approvedCorrectionCount: 0,
+      }],
+      encryptedAtRest: true,
+      projectScopeAvailable: false,
+      promptWritingRequired: false,
+      automaticCorrection: false,
+      localOnly: true,
+      cloudAi: false,
+      rawPathExposed: false,
+      keyMaterialExposedToRenderer: false,
+    });
+
+    expect(status.dictionaries[0].trustLabel).toBe("community-unverified");
   });
 
   it("accepts quote-only heuristic citations", () => {
@@ -152,6 +218,7 @@ describe("versioned Candor contracts", () => {
       questions: [],
       citations: [{ segmentIndex: 0, startMs: 10, speaker: "Alex", quote: "Decision text" }],
       recapMarkdown: "",
+      provenance: heuristicProvenance,
     });
     expect(recap.citations[0]).toMatchObject({ text: "Decision text", quote: "Decision text" });
   });
@@ -161,6 +228,7 @@ describe("versioned Candor contracts", () => {
       engine: "heuristic-local",
       summary: "Local summary",
       citations: [{ segmentIndex: 0, quote: "Evidence", text: 42 }],
+      provenance: heuristicProvenance,
     })).toThrow("citations[0].text");
   });
 
@@ -180,8 +248,9 @@ describe("versioned Candor contracts", () => {
       questions: [],
       citations: [],
       recapMarkdown: "Grounded recap",
+      provenance: localLlmProvenance,
     })).not.toThrow();
-    expect(() => parseRecap({ ...strict, strictOutputValidated: false }))
+    expect(() => parseRecap({ ...strict, strictOutputValidated: false, provenance: localLlmProvenance }))
       .toThrow("strict source-linked");
     expect(() => parseAnswer({
       ...strict,
@@ -189,12 +258,14 @@ describe("versioned Candor contracts", () => {
       answer: "No grounded answer was found in this meeting.",
       answerFound: false,
       citations: [],
+      provenance: localLlmProvenance,
     })).not.toThrow();
     expect(() => parseAnswer({
       ...strict,
       outputSchemaVersion: 2,
       answer: "Unsupported",
       citations: [],
+      provenance: localLlmProvenance,
     })).toThrow("strict source-linked");
   });
 

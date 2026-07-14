@@ -9,9 +9,18 @@ interface PrivacyReceiptProps {
 function readableEngine(value: string | null): string {
   if (!value) return "Local processing";
   if (value.includes("whisper")) return "Local transcription";
-  if (value.includes("heuristic")) return "Fast local analysis";
-  if (value.includes("llama")) return "Local language model";
+  if (value.includes("heuristic")) return "Heuristic fallback";
+  if (value.includes("llama") || value.includes("local-llm")) return "Local language model";
   return value;
+}
+
+function readableFallbackReason(value: string | null | undefined): string {
+  if (value === "llm-unavailable") return "Local AI unavailable";
+  if (value === "runtime-failed") return "Local AI runtime failed";
+  if (value === "model-corrupt") return "Local AI model needs repair";
+  if (value === "resource-policy") return "Device resource policy";
+  if (value === "user-requested") return "User selected fallback";
+  return "No fallback";
 }
 
 export function PrivacyReceipt({ receipt, network, compact = false }: PrivacyReceiptProps) {
@@ -59,6 +68,14 @@ export function PrivacyReceipt({ receipt, network, compact = false }: PrivacyRec
                 <article key={`${event.eventType}-${event.createdAtMs}-${index}`}>
                   <strong>{readableEngine(event.engine)}</strong>
                   <span>{event.modelId ?? "Built-in local method"}</span>
+                  {event.aiProvenance ? (
+                    <small>
+                      {event.aiProvenance.fallbackUsed
+                        ? `Fallback disclosed: ${readableFallbackReason(event.aiProvenance.fallbackReason)}`
+                        : "Packaged Local AI"}
+                      {` | Prompt ${event.aiProvenance.promptVersion} | ${new Date(event.aiProvenance.generatedAt).toLocaleString()}`}
+                    </small>
+                  ) : null}
                   {event.sha256 ? <code title={event.sha256}>Integrity {event.sha256.slice(0, 12)}...</code> : null}
                   {event.bytes !== null ? <small>{formatBytes(event.bytes)}</small> : null}
                 </article>

@@ -111,7 +111,29 @@ describe("local AI model state", () => {
       rawPathExposed: false,
       keyMaterialExposedToRenderer: false,
     });
-    const oldFailure = { type: "local-ai-benchmark", state: "failed", terminal: true };
+    const oldFailure: BackgroundTask = {
+      jobId: "a".repeat(32),
+      type: "local-ai-benchmark",
+      state: "failed",
+      createdAt: "2026-07-14T05:00:00Z",
+      updatedAt: "2026-07-14T05:00:01Z",
+      error: {
+        code: "BENCHMARK_FAILED",
+        title: "Performance check failed",
+        message: "The local performance check failed.",
+        retryable: true,
+        severity: "error",
+        correlationId: "a".repeat(32),
+        rawPathExposed: false,
+      },
+      cancelRequested: false,
+      retryCount: 0,
+      retryable: true,
+      terminal: true,
+      sourceDataPreserved: true,
+      rawPathExposed: false,
+      keyMaterialExposedToRenderer: false,
+    };
     expect(benchmarkRetryRequired(measured, oldFailure)).toBe(false);
     expect(benchmarkRetryRequired({ ...measured, benchmarkState: "not-run" }, oldFailure)).toBe(true);
   });

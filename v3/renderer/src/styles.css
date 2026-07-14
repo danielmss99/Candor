@@ -2750,28 +2750,6 @@ p {
   padding-top: 14px;
 }
 
-.dictionary-drop-zone {
-  align-items: center;
-  border: 1px dashed var(--border-default);
-  display: flex;
-  justify-content: space-between;
-  margin-top: 14px;
-  min-height: 44px;
-  padding: 8px 10px;
-}
-
-.dictionary-drop-zone span {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.terminology-settings[data-dragging="true"] .dictionary-drop-zone {
-  background: var(--bg-selected);
-  border-color: var(--border-focus);
-  outline: 2px solid var(--focus-ring);
-  outline-offset: 2px;
-}
-
 .terminology-list,
 .terminology-proposal-list {
   border-top: 1px solid var(--border-subtle);
@@ -2849,13 +2827,58 @@ p {
 }
 
 .inline-alert {
-  border-left: 3px solid var(--error);
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--warning-border);
+  border-left: 3px solid var(--warning);
+  border-radius: var(--radius);
+  background: var(--warning-soft);
   color: var(--text-primary);
   margin-top: 14px;
-  padding: 8px 10px;
+  padding: 10px 12px;
+  line-height: 1.4;
+}
+
+.inline-alert > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.inline-alert strong,
+.inline-alert span {
+  display: block;
+}
+
+.inline-alert span {
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+
+.inline-alert > button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border: 1px solid var(--border-default);
+  background: var(--button-secondary-background);
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 650;
+  padding: 0 11px;
+  text-align: center;
+}
+
+.inline-alert > button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--button-secondary-hover);
 }
 
 @media (max-width: 1080px) {
+  .inline-alert {
+    flex-wrap: wrap;
+  }
+
   .terminology-list article {
     grid-template-columns: minmax(0, 1fr) auto;
   }
