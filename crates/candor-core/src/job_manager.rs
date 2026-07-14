@@ -569,6 +569,12 @@ impl JobManager {
         descriptor: Option<JobDescriptor>,
         parent_job_id: Option<String>,
     ) -> Result<(String, Value), JobManagerError> {
+        if self.inner.shutdown_requested.load(Ordering::SeqCst) {
+            return Err(JobManagerError::new(
+                "JOB_SHUTDOWN_IN_PROGRESS",
+                "new local work cannot start while Candor is closing",
+            ));
+        }
         if descriptor.is_some() {
             self.require_persistence_ready()?;
         }
@@ -864,6 +870,13 @@ impl JobManager {
                 }
                 paused.push(entry.job_id.clone());
             }
+        }
+        if paused.is_empty() {
+            return Ok(json!({
+                "pausedCount": 0,
+                "restartOnNextLaunch": false,
+                "rawPathExposed": false
+            }));
         }
         self.persist()?;
         self.inner.priority_changed.notify_all();
@@ -2241,5 +2254,39 @@ mod tests {
         assert_eq!(error.code, "JOB_STORE_CORRUPT");
         assert_eq!(manager.list().unwrap()["persistenceState"], "unavailable");
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shutdown_without_active_jobs_does_not_require_job_store_access() {
+        let root = test_root("shutdown-empty-corrupt-store");
+        let jobs_root = root.join("jobs");
+        fs::create_dir_all(&jobs_root).unwrap();
+        fs::write(jobs_root.join(JOB_STORE_FILE), b"not-a-job-store").unwrap();
+        let manager = JobManager::with_test_roots("test-protocol", jobs_root, root.join("keys"));
+
+        let result = manager
+            .pause_all_for_shutdown()
+            .expect("an empty queue should shut down without rewriting job state");
+
+        assert_eq!(result["pausedCount"], 0);
+        assert_eq!(result["restartOnNextLaunch"], false);
+        assert_eq!(manager.list().unwrap()["persistenceState"], "unavailable");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shutdown_rejects_new_jobs_after_the_empty_queue_check() {
+        let manager = JobManager::new("test-protocol");
+        let result = manager
+            .pause_all_for_shutdown()
+            .expect("an empty in-memory queue should shut down");
+        assert_eq!(result["pausedCount"], 0);
+
+        let error = manager
+            .submit("late-work", false, |_| Ok(json!({ "completed": true })))
+            .expect_err("shutdown must close the submission gate");
+
+        assert_eq!(error.code, "JOB_SHUTDOWN_IN_PROGRESS");
+        assert_eq!(manager.list().unwrap()["jobCount"], 0);
     }
 }

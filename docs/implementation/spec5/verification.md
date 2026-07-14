@@ -8,7 +8,7 @@ Date: 2026-07-14
 | --- | --- |
 | `cargo fmt -- --check` | Passed |
 | `cargo clippy --all-targets -- -D warnings` | Passed |
-| `cargo test` | 148 passed |
+| `cargo test` | 150 passed |
 | `npm test` | 155 passed across 42 files |
 | `npm run electron:v3:typecheck-renderer` | Passed |
 | `npm run electron:v3:build` | Passed, including release Rust core and production renderer |
@@ -42,6 +42,12 @@ The verifier self-test also proves that a Maximum Accuracy-only speech model is 
 ## Claude review
 
 Two authenticated focused reviews completed successfully. Claude reported one high, three medium, and two low findings. All six were accepted and fixed with targeted regression tests. A requested follow-up review started through the authenticated helper but Claude returned HTTP 429 because the account session limit had been reached. The helper saved that failure honestly in `claude-fix-rereview.md`; no follow-up approval is claimed.
+
+A second focused request covered the hosted Ubuntu shutdown correction. Claude again returned HTTP 429 before reviewing it, and the helper saved the exact failure in `claude-ci-fix-review.md`. An internal adversarial pass then closed the concurrent-submit race by rejecting new work after shutdown begins. The two shutdown regression tests, Clippy, and the complete M0 verification pass locally; hosted rerun status is tracked on PR #10.
+
+## Hosted CI correction
+
+The first PR run passed macOS and dependency auditing but exposed a Linux-only M0 smoke failure. The headless Ubuntu runner has no desktop Secret Service keyring, and `core.shutdown` unnecessarily attempted to create an encrypted empty job store when no background jobs existed. `pause_all_for_shutdown` now avoids persistence when the queue is empty and rejects concurrent submissions after shutdown starts. Persisted job creation, mutation, retry, and active-job pausing still fail closed without the OS-backed key.
 
 ## External verification still required
 
