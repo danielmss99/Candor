@@ -72,6 +72,13 @@ const terminologyStatus: TerminologyStatus = {
     enabled: true,
     assignedToRecording: true,
     entryCount: 1842,
+    packageId: "com.candor.dictionary.pharmaceutics",
+    packageVersion: "1.0.0",
+    publisher: "Candor",
+    language: "en",
+    signatureKeyId: "candor-dictionary-1",
+    trustLabel: "verified-candor-bundle",
+    signatureVerified: true,
   }],
 };
 

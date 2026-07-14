@@ -4,11 +4,11 @@ import path from "node:path";
 import { launchCandor, type CandorElectronSession } from "./candor-electron";
 
 const expectedPreloadSurface = {
-  app: ["acknowledgeJob", "getCapabilities", "getConnectionStatus", "getJob", "getStatus", "getVersion", "listJobs", "prepareDiagnostics", "retryCore", "saveDiagnostics"],
+  app: ["acknowledgeJob", "cancelAllJobs", "cancelJob", "getActiveJobs", "getCapabilities", "getConnectionStatus", "getJob", "getStatus", "getVersion", "listJobs", "prepareDiagnostics", "retryCore", "retryJob", "saveDiagnostics"],
   capture: ["acknowledgeConsent", "getConsent", "getDevices", "getStatus", "recover", "start", "stop"],
   meetings: ["delete", "get", "getImportStatus", "getNotes", "getPrivacyReceipt", "getReplayManifest", "getStorageStatus", "getTranscript", "importLegacy", "list", "readAudioChunk", "search", "updateNotes"],
   transcript: ["cancel", "getQuality", "getStatus", "setQuality", "start", "startQualityBenchmark"],
-  terminology: ["assignToMeeting", "decideCorrection", "getCorrectionProposals", "getStatus", "importDictionary", "setEnabled"],
+  terminology: ["assignToMeeting", "decideCorrection", "getCorrectionProposals", "getStatus", "importDictionary", "importDictionaryPackage", "setEnabled"],
   ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getBundledAssetsStatus", "getEnhancedAssetsStatus", "getEnhancedStatus", "getStatus", "getWorkloadStatus", "listSpeechModels", "verifySpeechModel"],
   exports: ["cancel", "create", "saveCompleted"],
   settings: ["getNetworkPolicy", "getPrivacyAudit", "getRetentionStatus", "getStorageStatus", "getUpdateStatus", "openLocalStorage"],

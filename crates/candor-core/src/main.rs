@@ -1,6 +1,8 @@
+mod background_jobs;
 mod bundled_ai_assets;
 mod capture_service;
 mod consent_store;
+mod dictionary_package;
 mod grounded_output;
 mod job_manager;
 mod local_ai_service;
@@ -24,6 +26,11 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use background_jobs::{
+    descriptor_for_ask, descriptor_for_dictionary_import, descriptor_for_export,
+    descriptor_for_recap, descriptor_for_transcription, processing_queue_failure,
+    BackgroundJobServices,
+};
 use bundled_ai_assets::BundledAiAssets;
 use capture_service::{
     CaptureError, CaptureManager, CaptureStartMicAndSystemParams, CaptureStartParams,
@@ -142,6 +149,13 @@ struct AiAskJobParams {
     quality: AiJobQuality,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DictionaryPackageStartParams {
+    source_file_name: String,
+    archive_base64: String,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CoreStatus {
@@ -231,7 +245,14 @@ impl CoreState {
             recording_store.settings_root_for_core().join("terminology"),
             recording_store.key_root_for_core(),
         );
-        Self {
+        let job_manager = JobManager::with_roots(
+            PROTOCOL_VERSION,
+            recording_store
+                .settings_root_for_core()
+                .join("background-jobs"),
+            recording_store.key_root_for_core(),
+        );
+        let state = Self {
             started_at_ms,
             bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
@@ -245,7 +266,7 @@ impl CoreState {
                 bundled_ai_assets.clone(),
                 terminology_service.clone(),
             ),
-            job_manager: JobManager::new(PROTOCOL_VERSION),
+            job_manager,
             model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
@@ -260,7 +281,11 @@ impl CoreState {
             update_policy: UpdatePolicy,
             v2_importer: V2Importer,
             vault_store,
-        }
+        };
+        let background_services = state.background_job_services();
+        let _ = background_services.ensure_bundled_general_dictionary();
+        state.job_manager.recover(background_services.executor());
+        state
     }
 
     #[cfg(test)]
@@ -286,7 +311,14 @@ impl CoreState {
             recording_store.key_root_for_core(),
         );
         let bundled_ai_assets = BundledAiAssets::disabled();
-        Self {
+        let job_manager = JobManager::with_test_roots(
+            PROTOCOL_VERSION,
+            recording_store
+                .settings_root_for_core()
+                .join("background-jobs"),
+            recording_store.key_root_for_core(),
+        );
+        let state = Self {
             started_at_ms,
             bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
@@ -300,7 +332,7 @@ impl CoreState {
                 bundled_ai_assets.clone(),
                 terminology_service.clone(),
             ),
-            job_manager: JobManager::new(PROTOCOL_VERSION),
+            job_manager,
             model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
@@ -315,7 +347,21 @@ impl CoreState {
             update_policy: UpdatePolicy,
             v2_importer: V2Importer,
             vault_store,
-        }
+        };
+        let background_services = state.background_job_services();
+        let _ = background_services.ensure_bundled_general_dictionary();
+        state.job_manager.recover(background_services.executor());
+        state
+    }
+
+    fn background_job_services(&self) -> BackgroundJobServices {
+        BackgroundJobServices::new(
+            self.bundled_ai_assets.clone(),
+            self.model_manager.clone(),
+            self.recording_store.clone(),
+            self.terminology_service.clone(),
+            self.transcription_service.clone(),
+        )
     }
 }
 
@@ -432,6 +478,18 @@ fn make_error(id: Value, code: &'static str, message: impl Into<String>) -> RpcR
 
 fn make_recording_error(id: Value, error: RecordingStoreError) -> RpcResponse {
     make_error(id, error.code, error.message)
+}
+
+fn finalized_capture_recording_id(value: &Value) -> Option<String> {
+    let capture = value.get("capture")?.as_object()?;
+    if capture.get("integrityStatus")?.as_str()? != "verified" {
+        return None;
+    }
+    capture
+        .get("recordingId")?
+        .as_str()
+        .filter(|recording_id| !recording_id.is_empty())
+        .map(str::to_string)
 }
 
 fn make_capture_error(id: Value, error: CaptureError) -> RpcResponse {
@@ -584,6 +642,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "transcription.quality.benchmark.start",
                 "terminology.status",
                 "terminology.import",
+                "terminology.package.start",
                 "terminology.setEnabled",
                 "terminology.assign",
                 "terminology.proposals",
@@ -592,8 +651,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "transcription.start",
                 "transcription.proofSynthetic",
                 "jobs.list",
+                "jobs.activeSummary",
                 "jobs.get",
                 "jobs.cancel",
+                "jobs.cancelAll",
+                "jobs.pauseAll",
+                "jobs.retry",
                 "jobs.acknowledge",
                 "recording.durable.status",
                 "recording.durable.start",
@@ -777,12 +840,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             if let Err(error) = state.consent_store.require_mic_recording() {
                 return make_consent_error(id, error);
             }
+            state.job_manager.set_recording_active(true);
             match state
                 .capture_manager
                 .start_mic(state.recording_store.clone(), params)
             {
                 Ok(value) => value,
-                Err(error) => return make_capture_error(id, error),
+                Err(error) => {
+                    state.job_manager.set_recording_active(false);
+                    return make_capture_error(id, error);
+                }
             }
         }
         "capture.startSystem" => {
@@ -793,12 +860,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             if let Err(error) = state.consent_store.require_system_audio_recording() {
                 return make_consent_error(id, error);
             }
+            state.job_manager.set_recording_active(true);
             match state
                 .capture_manager
                 .start_system(state.recording_store.clone(), params)
             {
                 Ok(value) => value,
-                Err(error) => return make_capture_error(id, error),
+                Err(error) => {
+                    state.job_manager.set_recording_active(false);
+                    return make_capture_error(id, error);
+                }
             }
         }
         "capture.startMicAndSystem" => {
@@ -810,16 +881,60 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             if let Err(error) = state.consent_store.require_mic_and_system_audio_recording() {
                 return make_consent_error(id, error);
             }
+            state.job_manager.set_recording_active(true);
             match state
                 .capture_manager
                 .start_mic_and_system(state.recording_store.clone(), params)
             {
                 Ok(value) => value,
-                Err(error) => return make_capture_error(id, error),
+                Err(error) => {
+                    state.job_manager.set_recording_active(false);
+                    return make_capture_error(id, error);
+                }
             }
         }
         "capture.stop" => match state.capture_manager.stop(&state.recording_store) {
-            Ok(value) => value,
+            Ok(mut value) => {
+                let recording_id = finalized_capture_recording_id(&value);
+                if recording_id.is_some() {
+                    state.job_manager.set_recording_active(false);
+                }
+                if let Some(recording_id) = recording_id {
+                    let descriptor = descriptor_for_transcription(recording_id, None, None, true);
+                    let executor = state.background_job_services().executor();
+                    match state.job_manager.submit_descriptor(descriptor, executor) {
+                        Ok(job) => {
+                            if let Some(root) = value.as_object_mut() {
+                                root.insert("autoProcessingQueued".to_string(), Value::Bool(true));
+                                root.insert(
+                                    "transcriptionJobId".to_string(),
+                                    job.get("jobId").cloned().unwrap_or(Value::Null),
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            if let Some(root) = value.as_object_mut() {
+                                root.insert("autoProcessingQueued".to_string(), Value::Bool(false));
+                                root.insert(
+                                    "processingQueueError".to_string(),
+                                    processing_queue_failure(&error),
+                                );
+                            }
+                        }
+                    }
+                } else if let Some(root) = value.as_object_mut() {
+                    root.insert("autoProcessingQueued".to_string(), Value::Bool(false));
+                    root.insert(
+                        "processingQueueError".to_string(),
+                        json!({
+                            "code": "CAPTURE_RECOVERY_REQUIRED",
+                            "message": "Background processing is paused until the recording is recovered.",
+                            "retryable": true
+                        }),
+                    );
+                }
+                value
+            }
             Err(error) => return make_capture_error(id, error),
         },
         "capture.proofSynthetic" => match state
@@ -1132,66 +1247,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            let store = state.recording_store.clone();
-            let asset_root = store.models_root_for_core().join("instruct");
-            let bundled_ai_assets = state.bundled_ai_assets.clone();
-            let terminology_service = state.terminology_service.clone();
-            match state.job_manager.submit("recap", true, move |context| {
-                context.progress("preparing", 0, Some(3), Some("stage"));
-                let recording_id = params.recording_id;
-                let mut result = None;
-                if matches!(params.quality, AiJobQuality::Best) {
-                    let service = LocalInstructModelService::with_sources_and_terminology(
-                        asset_root,
-                        bundled_ai_assets,
-                        terminology_service,
-                    );
-                    let mut scheduler = LocalModelScheduler::default();
-                    if service.status(&scheduler)["ready"] == true {
-                        context.progress("generating", 1, Some(3), Some("stage"));
-                        result = Some(
-                            service
-                                .recap_cancellable(
-                                    &store,
-                                    &mut scheduler,
-                                    LocalInstructRecapParams {
-                                        recording_id: recording_id.clone(),
-                                        max_tokens: None,
-                                    },
-                                    context.cancellation_flag(),
-                                )
-                                .map_err(|error| {
-                                    JobFailure::new(error.code, error.message, true)
-                                })?,
-                        );
-                    }
-                }
-                if result.is_none() {
-                    context.progress("summarizing", 1, Some(3), Some("stage"));
-                    result = Some(
-                        LocalAiService
-                            .recap_heuristic(
-                                &store,
-                                LocalRecapParams {
-                                    recording_id: recording_id.clone(),
-                                },
-                            )
-                            .map_err(|error| JobFailure::new(error.code, error.message, true))?,
-                    );
-                }
-                let result = result.expect("recap result is assigned");
-                context.progress("saving-local-result", 2, Some(3), Some("stage"));
-                store
-                    .record_processing_fact(
-                        &recording_id,
-                        "local-ai-recap",
-                        result["engine"].as_str().unwrap_or("local-ai"),
-                        None,
-                        None,
-                    )
-                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
-                Ok(result)
-            }) {
+            let descriptor = descriptor_for_recap(
+                params.recording_id,
+                matches!(params.quality, AiJobQuality::Best),
+            );
+            let executor = state.background_job_services().executor();
+            match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
             }
@@ -1201,69 +1262,13 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            let store = state.recording_store.clone();
-            let asset_root = store.models_root_for_core().join("instruct");
-            let bundled_ai_assets = state.bundled_ai_assets.clone();
-            let terminology_service = state.terminology_service.clone();
-            match state.job_manager.submit("ask", true, move |context| {
-                context.progress("preparing", 0, Some(3), Some("stage"));
-                let recording_id = params.recording_id;
-                let question = params.question;
-                let mut result = None;
-                if matches!(params.quality, AiJobQuality::Best) {
-                    let service = LocalInstructModelService::with_sources_and_terminology(
-                        asset_root,
-                        bundled_ai_assets,
-                        terminology_service,
-                    );
-                    let mut scheduler = LocalModelScheduler::default();
-                    if service.status(&scheduler)["ready"] == true {
-                        context.progress("answering", 1, Some(3), Some("stage"));
-                        result = Some(
-                            service
-                                .ask_cancellable(
-                                    &store,
-                                    &mut scheduler,
-                                    LocalInstructAskParams {
-                                        recording_id: recording_id.clone(),
-                                        question: question.clone(),
-                                        max_tokens: None,
-                                    },
-                                    context.cancellation_flag(),
-                                )
-                                .map_err(|error| {
-                                    JobFailure::new(error.code, error.message, true)
-                                })?,
-                        );
-                    }
-                }
-                if result.is_none() {
-                    context.progress("finding-evidence", 1, Some(3), Some("stage"));
-                    result = Some(
-                        LocalAiService
-                            .ask_heuristic(
-                                &store,
-                                LocalAskParams {
-                                    recording_id: recording_id.clone(),
-                                    question,
-                                },
-                            )
-                            .map_err(|error| JobFailure::new(error.code, error.message, true))?,
-                    );
-                }
-                let result = result.expect("ask result is assigned");
-                context.progress("saving-local-result", 2, Some(3), Some("stage"));
-                store
-                    .record_processing_fact(
-                        &recording_id,
-                        "local-ai-ask",
-                        result["engine"].as_str().unwrap_or("local-ai"),
-                        None,
-                        None,
-                    )
-                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
-                Ok(result)
-            }) {
+            let descriptor = descriptor_for_ask(
+                params.recording_id,
+                params.question,
+                matches!(params.quality, AiJobQuality::Best),
+            );
+            let executor = state.background_job_services().executor();
+            match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
             }
@@ -1283,6 +1288,20 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state.terminology_service.import_dictionary(params) {
                 Ok(value) => value,
                 Err(error) => return make_terminology_error(id, error),
+            }
+        }
+        "terminology.package.start" => {
+            let params = match decode_params::<DictionaryPackageStartParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let descriptor =
+                descriptor_for_dictionary_import(params.source_file_name, params.archive_base64);
+            let executor = state.background_job_services().executor();
+            match state.job_manager.submit_descriptor(descriptor, executor) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
             }
         }
         "terminology.setEnabled" => {
@@ -1471,42 +1490,14 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            let store = state.recording_store.clone();
-            let model_manager = state.model_manager.clone();
-            let mut service = state.transcription_service.clone();
-            match state
-                .job_manager
-                .submit("transcription", true, move |context| {
-                    let recording_id = params.recording_id.clone();
-                    context.progress("loading-audio", 0, Some(3), Some("stage"));
-                    let mut scheduler = LocalModelScheduler::default();
-                    context.progress("transcribing", 1, Some(3), Some("stage"));
-                    let value = service
-                        .run_local_cancellable(
-                            &store,
-                            &mut scheduler,
-                            &model_manager,
-                            params,
-                            context.cancellation_flag(),
-                        )
-                        .map_err(|error| JobFailure::new(error.code, error.message, true))?;
-                    context.progress("saving-transcript", 2, Some(3), Some("stage"));
-                    let model = value.get("model").and_then(Value::as_object);
-                    store
-                        .record_processing_fact(
-                            &recording_id,
-                            "transcription",
-                            value["engine"].as_str().unwrap_or("whisper-rs"),
-                            model
-                                .and_then(|value| value.get("modelId"))
-                                .and_then(Value::as_str),
-                            model
-                                .and_then(|value| value.get("sha256"))
-                                .and_then(Value::as_str),
-                        )
-                        .map_err(|error| JobFailure::new(error.code, error.message, true))?;
-                    Ok(value)
-                }) {
+            let descriptor = descriptor_for_transcription(
+                params.recording_id,
+                params.channel,
+                params.model_id,
+                false,
+            );
+            let executor = state.background_job_services().executor();
+            match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
             }
@@ -1595,7 +1586,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "recording.durable.recover" => match state.recording_store.recover() {
-            Ok(value) => annotate_recovery_result(value, state),
+            Ok(value) => {
+                state.job_manager.set_recording_active(false);
+                annotate_recovery_result(value, state)
+            }
             Err(error) => return make_recording_error(id, error),
         },
         "recording.durable.list" => match state.recording_store.list() {
@@ -1715,6 +1709,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             Ok(value) => value,
             Err(error) => return make_job_error(id, error),
         },
+        "jobs.activeSummary" => match state.job_manager.active_summary() {
+            Ok(value) => value,
+            Err(error) => return make_job_error(id, error),
+        },
         "jobs.get" => {
             let params = match decode_params::<JobIdParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -1735,6 +1733,25 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(error) => return make_job_error(id, error),
             }
         }
+        "jobs.cancelAll" => match state.job_manager.cancel_all() {
+            Ok(value) => value,
+            Err(error) => return make_job_error(id, error),
+        },
+        "jobs.pauseAll" => match state.job_manager.pause_all_for_shutdown() {
+            Ok(value) => value,
+            Err(error) => return make_job_error(id, error),
+        },
+        "jobs.retry" => {
+            let params = match decode_params::<JobIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let executor = state.background_job_services().executor();
+            match state.job_manager.retry(&params.job_id, executor) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
         "jobs.acknowledge" => {
             let params = match decode_params::<JobIdParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -1746,19 +1763,14 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "export.start" => {
-            let params = match decode_params::<ExportRecordingParams>(id.clone(), req.params) {
+            let raw_params = req.params.clone();
+            let _params = match decode_params::<ExportRecordingParams>(id.clone(), req.params) {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            let store = state.recording_store.clone();
-            match state.job_manager.submit("export", false, move |context| {
-                context.progress("rendering", 0, Some(2), Some("stage"));
-                let value = store
-                    .export_create(params)
-                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
-                context.progress("finalizing", 1, Some(2), Some("stage"));
-                Ok(value)
-            }) {
+            let descriptor = descriptor_for_export(raw_params);
+            let executor = state.background_job_services().executor();
+            match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
             }
@@ -1774,6 +1786,9 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "core.shutdown" => {
+            if let Err(error) = state.job_manager.pause_all_for_shutdown() {
+                return make_job_error(id, error);
+            }
             state.shutdown_requested = true;
             json!({ "shutdown": true })
         }
@@ -2234,6 +2249,28 @@ mod tests {
             RecordingStore::with_root(root.join("recordings")),
             VaultStore::with_root(root.join("vault")),
         )
+    }
+
+    #[test]
+    fn background_processing_requires_verified_capture_finalization() {
+        assert_eq!(
+            finalized_capture_recording_id(&json!({
+                "capture": { "recordingId": "recording-1", "integrityStatus": "verified" }
+            })),
+            Some("recording-1".to_string())
+        );
+        assert_eq!(
+            finalized_capture_recording_id(&json!({
+                "capture": { "recordingId": "recording-1", "integrityStatus": "failed" }
+            })),
+            None
+        );
+        assert_eq!(
+            finalized_capture_recording_id(&json!({
+                "capture": { "integrityStatus": "verified" }
+            })),
+            None
+        );
     }
 
     fn request(method: &str) -> RpcRequest {

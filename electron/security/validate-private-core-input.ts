@@ -7,6 +7,7 @@ const JOB_ID = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-fA-F0-9]{64}$/;
 const MAX_PATH_CHARACTERS = 32_768;
 const MAX_BASE64_CHUNK_CHARACTERS = 6_000_000;
+const MAX_DICTIONARY_PACKAGE_BASE64_CHARACTERS = 3_333_352;
 
 function fail(method: string, detail: string): never {
   throw new Error(`Invalid ${method} request: ${detail}`);
@@ -81,11 +82,23 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
   ) {
     return validateRendererCoreParams(method, input);
   }
-  if (method === "core.shutdown" || method === "jobs.list" || method === "recording.durable.recover") {
+  if (
+    method === "core.shutdown"
+    || method === "jobs.list"
+    || method === "jobs.activeSummary"
+    || method === "jobs.cancelAll"
+    || method === "jobs.pauseAll"
+    || method === "recording.durable.recover"
+  ) {
     if (input !== null && input !== undefined) fail(method, "parameters are not accepted");
     return null;
   }
-  if (method === "jobs.get" || method === "jobs.cancel" || method === "jobs.acknowledge") {
+  if (
+    method === "jobs.get"
+    || method === "jobs.cancel"
+    || method === "jobs.retry"
+    || method === "jobs.acknowledge"
+  ) {
     const value = objectInput(method, input);
     exactFields(method, value, ["jobId"]);
     if (typeof value.jobId !== "string" || !JOB_ID.test(value.jobId)) fail(method, "jobId is invalid");
@@ -120,6 +133,23 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
       fail(method, "content exceeds the local terminology file limit");
     }
     return { name, format: value.format, content };
+  }
+  if (method === "terminology.package.start") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["sourceFileName", "archiveBase64"]);
+    const sourceFileName = requiredString(method, value.sourceFileName, "sourceFileName", 180);
+    if (!sourceFileName.toLowerCase().endsWith(".candordict") || sourceFileName.includes("/") || sourceFileName.includes("\\")) {
+      fail(method, "sourceFileName must be a local .candordict file name");
+    }
+    return {
+      sourceFileName,
+      archiveBase64: requiredString(
+        method,
+        value.archiveBase64,
+        "archiveBase64",
+        MAX_DICTIONARY_PACKAGE_BASE64_CHARACTERS,
+      ),
+    };
   }
   if (method === "models.verify.start") {
     const value = objectInput(method, input);

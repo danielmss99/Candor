@@ -94,7 +94,7 @@ p {
 .session-rail {
   display: grid;
   z-index: 20;
-  grid-template-columns: var(--sidebar) minmax(0, 1fr) auto;
+  grid-template-columns: var(--sidebar) minmax(0, 1fr) auto auto;
   align-items: center;
   border-bottom: 1px solid var(--nav-border);
   background: var(--nav-background);
@@ -206,6 +206,129 @@ p {
   font-size: 11px;
   font-weight: 600;
   white-space: nowrap;
+}
+
+.background-activity-wrap {
+  align-self: center;
+}
+
+.background-activity {
+  position: relative;
+  color: var(--nav-text);
+}
+
+.background-activity > summary {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  list-style: none;
+  padding: 0 10px;
+  white-space: nowrap;
+}
+
+.background-activity > summary::-webkit-details-marker {
+  display: none;
+}
+
+.background-activity > summary:hover,
+.background-activity[open] > summary {
+  background: var(--nav-selected);
+}
+
+.background-activity-panel {
+  position: absolute;
+  z-index: 80;
+  top: calc(100% + 8px);
+  right: 0;
+  display: grid;
+  width: min(390px, calc(100vw - 32px));
+  max-height: min(560px, calc(100vh - 80px));
+  gap: 0;
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-popover);
+  color: var(--text-primary);
+}
+
+.background-activity-panel > header,
+.background-job {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+}
+
+.background-activity-panel > header > div,
+.background-job-copy {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.background-activity-panel > header span,
+.background-job-copy span,
+.background-job-copy small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.background-job[data-state="failed"] {
+  border-left: 3px solid var(--error);
+}
+
+.background-job-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.background-job-actions button,
+.background-activity-panel > header button {
+  min-height: 30px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-primary);
+  font-size: 11px;
+  padding: 0 10px;
+}
+
+.background-job-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--text-on-accent);
+}
+
+.background-activity-empty {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 20px 16px;
+}
+
+.background-job-notification {
+  position: fixed;
+  z-index: 90;
+  top: 66px;
+  right: 18px;
+  max-width: 360px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--success);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-floating);
+  color: var(--text-primary);
+  font-size: 12px;
+  padding: 12px 14px;
 }
 
 .desktop-body {
@@ -408,6 +531,14 @@ p {
 
 .status-dot.ok {
   background: var(--success);
+}
+
+.status-dot.working {
+  background: var(--info);
+}
+
+.status-dot.warning {
+  background: var(--warning);
 }
 
 .desktop-content {
@@ -2617,6 +2748,28 @@ p {
   border-top: 1px solid var(--border-subtle);
   margin-top: 14px;
   padding-top: 14px;
+}
+
+.dictionary-drop-zone {
+  align-items: center;
+  border: 1px dashed var(--border-default);
+  display: flex;
+  justify-content: space-between;
+  margin-top: 14px;
+  min-height: 44px;
+  padding: 8px 10px;
+}
+
+.dictionary-drop-zone span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.terminology-settings[data-dragging="true"] .dictionary-drop-zone {
+  background: var(--bg-selected);
+  border-color: var(--border-focus);
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
 }
 
 .terminology-list,

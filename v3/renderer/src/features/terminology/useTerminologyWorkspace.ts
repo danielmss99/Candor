@@ -9,6 +9,7 @@ import {
   type TerminologyStatus,
 } from "../../core/contracts";
 import type { RunOperation } from "../jobs/useOperationRunner";
+import { waitForJob } from "../../core/jobs";
 
 type CoreApi = NonNullable<Window["candor"]>;
 
@@ -26,6 +27,19 @@ interface UseTerminologyWorkspaceOptions {
   run: RunOperation;
   setNotice: (message: string) => void;
   setError: (message: string) => void;
+}
+
+function dictionaryImportNotice(result: Record<string, unknown>): string {
+  const name = asString(result.name, "Dictionary");
+  if (asBool(result.upgradeAvailable)) {
+    const installed = asString(result.installedVersion, "the installed version");
+    const available = asString(result.availableVersion, "a newer version");
+    return `${name} ${available} is available. Version ${installed} remains installed.`;
+  }
+  if (asBool(result.alreadyInstalled)) {
+    return `${name} is already installed`;
+  }
+  return `${name} added with ${String(result.entryCount ?? 0)} terms`;
 }
 
 export function useTerminologyWorkspace(options: UseTerminologyWorkspaceOptions) {
@@ -74,10 +88,41 @@ export function useTerminologyWorkspace(options: UseTerminologyWorkspaceOptions)
         setNotice("Dictionary import canceled");
         return;
       }
-      setNotice(`${asString(result.name, "Dictionary")} added with ${String(result.entryCount ?? 0)} terms`);
+      if (asString(result.jobId)) {
+        setNotice("Dictionary verification is running in the background");
+        void waitForJob(api, result)
+          .then(async (completed) => {
+            const imported = asObject(completed);
+            setNotice(dictionaryImportNotice(imported));
+            await refreshTerminology();
+          })
+          .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+        return;
+      }
+      setNotice(dictionaryImportNotice(result));
       await refreshTerminology();
     }, "terminology");
   }, [api, refreshTerminology, run, setNotice]);
+
+  const importDictionaryFile = useCallback(async (file: File) => {
+    if (!api) return;
+    if (!file.name.toLowerCase().endsWith(".candordict")) {
+      setError("Drop a signed CANDORDICT package here.");
+      return;
+    }
+    await run("dictionary import", async () => {
+      const bytes = new Uint8Array(await file.arrayBuffer());
+      const result = asObject(await api.terminology.importDictionaryPackage(file.name, bytes));
+      setNotice("Dictionary verification is running in the background");
+      void waitForJob(api, result)
+        .then(async (completed) => {
+          const imported = asObject(completed);
+          setNotice(dictionaryImportNotice(imported));
+          await refreshTerminology();
+        })
+        .catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+    }, "terminology");
+  }, [api, refreshTerminology, run, setError, setNotice]);
 
   const setEnabled = useCallback(async (dictionaryId: string, enabled: boolean) => {
     if (!api) return;
@@ -132,6 +177,7 @@ export function useTerminologyWorkspace(options: UseTerminologyWorkspaceOptions)
     proposals,
     refreshTerminology,
     importDictionary,
+    importDictionaryFile,
     setEnabled,
     assignToMeeting,
     loadProposals,

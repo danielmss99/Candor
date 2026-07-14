@@ -221,6 +221,36 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     ));
   }, [api, client]);
 
+  const refreshJobs = useCallback(async () => {
+    if (!api) return;
+    const next = asObject(await api.app.listJobs());
+    setJobs(asArray(next.jobs).map(asObject));
+  }, [api]);
+
+  const cancelJob = useCallback(async (jobId: string) => {
+    if (!api) return;
+    await api.app.cancelJob(jobId);
+    await refreshJobs();
+  }, [api, refreshJobs]);
+
+  const retryJob = useCallback(async (jobId: string) => {
+    if (!api) return;
+    await api.app.retryJob(jobId);
+    await refreshJobs();
+  }, [api, refreshJobs]);
+
+  const cancelAllJobs = useCallback(async () => {
+    if (!api) return;
+    await api.app.cancelAllJobs();
+    await refreshJobs();
+  }, [api, refreshJobs]);
+
+  const acknowledgeJob = useCallback(async (jobId: string) => {
+    if (!api) return;
+    await api.app.acknowledgeJob(jobId);
+    setJobs((current) => current.filter((job) => asString(job.jobId) !== jobId));
+  }, [api]);
+
   useEffect(() => {
     if (!api || !client) return;
     const captureActive = captureStatus.active === true;
@@ -324,5 +354,10 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     refreshVaultAndRetention,
     recoverCapture,
     retryConnection,
+    refreshJobs,
+    cancelJob,
+    retryJob,
+    cancelAllJobs,
+    acknowledgeJob,
   };
 }

@@ -3,6 +3,10 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { objectValue } from "../core/json.js";
 import { INPUT_LIMITS } from "../security/input-limits.js";
+import {
+  MAX_DICTIONARY_PACKAGE_BYTES,
+  validateDictionaryPackageInput,
+} from "../security/validate-dictionary-package-input.js";
 import { validateIpcSender } from "../security/validate-sender.js";
 import type { IpcDependencies } from "./ipc-types.js";
 
@@ -11,8 +15,39 @@ const SUPPORTED_FORMATS = new Map([
   [".csv", "csv"],
   [".json", "json"],
 ] as const);
+async function queueDictionaryPackage(
+  dependencies: IpcDependencies,
+  sourceFileName: string,
+  bytes: Uint8Array,
+) {
+  const response = await dependencies.core.call("terminology.package.start", {
+    sourceFileName,
+    archiveBase64: Buffer.from(bytes).toString("base64"),
+  });
+  if (!response.ok) {
+    throw new Error(response.error?.message ?? "The Candor dictionary could not be queued.");
+  }
+  return {
+    ...objectValue(response.result ?? null),
+    canceled: false,
+    sourceFileName,
+    packageFormat: "candordict",
+    rawPathExposed: false,
+    keyMaterialExposedToRenderer: false,
+  };
+}
 
 export function registerTerminologyIpc(dependencies: IpcDependencies): void {
+  ipcMain.handle("candor-terminology:importPackageBytes", async (event, input: unknown) => {
+    validateIpcSender(event, dependencies.getMainWindow);
+    const validated = validateDictionaryPackageInput(input);
+    return queueDictionaryPackage(
+      dependencies,
+      validated.sourceFileName,
+      validated.bytes,
+    );
+  });
+
   ipcMain.handle("candor-terminology:importFromFile", async (event) => {
     validateIpcSender(event, dependencies.getMainWindow);
     const options: Electron.OpenDialogOptions = {
@@ -20,7 +55,8 @@ export function registerTerminologyIpc(dependencies: IpcDependencies): void {
       buttonLabel: "Import dictionary",
       properties: ["openFile"],
       filters: [
-        { name: "Terminology dictionaries", extensions: ["txt", "csv", "json"] },
+        { name: "Candor dictionaries", extensions: ["candordict"] },
+        { name: "Plain terminology files", extensions: ["txt", "csv", "json"] },
       ],
     };
     const window = dependencies.getMainWindow();
@@ -43,16 +79,22 @@ export function registerTerminologyIpc(dependencies: IpcDependencies): void {
     }
     const selectedPath = await realpath(selected);
     const selectedStat = await stat(selectedPath);
-    if (!selectedStat.isFile() || selectedStat.size > INPUT_LIMITS.terminologyFileBytes) {
+    const extension = path.extname(selectedPath).toLowerCase();
+    const sizeLimit = extension === ".candordict"
+      ? MAX_DICTIONARY_PACKAGE_BYTES
+      : INPUT_LIMITS.terminologyFileBytes;
+    if (!selectedStat.isFile() || selectedStat.size > sizeLimit) {
       throw new Error("The selected terminology file is missing or exceeds the local size limit.");
     }
-    const extension = path.extname(selectedPath).toLowerCase();
-    const format = SUPPORTED_FORMATS.get(extension as ".txt" | ".csv" | ".json");
-    if (!format) throw new Error("Terminology files must use TXT, CSV, or JSON.");
     const bytes = await readFile(selectedPath);
-    if (bytes.length > INPUT_LIMITS.terminologyFileBytes) {
+    if (bytes.length > sizeLimit) {
       throw new Error("The selected terminology file exceeds the local size limit.");
     }
+    if (extension === ".candordict") {
+      return queueDictionaryPackage(dependencies, path.basename(selectedPath), bytes);
+    }
+    const format = SUPPORTED_FORMATS.get(extension as ".txt" | ".csv" | ".json");
+    if (!format) throw new Error("Terminology files must use CANDORDICT, TXT, CSV, or JSON.");
     let content: string;
     try {
       content = new TextDecoder("utf-8", { fatal: true }).decode(bytes);

@@ -127,6 +127,13 @@ export interface TerminologyDictionaryRow {
   enabled: boolean;
   assignedToRecording: boolean;
   entryCount: number;
+  packageId: string | null;
+  packageVersion: string | null;
+  publisher: string | null;
+  language: string | null;
+  signatureKeyId: string | null;
+  trustLabel: string | null;
+  signatureVerified: boolean;
 }
 
 export interface TerminologyStatus {
@@ -638,6 +645,16 @@ export function parseTerminologyStatus(value: unknown): TerminologyStatus {
           `terminology.status.dictionaries[${index}].assignedToRecording`,
         ),
         entryCount: numberField(dictionary.entryCount, `terminology.status.dictionaries[${index}].entryCount`),
+        packageId: nullableStringField(dictionary.packageId, `terminology.status.dictionaries[${index}].packageId`),
+        packageVersion: nullableStringField(dictionary.packageVersion, `terminology.status.dictionaries[${index}].packageVersion`),
+        publisher: nullableStringField(dictionary.publisher, `terminology.status.dictionaries[${index}].publisher`),
+        language: nullableStringField(dictionary.language, `terminology.status.dictionaries[${index}].language`),
+        signatureKeyId: nullableStringField(dictionary.signatureKeyId, `terminology.status.dictionaries[${index}].signatureKeyId`),
+        trustLabel: nullableStringField(dictionary.trustLabel, `terminology.status.dictionaries[${index}].trustLabel`),
+        signatureVerified: booleanField(
+          dictionary.signatureVerified,
+          `terminology.status.dictionaries[${index}].signatureVerified`,
+        ),
       };
     });
   return {

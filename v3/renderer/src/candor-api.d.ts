@@ -17,7 +17,11 @@ interface CandorApiV2 {
     getCapabilities(): Promise<JsonValue>;
     retryCore(): Promise<JsonValue>;
     listJobs(): Promise<JsonValue>;
+    getActiveJobs(): Promise<JsonValue>;
     getJob(jobId: string): Promise<JsonValue>;
+    cancelJob(jobId: string): Promise<JsonValue>;
+    cancelAllJobs(): Promise<JsonValue>;
+    retryJob(jobId: string): Promise<JobAccepted>;
     acknowledgeJob(jobId: string): Promise<JsonValue>;
     prepareDiagnostics(): Promise<JsonValue>;
     saveDiagnostics(): Promise<JsonValue>;
@@ -64,6 +68,7 @@ interface CandorApiV2 {
   terminology: {
     getStatus(recordingId?: string): Promise<JsonValue>;
     importDictionary(): Promise<JsonValue>;
+    importDictionaryPackage(sourceFileName: string, archiveBytes: Uint8Array): Promise<JsonValue>;
     setEnabled(dictionaryId: string, enabled: boolean): Promise<JsonValue>;
     assignToMeeting(recordingId: string, dictionaryId: string, enabled: boolean): Promise<JsonValue>;
     getCorrectionProposals(recordingId: string): Promise<JsonValue>;
