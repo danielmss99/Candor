@@ -11,20 +11,24 @@ The provisional Windows scope and evidence policy are in
 - [ ] `npm ci` reports no unresolved high-severity npm vulnerability.
 - [ ] `npm test` passes.
 - [ ] `npm run v3:verify` passes.
+- [ ] `npm run spec3:ai-bundle:verify:self-test` passes.
+- [ ] `npm run spec3:ai-bundle:verify:strict` passes with release-selected, benchmarked assets.
 - [ ] `npm run audit:source` passes with its mutation suite.
 - [ ] Rust tests, formatter, and lints pass for release features.
 - [ ] No unresolved high-severity dependency advisory remains.
 
 ## Package
 
-- [ ] `npm run dist` creates the current-OS Electron artifacts.
+- [ ] `npm run electron:v3:dist:ai-release` creates the current-OS Complete artifacts.
 - [ ] `npm run v3:release-artifact-smoke:strict` passes.
 - [ ] `npm run m0:packaged-smoke` passes.
+- [ ] `npm run spec3:packaged-ai-smoke` reports release-ready speech and language tools outside ASAR.
 - [ ] `npm run m0:artifact-manifest` records final hashes.
 - [ ] `npm run audit:release` finds no profile path, checkout path, or secret.
 - [ ] `npm run v3:release-checksums:verify` matches every release package.
 - [ ] `npm run v3:sbom:verify` binds an SPDX 2.3 dependency inventory to the candidate.
-- [ ] The 100-image critical GUI state matrix exists and is included in CI proof artifacts.
+- [ ] The SBOM contains the selected speech model, language runtime, and language model with exact digests, licenses, and provenance.
+- [ ] The complete critical GUI state matrix exists and is included in CI proof artifacts.
 - [ ] The renderer has no Node.js globals and exposes the exact preload surface.
 - [ ] Navigation, popups, webviews, and unauthorized network attempts are blocked.
 
@@ -44,6 +48,8 @@ The provisional Windows scope and evidence policy are in
 - [ ] Fresh Windows install starts and records microphone audio.
 - [ ] System-audio consent and capture work on supported Windows hardware.
 - [ ] 5-, 30-, 60-, and 180-minute recordings pass.
+- [ ] Clean offline transcription and recap pass with no first-run or background model download.
+- [ ] The selected defaults pass the documented 8 GB, 16 GB, and 32 GB benchmark tiers where feasible.
 - [ ] Sleep and resume behavior is verified.
 - [ ] Microphone and output-device switching is verified.
 - [ ] Permission denial and recovery are understandable.

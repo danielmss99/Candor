@@ -9,6 +9,7 @@ import {
   parseModels,
   parseRecap,
   type AiMode,
+  type BundledAiStatus,
   type InstructAssetKind,
   type JsonObject,
   type LocalAiAnswer,
@@ -27,6 +28,7 @@ interface UseLocalAiWorkspaceOptions {
   client: CandorClient | null;
   selectedRecordingId: string;
   selectedTrack: string;
+  bundledAiStatus: BundledAiStatus;
   instructAssetsStatus: JsonObject;
   instructStatus: JsonObject;
   modelStatus: JsonObject;
@@ -42,12 +44,26 @@ interface UseLocalAiWorkspaceOptions {
   refreshPrivacyReceipt: (recordingId?: string) => Promise<void>;
 }
 
+export function speechModelForBundledDefault(
+  currentModel: string,
+  bundledAiStatus: BundledAiStatus,
+  explicitSelection = false,
+): string {
+  if (explicitSelection) {
+    return currentModel;
+  }
+  return bundledAiStatus.speech.ready
+    ? bundledAiStatus.speech.modelId ?? DEFAULT_MODEL
+    : DEFAULT_MODEL;
+}
+
 export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const {
     api,
     client,
     selectedRecordingId,
     selectedTrack,
+    bundledAiStatus,
     instructAssetsStatus,
     instructStatus,
     modelStatus,
@@ -63,6 +79,7 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     refreshPrivacyReceipt,
   } = options;
   const priorRecordingId = useRef(selectedRecordingId);
+  const explicitModelSelection = useRef(false);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [askQuestion, setAskQuestion] = useState("What are the action items?");
   const [askAnswer, setAskAnswer] = useState<LocalAiAnswer | null>(null);
@@ -74,7 +91,6 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const [instructSetupOpen, setInstructSetupOpen] = useState(false);
 
   const instructReady = asBool(instructStatus.ready);
-  const instructAssetsReady = asBool(instructAssetsStatus.ready);
   const instructRunnerAsset = asObject(instructAssetsStatus.runner);
   const instructModelAsset = asObject(instructAssetsStatus.model);
   const useInstructModel = aiMode === "quality" && instructReady;
@@ -95,6 +111,19 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     priorRecordingId.current = selectedRecordingId;
     resetMeetingAi();
   }, [resetMeetingAi, selectedRecordingId]);
+
+  useEffect(() => {
+    setSelectedModel((currentModel) => speechModelForBundledDefault(
+      currentModel,
+      bundledAiStatus,
+      explicitModelSelection.current,
+    ));
+  }, [bundledAiStatus]);
+
+  const selectModel = useCallback((modelId: string) => {
+    explicitModelSelection.current = true;
+    setSelectedModel(modelId);
+  }, []);
 
   const importModel = useCallback(async () => {
     if (!api) return;
@@ -170,7 +199,12 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const transcribe = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("transcribe", async () => {
-      const accepted = await api.transcript.start({ recordingId: selectedRecordingId, channel: selectedTrack || undefined, modelId: selectedModel, language: "en" });
+      const accepted = await api.transcript.start({
+        recordingId: selectedRecordingId,
+        channel: selectedTrack || undefined,
+        modelId: explicitModelSelection.current ? selectedModel : undefined,
+        language: "en",
+      });
       await waitForJob(api, accepted);
       setNotice("Transcription updated");
       await Promise.all([
@@ -221,12 +255,11 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     instructAssetError,
     instructSetupOpen,
     instructReady,
-    instructAssetsReady,
     instructRunnerAsset,
     instructModelAsset,
     models,
     aiModeStatus,
-    setSelectedModel,
+    setSelectedModel: selectModel,
     setAskQuestion,
     setAiMode,
     setInstructAssetKind,

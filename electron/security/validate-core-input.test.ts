@@ -87,6 +87,7 @@ describe("renderer core input validation", () => {
       "models.listLocal": null,
       "models.verifyLocal": {},
       "ai.status": null,
+      "ai.bundledAssetsStatus": null,
       "ai.askHeuristic": { recordingId, question: "What changed?" },
       "ai.recapHeuristic": { recordingId },
       "ai.instructAssetsStatus": null,

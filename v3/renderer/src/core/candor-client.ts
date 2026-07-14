@@ -2,6 +2,7 @@ import {
   EXPECTED_PROTOCOL_VERSION,
   expectObject,
   parseAnswer,
+  parseBundledAiStatus,
   parseMeetingPrivacyReceipt,
   parseModels,
   parseNetworkCapabilities,
@@ -10,6 +11,7 @@ import {
   parseRecordingPage,
   parseTranscriptPage,
   type JsonObject,
+  type BundledAiStatus,
   type LocalAiAnswer,
   type LocalAiRecap,
   type MeetingPrivacyReceipt,
@@ -95,6 +97,14 @@ export class CandorClient {
 
   async models(): Promise<ModelRow[]> {
     return this.request("models.status", () => this.api.ai.listSpeechModels(), parseModels);
+  }
+
+  async bundledAiStatus(): Promise<BundledAiStatus> {
+    return this.request(
+      "ai.bundledAssetsStatus",
+      () => this.api.ai.getBundledAssetsStatus(),
+      parseBundledAiStatus,
+    );
   }
 
   async recap(invoke: () => Promise<unknown>): Promise<LocalAiRecap> {

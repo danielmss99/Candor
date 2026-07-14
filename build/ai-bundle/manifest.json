@@ -1,0 +1,9 @@
+{
+  "manifestVersion": 1,
+  "bundleVersion": "source-interface-1",
+  "releaseReady": false,
+  "fixture": false,
+  "selectionStatus": "no-default-selected",
+  "repairPolicy": "signed-installer-only",
+  "assets": []
+}

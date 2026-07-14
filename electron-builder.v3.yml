@@ -13,6 +13,10 @@ extraResources:
     filter:
       - candor-core
       - candor-core.exe
+  - from: build/ai-bundle
+    to: ai
+    filter:
+      - "**/*"
 asar: true
 npmRebuild: false
 publish: null

@@ -5,7 +5,7 @@ import { PrivacyReceipt } from "./privacy/PrivacyReceipt";
 import { SettingsView } from "./settings/SettingsView";
 import { LiveMeetingView } from "./meeting/LiveMeetingView";
 import { MeetingDetailView } from "./detail/MeetingDetailView";
-import type { MeetingPrivacyReceipt, NetworkCapabilities } from "../core/contracts";
+import type { BundledAiStatus, MeetingPrivacyReceipt, NetworkCapabilities } from "../core/contracts";
 
 const network: NetworkCapabilities = {
   policy: "disabled-by-default",
@@ -27,6 +27,19 @@ const receipt: MeetingPrivacyReceipt = {
   exports: [],
   retention: { policy: "manual-delete-only", automaticDeletion: false },
   network,
+};
+
+const bundledAiStatus: BundledAiStatus = {
+  releaseReady: false,
+  fixture: false,
+  selectionStatus: "no-default-selected",
+  state: "no-default-selected",
+  ready: false,
+  repairRequired: false,
+  repairPolicy: "signed-installer-only",
+  repairAction: "none",
+  speech: { state: "no-default-selected", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: "BUNDLED_AI_NO_DEFAULT_SELECTED" },
+  language: { state: "no-default-selected", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: "BUNDLED_AI_NO_DEFAULT_SELECTED" },
 };
 
 describe("simplified product surface", () => {
@@ -85,13 +98,14 @@ describe("simplified product surface", () => {
       activeCapture: false,
       combinedCaptureAvailable: false,
       statuses: { core: {}, consent: {}, capture: {}, vault: {}, updates: {}, retention: {}, transcription: {} },
+      bundledAiStatus,
       models: [],
       selectedModel: "tiny.en",
       defaultModel: "tiny.en",
       aiMode: "fast" as const,
       aiModeStatus: "Fast local",
       instructSetupOpen: false,
-      instructAssetsReady: false,
+      instructReady: false,
       instructRunnerAsset: {},
       instructModelAsset: {},
       instructAssetKind: "runner" as const,
@@ -113,6 +127,57 @@ describe("simplified product surface", () => {
     expect(advancedMarkup).toContain("Privacy and network");
     expect(advancedMarkup).toContain("Diagnostics");
     expect(advancedMarkup).toContain("Local AI");
+    const repairMarkup = renderToStaticMarkup(
+      <SettingsView
+        {...baseProps}
+        section="models"
+        advancedOpen
+        bundledAiStatus={{
+          ...bundledAiStatus,
+          state: "corrupt",
+          repairRequired: true,
+          repairAction: "reinstall-candor",
+        }}
+      />,
+    );
+    expect(repairMarkup).toContain("Included AI tools need app repair");
+    expect(repairMarkup).toContain("still open, export, and delete your meetings");
+    expect(repairMarkup).toContain("Reinstall the signed Candor app");
+    expect(repairMarkup).not.toContain("Repair now");
+    expect(repairMarkup).not.toContain("Download model");
+    expect(repairMarkup).not.toContain("http");
+    const checkingMarkup = renderToStaticMarkup(
+      <SettingsView
+        {...baseProps}
+        section="models"
+        advancedOpen
+        bundledAiStatus={{
+          ...bundledAiStatus,
+          selectionStatus: "checking",
+          state: "checking",
+          speech: { ...bundledAiStatus.speech, state: "checking", failureCode: null },
+          language: { ...bundledAiStatus.language, state: "checking", failureCode: null },
+        }}
+      />,
+    );
+    expect(checkingMarkup).toContain("Checking included AI tools");
+    expect(checkingMarkup).toContain("Checking...");
+    const unavailableMarkup = renderToStaticMarkup(
+      <SettingsView
+        {...baseProps}
+        section="models"
+        advancedOpen
+        bundledAiStatus={{
+          ...bundledAiStatus,
+          selectionStatus: "status-unavailable",
+          state: "unavailable",
+          speech: { ...bundledAiStatus.speech, state: "unavailable", failureCode: "BUNDLED_AI_STATUS_UNAVAILABLE" },
+          language: { ...bundledAiStatus.language, state: "unavailable", failureCode: "BUNDLED_AI_STATUS_UNAVAILABLE" },
+        }}
+      />,
+    );
+    expect(unavailableMarkup).toContain("Included AI status is unavailable");
+    expect(unavailableMarkup).toContain("existing meetings remain available");
     const diagnosticsMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="diagnostics" advancedOpen diagnosticPreview={{ contentPolicy: "metadata-only-no-user-content" }} />);
     expect(diagnosticsMarkup).toContain("Safe diagnostic report");
     expect(diagnosticsMarkup).toContain("Inspect exact report");

@@ -19,6 +19,7 @@ const noParameterMethods = new Set([
   "models.status",
   "models.listLocal",
   "ai.status",
+  "ai.bundledAssetsStatus",
   "ai.instructAssetsStatus",
   "ai.instructStatus",
   "ai.schedulerStatus",

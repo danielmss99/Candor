@@ -45,6 +45,7 @@ export function CandorWorkspace() {
     client,
     selectedRecordingId: meeting.selectedRecordingId,
     selectedTrack: meeting.selectedTrack,
+    bundledAiStatus: runtime.bundledAiStatus,
     instructAssetsStatus: runtime.instructAssetsStatus,
     instructStatus: runtime.instructStatus,
     modelStatus: runtime.modelStatus,

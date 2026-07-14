@@ -78,7 +78,9 @@ Common commands:
 | `npm run v3:verify` | Run the staged local proof stack from M0 through M5 |
 | `npm run audit:source` | Run the Electron/Rust source-security audit |
 | `npm run electron:v3:pack` | Produce an unpacked Electron package |
+| `npm run electron:v3:dist:ai-release` | Build a public candidate only after the complete bundled-AI gate passes |
 | `npm run m0:packaged-smoke` | Exercise the packaged application and sidecar |
+| `npm run spec3:packaged-ai-smoke` | Prove the packaged AI boundary and meeting-data isolation |
 
 `npm run start` expects `npm run build` to have completed. Production core
 builds use a stable system build directory and stage only the finished sidecar
@@ -87,11 +89,17 @@ entering release artifacts.
 
 ## Models
 
-Candor does not download models in the background. Local Whisper and instruct
-model assets are imported deliberately, constrained to supported formats, and
-verified against an expected SHA-256 value before use. Whisper and local LLM
-jobs are scheduled by the Rust core so they do not compete for local inference
-resources.
+The public Complete installer is intended to include its required Whisper and
+local instruction-model assets. It must not download baseline models on first
+launch or in the background. Packaged assets live outside ASAR under the trusted
+application resources root, are pinned in `third_party/`, and are verified at
+build time and before first use. Advanced users may deliberately import a local
+override through the native file picker with an expected SHA-256 value.
+
+This source revision contains the packaging and verification boundary but no
+selected model weights or llama.cpp executable. The release-ready manifest is
+therefore false, and `npm run electron:v3:dist:ai-release` must fail until
+licensing, provenance, benchmarks, notices, and real assets are complete.
 
 ## Data Safety
 
@@ -128,6 +136,7 @@ dependency graph, workflow set, or release package.
 ## Release Status
 
 Candor remains prerelease software. Local verification, packaged smoke, and
-artifact auditing are implemented. Signed installers, clean-machine upgrade
-proof, real long-duration capture, sleep and resume, and device-switch evidence
-remain mandatory release gates.
+artifact auditing are implemented. A selected bundled language model, signed
+installers, clean-machine offline inference and upgrade proof, real long-duration
+capture, sleep and resume, and device-switch evidence remain mandatory release
+gates.

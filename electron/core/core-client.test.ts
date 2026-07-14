@@ -137,6 +137,28 @@ function capturingCoreWithHungStatus(): string {
 const settle = (milliseconds = 20) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 describe("core client process boundary", () => {
+  it("passes the trusted packaged AI root only through the main-process spawn environment", async () => {
+    let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      environment: () => ({
+        CANDOR_AI_BUNDLE_ROOT: "C:\\Program Files\\Candor\\resources\\ai",
+        CANDOR_CORE_TRANSPORT: "untrusted-override",
+      }),
+      spawnCore: (_executable, environment) => {
+        spawnedEnvironment = environment;
+        return spawnNode(responsiveCore());
+      },
+    });
+
+    await client.call("core.status");
+    expect(spawnedEnvironment?.CANDOR_AI_BUNDLE_ROOT).toBe("C:\\Program Files\\Candor\\resources\\ai");
+    expect(spawnedEnvironment?.CANDOR_CORE_TRANSPORT).toBe("stdio-json-lines");
+    await client.shutdown();
+  });
+
   it("handshakes and correlates UUID requests over JSONL stdio", async () => {
     const client = new CoreClient({
       executablePath: () => process.execPath,

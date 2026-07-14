@@ -20,7 +20,7 @@ After activation or local trial start, onboarding continues through:
 2. Microphone recording consent
 3. System-audio consent when the OS capture path supports it
 4. Protected local vault setup
-5. Local AI model setup, with fast local fallback allowed
+5. Included local AI readiness, with a manual override only when packaged speech is unavailable
 
 The setup flow reuses the existing local consent, vault, and model services. It does not create a cloud profile.
 

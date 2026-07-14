@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "updatedOn": "2026-07-13",
+  "speech": {
+    "selectionStatus": "benchmark-pending",
+    "selectedModel": null,
+    "candidates": [
+      {
+        "id": "base.en",
+        "expectedSha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+        "language": "english",
+        "provenanceStatus": "existing-candor-allowlist"
+      },
+      {
+        "id": "base",
+        "expectedSha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+        "language": "multilingual",
+        "provenanceStatus": "existing-candor-allowlist"
+      },
+      {
+        "id": "small.en",
+        "expectedSha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+        "language": "english",
+        "provenanceStatus": "existing-candor-allowlist"
+      }
+    ]
+  },
+  "language": {
+    "selectionStatus": "blocked-license-provenance-and-benchmark-review",
+    "selectedModel": null,
+    "candidates": []
+  }
+}

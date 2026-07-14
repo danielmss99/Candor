@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::bundled_ai_assets::{BundledAiAssets, VerifiedBundledAsset};
 use crate::recording_store::RecordingStore;
 
 const DEFAULT_MODEL_ID: &str = "base.en";
@@ -205,6 +206,7 @@ pub(crate) struct VerifiedModel {
     pub(crate) sha256: String,
     pub(crate) bytes: u64,
     pub(crate) modified_unix_ms: u64,
+    pub(crate) source: &'static str,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -231,10 +233,16 @@ struct ModelImportManifest {
     updated_at_ms: u128,
 }
 
-#[derive(Default)]
-pub struct ModelManager;
+#[derive(Clone, Default)]
+pub struct ModelManager {
+    bundled_assets: BundledAiAssets,
+}
 
 impl ModelManager {
+    pub fn with_bundled_assets(bundled_assets: BundledAiAssets) -> Self {
+        Self { bundled_assets }
+    }
+
     pub fn status(&self, store: &RecordingStore) -> Value {
         let models = self.model_states(store, false);
         let installed_model_count = models
@@ -255,6 +263,16 @@ impl ModelManager {
                     .unwrap_or(false)
             })
             .count();
+        let bundled_assets = self.bundled_assets_status();
+        let bundled_speech_ready = bundled_assets
+            .get("speech")
+            .and_then(Value::as_object)
+            .and_then(|speech| speech.get("ready"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let selected_default_model = bundled_default_model_id(&bundled_assets)
+            .unwrap_or(DEFAULT_MODEL_ID)
+            .to_string();
 
         json!({
             "implemented": true,
@@ -262,12 +280,14 @@ impl ModelManager {
             "cloudAi": false,
             "modelRootKind": store.root_kind(),
             "modelPathAcceptedFromRenderer": false,
-            "manualInstallOnly": true,
+            "manualInstallOnly": !bundled_speech_ready,
             "manualImportAvailable": true,
             "manualImportMethod": "native-file-picker-streamed-to-core",
+            "bundledDefaultsSupported": true,
+            "bundledAssets": bundled_assets,
             "backgroundDownloads": false,
             "downloadPolicy": "network-download-not-implemented-in-m2",
-            "defaultModelId": DEFAULT_MODEL_ID,
+            "defaultModelId": selected_default_model,
             "supportedModelCount": MODEL_SPECS.len(),
             "installedModelCount": installed_model_count,
             "verifiedModelCount": verified_model_count,
@@ -275,6 +295,67 @@ impl ModelManager {
             "rawPathExposed": false,
             "keyMaterialExposedToRenderer": false
         })
+    }
+
+    pub fn bundled_assets_status(&self) -> Value {
+        let mut status = self.bundled_assets.status();
+        let Some(failure_code) = self.bundled_speech_trust_failure(&status) else {
+            return status;
+        };
+
+        if let Some(speech) = status.get_mut("speech").and_then(Value::as_object_mut) {
+            speech.insert("state".to_string(), Value::String("corrupt".to_string()));
+            speech.insert("ready".to_string(), Value::Bool(false));
+            speech.insert("verifiedAssets".to_string(), Value::from(0));
+            speech.insert(
+                "failureCode".to_string(),
+                Value::String(failure_code.to_string()),
+            );
+        }
+        let repair_required = status
+            .get("selectionStatus")
+            .and_then(Value::as_str)
+            .is_some_and(|selection| selection != "no-default-selected");
+        if let Some(root) = status.as_object_mut() {
+            root.insert("state".to_string(), Value::String("corrupt".to_string()));
+            root.insert("ready".to_string(), Value::Bool(false));
+            root.insert("repairRequired".to_string(), Value::Bool(repair_required));
+            root.insert(
+                "repairAction".to_string(),
+                Value::String(
+                    if repair_required {
+                        "reinstall-candor"
+                    } else {
+                        "none"
+                    }
+                    .to_string(),
+                ),
+            );
+            root.insert(
+                "failureCode".to_string(),
+                Value::String(failure_code.to_string()),
+            );
+        }
+        status
+    }
+
+    fn bundled_speech_trust_failure(&self, status: &Value) -> Option<&'static str> {
+        let speech = status.get("speech")?.as_object()?;
+        if !speech.get("ready")?.as_bool()? {
+            return None;
+        }
+        let Some(model_id) = speech.get("modelId").and_then(Value::as_str) else {
+            return Some("BUNDLED_AI_SPEECH_MODEL_UNSUPPORTED");
+        };
+        let Ok(spec) = model_spec(model_id) else {
+            return Some("BUNDLED_AI_SPEECH_MODEL_UNSUPPORTED");
+        };
+        match self.bundled_assets.speech_model(model_id) {
+            Ok(Some(asset)) if bundled_model_is_trusted(&spec, &asset) => None,
+            Ok(Some(_)) => Some("BUNDLED_AI_MODEL_TRUST_MISMATCH"),
+            Ok(None) => Some("BUNDLED_AI_SPEECH_MODEL_MISSING"),
+            Err(_) => Some("BUNDLED_AI_SPEECH_MODEL_UNAVAILABLE"),
+        }
     }
 
     pub fn list_local(&self, store: &RecordingStore) -> Value {
@@ -310,7 +391,25 @@ impl ModelManager {
         let model_id = normalize_model_id(params.model_id)?;
         let spec = model_spec(&model_id)?;
         let path = model_path_for_store(store, spec.id);
-        Ok(verify_model_path_value(&path, spec))
+        let managed = verify_model_path(&path, &spec)?;
+        if managed.bytes > 0 {
+            return Ok(model_value(
+                &spec,
+                true,
+                managed.verified,
+                managed.bytes,
+                managed.modified_unix_ms,
+                managed.actual_sha256,
+                false,
+                managed.failure_code,
+                managed.failure_message.as_deref(),
+            ));
+        }
+        match self.bundled_assets.speech_model(spec.id) {
+            Ok(Some(asset)) => Ok(bundled_model_value(&spec, asset)),
+            Ok(None) => Ok(verify_model_path_value(&path, spec)),
+            Err(error) => Err(ModelManagerError::new(error.code, error.message)),
+        }
     }
 
     pub fn import_start(
@@ -594,18 +693,106 @@ impl ModelManager {
             .iter()
             .map(|spec| {
                 let path = model_path_for_store(store, spec.id);
-                if verify_uncached {
+                let managed = if verify_uncached {
                     verify_model_path_value(&path, *spec)
                 } else {
                     quick_model_state(&path, spec)
+                };
+                if managed
+                    .get("installed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    return managed;
+                }
+                match self.bundled_assets.speech_model(spec.id) {
+                    Ok(Some(asset)) => bundled_model_value(spec, asset),
+                    _ => managed,
                 }
             })
             .collect()
     }
+
+    #[cfg(feature = "local-whisper")]
+    pub(crate) fn verified_model_path(
+        &self,
+        store: &RecordingStore,
+        model_id: &str,
+    ) -> Result<VerifiedModel, ModelManagerError> {
+        let spec = model_spec(model_id)?;
+        let path = model_path_for_store(store, spec.id);
+        let verification = verify_model_path(&path, &spec)?;
+        if verification.verified {
+            return Ok(VerifiedModel {
+                model_id: spec.id.to_string(),
+                path,
+                sha256: verification.actual_sha256.unwrap_or_default(),
+                bytes: verification.bytes,
+                modified_unix_ms: verification.modified_unix_ms,
+                source: "managed-local",
+            });
+        }
+        if managed_override_blocks_bundle_fallback(&verification) {
+            return Err(ModelManagerError::new(
+                verification.failure_code.unwrap_or("MODEL_VERIFY_FAILED"),
+                verification
+                    .failure_message
+                    .unwrap_or_else(|| "local Whisper model failed verification".to_string()),
+            ));
+        }
+        match self.bundled_assets.speech_model(spec.id) {
+            Ok(Some(asset)) if bundled_model_is_trusted(&spec, &asset) => Ok(VerifiedModel {
+                model_id: spec.id.to_string(),
+                path: asset.path,
+                sha256: asset.sha256,
+                bytes: asset.bytes,
+                modified_unix_ms: 0,
+                source: "bundled-package",
+            }),
+            Ok(Some(_)) => Err(ModelManagerError::new(
+                "BUNDLED_AI_MODEL_TRUST_MISMATCH",
+                "packaged Whisper model does not match Candor's trusted model digest",
+            )),
+            Ok(None) => Err(ModelManagerError::new(
+                verification.failure_code.unwrap_or("MODEL_VERIFY_FAILED"),
+                verification
+                    .failure_message
+                    .unwrap_or_else(|| "local Whisper model failed verification".to_string()),
+            )),
+            Err(error) => Err(ModelManagerError::new(error.code, error.message)),
+        }
+    }
+
+    pub(crate) fn resolve_model_id(
+        &self,
+        requested: Option<String>,
+    ) -> Result<String, ModelManagerError> {
+        if requested.is_some() {
+            return normalize_model_id(requested);
+        }
+        let bundled_status = self.bundled_assets_status();
+        normalize_model_id(Some(
+            bundled_default_model_id(&bundled_status)
+                .unwrap_or(DEFAULT_MODEL_ID)
+                .to_string(),
+        ))
+    }
+
+    pub(crate) fn selected_default_model_id(&self) -> String {
+        let bundled_status = self.bundled_assets_status();
+        bundled_default_model_id(&bundled_status)
+            .unwrap_or(DEFAULT_MODEL_ID)
+            .to_string()
+    }
 }
 
-pub(crate) fn default_model_id() -> &'static str {
-    DEFAULT_MODEL_ID
+fn bundled_default_model_id(status: &Value) -> Option<&str> {
+    let speech = status.get("speech")?.as_object()?;
+    if speech.get("ready")?.as_bool()? {
+        speech.get("modelId")?.as_str()
+    } else {
+        None
+    }
 }
 
 pub(crate) fn valid_model_ids() -> Vec<&'static str> {
@@ -626,32 +813,6 @@ pub(crate) fn normalize_model_id(value: Option<String>) -> Result<String, ModelM
 }
 
 #[cfg(feature = "local-whisper")]
-pub(crate) fn verified_model_path(
-    store: &RecordingStore,
-    model_id: &str,
-) -> Result<VerifiedModel, ModelManagerError> {
-    let spec = model_spec(model_id)?;
-    let path = model_path_for_store(store, spec.id);
-    let verification = verify_model_path(&path, &spec)?;
-    if verification.verified {
-        Ok(VerifiedModel {
-            model_id: spec.id.to_string(),
-            path,
-            sha256: verification.actual_sha256.unwrap_or_default(),
-            bytes: verification.bytes,
-            modified_unix_ms: verification.modified_unix_ms,
-        })
-    } else {
-        Err(ModelManagerError::new(
-            verification.failure_code.unwrap_or("MODEL_VERIFY_FAILED"),
-            verification
-                .failure_message
-                .unwrap_or_else(|| "local Whisper model failed verification".to_string()),
-        ))
-    }
-}
-
-#[cfg(feature = "local-whisper")]
 impl VerifiedModel {
     pub(crate) fn public_value(&self) -> Value {
         json!({
@@ -659,6 +820,7 @@ impl VerifiedModel {
             "sha256": self.sha256,
             "bytes": self.bytes,
             "modifiedUnixMs": self.modified_unix_ms,
+            "source": self.source,
             "rawPathExposed": false
         })
     }
@@ -672,6 +834,11 @@ struct ModelVerification {
     actual_sha256: Option<String>,
     failure_code: Option<&'static str>,
     failure_message: Option<String>,
+}
+
+#[cfg(any(feature = "local-whisper", test))]
+fn managed_override_blocks_bundle_fallback(verification: &ModelVerification) -> bool {
+    verification.bytes > 0 && !verification.verified
 }
 
 fn model_spec(model_id: &str) -> Result<ModelSpec, ModelManagerError> {
@@ -693,6 +860,43 @@ fn model_path_for_store(store: &RecordingStore, model_id: &str) -> PathBuf {
 
 fn model_file_name(model_id: &str) -> String {
     format!("ggml-{model_id}.bin")
+}
+
+fn bundled_model_value(spec: &ModelSpec, asset: VerifiedBundledAsset) -> Value {
+    if !bundled_model_is_trusted(spec, &asset) {
+        return model_value(
+            spec,
+            true,
+            false,
+            asset.bytes,
+            0,
+            Some(asset.sha256),
+            false,
+            Some("BUNDLED_AI_MODEL_TRUST_MISMATCH"),
+            Some("packaged Whisper model does not match Candor's trusted model digest"),
+        );
+    }
+    json!({
+        "modelId": spec.id,
+        "fileName": model_file_name(spec.id),
+        "language": spec.language,
+        "role": spec.role,
+        "expectedSha256": spec.expected_sha256,
+        "installed": true,
+        "verified": true,
+        "bytes": asset.bytes,
+        "modifiedUnixMs": 0,
+        "actualSha256": asset.sha256,
+        "verificationRequired": false,
+        "failureCode": Value::Null,
+        "failureMessage": Value::Null,
+        "source": "bundled-package",
+        "rawPathExposed": false
+    })
+}
+
+fn bundled_model_is_trusted(spec: &ModelSpec, asset: &VerifiedBundledAsset) -> bool {
+    asset.sha256.eq_ignore_ascii_case(spec.expected_sha256)
 }
 
 fn new_import_id() -> String {
@@ -1031,4 +1235,137 @@ fn now_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bundled_test_root(label: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        std::env::temp_dir().join(format!(
+            "candor-model-manager-{label}-{}-{stamp}",
+            process::id()
+        ))
+    }
+
+    #[test]
+    fn bundled_default_uses_only_a_ready_selected_speech_model() {
+        let ready = json!({
+            "speech": {
+                "ready": true,
+                "modelId": "small.en"
+            }
+        });
+        let unavailable = json!({
+            "speech": {
+                "ready": false,
+                "modelId": "small.en"
+            }
+        });
+        assert_eq!(bundled_default_model_id(&ready), Some("small.en"));
+        assert_eq!(bundled_default_model_id(&unavailable), None);
+    }
+
+    #[test]
+    fn packaged_speech_model_must_match_the_compiled_trust_anchor() {
+        let spec = model_spec("base.en").expect("base model spec");
+        let trusted = VerifiedBundledAsset {
+            path: PathBuf::from("unused"),
+            sha256: spec.expected_sha256.to_lowercase(),
+            bytes: 1,
+            context_tokens: None,
+        };
+        let mut mismatched = trusted.clone();
+        mismatched.sha256 = "f".repeat(64);
+        assert!(bundled_model_is_trusted(&spec, &trusted));
+        assert!(!bundled_model_is_trusted(&spec, &mismatched));
+        assert_eq!(
+            bundled_model_value(&spec, mismatched)["failureCode"],
+            "BUNDLED_AI_MODEL_TRUST_MISMATCH"
+        );
+    }
+
+    #[test]
+    fn corrupt_managed_override_blocks_silent_package_fallback() {
+        let corrupt = ModelVerification {
+            verified: false,
+            bytes: 64,
+            modified_unix_ms: 0,
+            actual_sha256: Some("f".repeat(64)),
+            failure_code: Some("MODEL_HASH_MISMATCH"),
+            failure_message: Some("local model failed verification".to_string()),
+        };
+        let missing = ModelVerification {
+            verified: false,
+            bytes: 0,
+            modified_unix_ms: 0,
+            actual_sha256: None,
+            failure_code: Some("MODEL_NOT_INSTALLED"),
+            failure_message: Some("local model is not installed".to_string()),
+        };
+
+        assert!(managed_override_blocks_bundle_fallback(&corrupt));
+        assert!(!managed_override_blocks_bundle_fallback(&missing));
+    }
+
+    #[test]
+    fn bundled_readiness_rejects_a_self_consistent_but_untrusted_manifest_digest() {
+        let root = bundled_test_root("untrusted-bundle");
+        fs::create_dir_all(root.join("assets")).expect("create assets");
+        fs::create_dir_all(root.join("notices")).expect("create notices");
+        let content = b"not a trusted whisper model";
+        let digest = format!("{:x}", Sha256::digest(content));
+        fs::write(root.join("assets/speech.bin"), content).expect("write speech fixture");
+        fs::write(root.join("notices/license.txt"), b"fixture license\n").expect("write license");
+        fs::write(root.join("notices/model.md"), b"# Fixture model\n").expect("write model card");
+        let manifest = json!({
+            "manifestVersion": 1,
+            "bundleVersion": "untrusted-test",
+            "releaseReady": true,
+            "fixture": false,
+            "selectionStatus": "release-selected",
+            "repairPolicy": "signed-installer-only",
+            "assets": [{
+                "id": "speech-model",
+                "capability": "speech",
+                "kind": "model",
+                "engine": "whisper.cpp",
+                "relativePath": "assets/speech.bin",
+                "sha256": digest,
+                "bytes": content.len(),
+                "licenseFile": "notices/license.txt",
+                "licenseExpression": "MIT",
+                "sourceUrl": "https://example.invalid/model",
+                "revision": "fixture",
+                "redistributionApproved": true,
+                "required": true,
+                "platform": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "modelId": "small.en",
+                "modelCard": "notices/model.md"
+            }]
+        });
+        fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("write manifest");
+
+        let manager = ModelManager::with_bundled_assets(BundledAiAssets::with_root(root.clone()));
+        let status = manager.bundled_assets_status();
+        assert_eq!(status["speech"]["state"], "corrupt");
+        assert_eq!(status["speech"]["ready"], false);
+        assert_eq!(
+            status["speech"]["failureCode"],
+            "BUNDLED_AI_MODEL_TRUST_MISMATCH"
+        );
+        assert_eq!(status["ready"], false);
+        assert_eq!(status["repairRequired"], true);
+        assert_eq!(manager.selected_default_model_id(), DEFAULT_MODEL_ID);
+        let _ = fs::remove_dir_all(root);
+    }
 }

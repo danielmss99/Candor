@@ -23,7 +23,7 @@ Check that your microphone is connected and that Windows allows desktop apps to 
 
 ### Transcription is slow
 
-Use the Base or Tiny model in Settings. Larger models are more accurate but need more CPU and memory.
+The Complete installer uses the verified local speech model selected for that release. Advanced model overrides remain available in Settings for users who deliberately supply and verify another supported local model.
 
 ### Calendar events do not appear
 

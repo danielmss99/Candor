@@ -94,6 +94,40 @@ export interface ModelRow {
   failureCode: string;
 }
 
+export type BundledAssetState =
+  | "checking"
+  | "ready"
+  | "missing"
+  | "corrupt"
+  | "incompatible"
+  | "repair-required"
+  | "disabled"
+  | "unavailable"
+  | "no-default-selected";
+
+export interface BundledCapabilityStatus {
+  state: BundledAssetState;
+  ready: boolean;
+  available: boolean;
+  requiredAssets: number;
+  verifiedAssets: number;
+  modelId: string | null;
+  failureCode: string | null;
+}
+
+export interface BundledAiStatus {
+  releaseReady: boolean;
+  fixture: boolean;
+  selectionStatus: string;
+  state: BundledAssetState;
+  ready: boolean;
+  repairRequired: boolean;
+  repairPolicy: "signed-installer-only";
+  repairAction: "reinstall-candor" | "none";
+  speech: BundledCapabilityStatus;
+  language: BundledCapabilityStatus;
+}
+
 export interface RecapItem {
   category: string;
   text: string;
@@ -372,6 +406,109 @@ export function parseModels(value: unknown): ModelRow[] {
       failureCode: stringField(model.failureCode, `models[${index}].failureCode`, ""),
     };
   });
+}
+
+const BUNDLED_ASSET_STATES = new Set<BundledAssetState>([
+  "checking",
+  "ready",
+  "missing",
+  "corrupt",
+  "incompatible",
+  "repair-required",
+  "disabled",
+  "unavailable",
+  "no-default-selected",
+]);
+
+function bundledAssetState(value: unknown, field: string): BundledAssetState {
+  const state = stringField(value, field) as BundledAssetState;
+  if (!BUNDLED_ASSET_STATES.has(state)) {
+    throw new ProtocolValidationError(field, "a known bundled asset state");
+  }
+  return state;
+}
+
+function parseBundledCapability(value: unknown, field: string): BundledCapabilityStatus {
+  const object = expectObject(value, field);
+  const requiredAssets = numberField(object.requiredAssets, `${field}.requiredAssets`);
+  const verifiedAssets = numberField(object.verifiedAssets, `${field}.verifiedAssets`);
+  if (!Number.isSafeInteger(requiredAssets) || requiredAssets < 0) {
+    throw new ProtocolValidationError(`${field}.requiredAssets`, "a non-negative integer");
+  }
+  if (!Number.isSafeInteger(verifiedAssets) || verifiedAssets < 0) {
+    throw new ProtocolValidationError(`${field}.verifiedAssets`, "a non-negative integer");
+  }
+  const status = {
+    state: bundledAssetState(object.state, `${field}.state`),
+    ready: booleanField(object.ready, `${field}.ready`),
+    available: booleanField(object.available, `${field}.available`),
+    requiredAssets,
+    verifiedAssets,
+    modelId: nullableStringField(object.modelId, `${field}.modelId`),
+    failureCode: nullableStringField(object.failureCode, `${field}.failureCode`),
+  };
+  if (status.ready !== (status.state === "ready") || (status.ready && !status.available)) {
+    throw new ProtocolValidationError(field, "internally consistent capability readiness");
+  }
+  if (status.ready && (
+    status.requiredAssets < 1
+    || status.verifiedAssets < status.requiredAssets
+    || status.modelId === null
+  )) {
+    throw new ProtocolValidationError(field, "verified required assets and a selected model when ready");
+  }
+  return status;
+}
+
+export function parseBundledAiStatus(value: unknown): BundledAiStatus {
+  const object = expectObject(value, "ai.bundledAssetsStatus");
+  if (
+    object.implemented !== true
+    || object.localOnly !== true
+    || object.cloudAi !== false
+    || object.requiredDownload !== false
+    || object.backgroundDownloads !== false
+    || object.runtimePathAcceptedFromRenderer !== false
+    || object.rawPathExposed !== false
+    || object.hashExposed !== false
+    || object.keyMaterialExposedToRenderer !== false
+  ) {
+    throw new ProtocolValidationError(
+      "ai.bundledAssetsStatus",
+      "local-only readiness with no download, renderer path, hash, key, or filesystem exposure",
+    );
+  }
+  const repairPolicy = stringField(object.repairPolicy, "ai.bundledAssetsStatus.repairPolicy");
+  if (repairPolicy !== "signed-installer-only") {
+    throw new ProtocolValidationError("ai.bundledAssetsStatus.repairPolicy", "signed-installer-only");
+  }
+  const repairAction = stringField(object.repairAction, "ai.bundledAssetsStatus.repairAction");
+  if (repairAction !== "reinstall-candor" && repairAction !== "none") {
+    throw new ProtocolValidationError("ai.bundledAssetsStatus.repairAction", "reinstall-candor or none");
+  }
+  const status: BundledAiStatus = {
+    releaseReady: booleanField(object.releaseReady, "ai.bundledAssetsStatus.releaseReady"),
+    fixture: booleanField(object.fixture, "ai.bundledAssetsStatus.fixture"),
+    selectionStatus: stringField(object.selectionStatus, "ai.bundledAssetsStatus.selectionStatus"),
+    state: bundledAssetState(object.state, "ai.bundledAssetsStatus.state"),
+    ready: booleanField(object.ready, "ai.bundledAssetsStatus.ready"),
+    repairRequired: booleanField(object.repairRequired, "ai.bundledAssetsStatus.repairRequired"),
+    repairPolicy,
+    repairAction,
+    speech: parseBundledCapability(object.speech, "ai.bundledAssetsStatus.speech"),
+    language: parseBundledCapability(object.language, "ai.bundledAssetsStatus.language"),
+  };
+  if (status.fixture && status.releaseReady) {
+    throw new ProtocolValidationError("ai.bundledAssetsStatus", "a fixture that is never release-ready");
+  }
+  if (status.ready !== (status.speech.ready && status.language.ready)
+      || status.ready !== (status.state === "ready")) {
+    throw new ProtocolValidationError("ai.bundledAssetsStatus", "internally consistent aggregate readiness");
+  }
+  if (status.repairRequired !== (status.repairAction === "reinstall-candor")) {
+    throw new ProtocolValidationError("ai.bundledAssetsStatus", "a repair action matching repairRequired");
+  }
+  return status;
 }
 
 function parseRecapItem(value: unknown, field: string): RecapItem {

@@ -53,12 +53,13 @@ interface CoreSupervisorState {
   captureRecoveryRequired: boolean;
 }
 
-type SpawnCore = (executable: string) => ChildProcessWithoutNullStreams;
+type SpawnCore = (executable: string, environment: NodeJS.ProcessEnv) => ChildProcessWithoutNullStreams;
 
 interface CoreClientOptions {
   executablePath: () => string;
   allowedMethods: ReadonlySet<string>;
   isDev: boolean;
+  environment?: () => Readonly<Record<string, string>>;
   spawnCore?: SpawnCore;
   timeoutMsForTesting?: (method: string, configuredTimeoutMs: number) => number;
   maxResponseLineBytesForTesting?: number;
@@ -75,14 +76,11 @@ const CAPTURE_START_METHODS = new Set([
 
 export type CaptureGuardPhase = "idle" | "starting" | "recording" | "finalizing";
 
-function defaultSpawnCore(executable: string): ChildProcessWithoutNullStreams {
+function defaultSpawnCore(executable: string, environment: NodeJS.ProcessEnv): ChildProcessWithoutNullStreams {
   return spawn(executable, [], {
     stdio: ["pipe", "pipe", "pipe"],
     windowsHide: true,
-    env: {
-      ...process.env,
-      CANDOR_CORE_TRANSPORT: "stdio-json-lines",
-    },
+    env: environment,
   });
 }
 
@@ -388,7 +386,12 @@ export class CoreClient {
 
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = (this.options.spawnCore ?? defaultSpawnCore)(executable);
+      const environment = {
+        ...process.env,
+        ...(this.options.environment?.() ?? {}),
+        CANDOR_CORE_TRANSPORT: "stdio-json-lines",
+      };
+      child = (this.options.spawnCore ?? defaultSpawnCore)(executable, environment);
     } catch {
       this.supervisor.state = "failed";
       this.supervisor.lastExit = {
