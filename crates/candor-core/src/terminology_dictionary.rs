@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::dictionary_package::VerifiedDictionaryPackage;
 use crate::os_key_store;
 use crate::recording_store::{RecordingIdParams, RecordingStore, RecordingStoreError};
 
@@ -92,6 +93,18 @@ struct TerminologyDictionary {
     enabled: bool,
     imported_at_ms: u128,
     entries: Vec<TerminologyEntry>,
+    #[serde(default)]
+    package_id: Option<String>,
+    #[serde(default)]
+    package_version: Option<String>,
+    #[serde(default)]
+    publisher: Option<String>,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    signature_key_id: Option<String>,
+    #[serde(default)]
+    trust_label: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -185,21 +198,31 @@ pub struct TerminologyDecisionParams {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ImportEntry {
+pub(crate) struct ImportEntry {
     #[serde(alias = "term")]
-    canonical_term: String,
+    pub(crate) canonical_term: String,
     #[serde(default)]
-    aliases: Vec<String>,
+    pub(crate) aliases: Vec<String>,
     #[serde(default)]
-    pronunciation_hints: Vec<String>,
+    pub(crate) pronunciation_hints: Vec<String>,
     #[serde(default)]
-    definition: Option<String>,
+    pub(crate) definition: Option<String>,
     #[serde(default)]
-    category: Option<String>,
+    pub(crate) category: Option<String>,
     #[serde(default)]
-    case_sensitive: bool,
+    pub(crate) case_sensitive: bool,
     #[serde(default = "default_enabled")]
-    enabled: bool,
+    pub(crate) enabled: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct DictionaryPackageMetadata {
+    package_id: Option<String>,
+    package_version: Option<String>,
+    publisher: Option<String>,
+    language: Option<String>,
+    signature_key_id: Option<String>,
+    trust_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -331,6 +354,73 @@ impl TerminologyService {
             false,
         )?;
         let (import_name, imported_entries) = parse_import(&params.format, &params.content)?;
+        self.import_parsed_dictionary(
+            fallback_name,
+            import_name,
+            imported_entries,
+            DictionaryPackageMetadata::default(),
+        )
+    }
+
+    pub fn import_verified_package(
+        &self,
+        package: VerifiedDictionaryPackage,
+    ) -> Result<Value, TerminologyError> {
+        let fallback_name = clean_text(
+            &package.name,
+            MAX_DICTIONARY_NAME_CHARS,
+            MAX_DICTIONARY_NAME_CHARS * 4,
+            "TERMINOLOGY_DICTIONARY_NAME_INVALID",
+            false,
+        )?;
+        let entries = package
+            .entries
+            .into_iter()
+            .map(|entry| ImportEntry {
+                canonical_term: entry.canonical_term,
+                aliases: entry.aliases,
+                pronunciation_hints: entry.pronunciation_hints,
+                definition: entry.definition,
+                category: entry.category,
+                case_sensitive: entry.case_sensitive,
+                enabled: entry.enabled,
+            })
+            .collect::<Vec<_>>();
+        let metadata = DictionaryPackageMetadata {
+            package_id: Some(package.package_id),
+            package_version: Some(package.version),
+            publisher: Some(package.publisher),
+            language: Some(package.language),
+            signature_key_id: Some(package.key_id),
+            trust_label: Some(package.trust_label),
+        };
+        let mut value = self.import_parsed_dictionary(
+            fallback_name.clone(),
+            Some(fallback_name),
+            entries,
+            metadata,
+        )?;
+        if let Some(root) = value.as_object_mut() {
+            root.insert(
+                "minimumCandorVersion".to_string(),
+                Value::String(package.minimum_candor_version),
+            );
+            root.insert(
+                "packageFormat".to_string(),
+                Value::String("candordict".to_string()),
+            );
+            root.insert("signatureVerified".to_string(), Value::Bool(true));
+        }
+        Ok(value)
+    }
+
+    fn import_parsed_dictionary(
+        &self,
+        fallback_name: String,
+        import_name: Option<String>,
+        imported_entries: Vec<ImportEntry>,
+        package: DictionaryPackageMetadata,
+    ) -> Result<Value, TerminologyError> {
         if imported_entries.is_empty() {
             return Err(TerminologyError::new(
                 "TERMINOLOGY_IMPORT_EMPTY",
@@ -371,6 +461,37 @@ impl TerminologyService {
 
         let _guard = self.lock_storage()?;
         let mut document = self.load_document_unlocked()?;
+        if let Some(package_id) = package.package_id.as_deref() {
+            if let Some(existing) = document
+                .dictionaries
+                .iter()
+                .find(|dictionary| dictionary.package_id.as_deref() == Some(package_id))
+            {
+                let installed_version = existing.package_version.as_deref();
+                let available_version = package.package_version.as_deref();
+                let upgrade_available = installed_version != available_version;
+                return Ok(json!({
+                    "imported": false,
+                    "alreadyInstalled": true,
+                    "upgradeAvailable": upgrade_available,
+                    "installedVersion": installed_version,
+                    "availableVersion": available_version,
+                    "dictionaryId": existing.id,
+                    "name": existing.name,
+                    "entryCount": existing.entries.len(),
+                    "enabled": existing.enabled,
+                    "packageId": existing.package_id,
+                    "packageVersion": existing.package_version,
+                    "publisher": existing.publisher,
+                    "language": existing.language,
+                    "signatureKeyId": existing.signature_key_id,
+                    "trustLabel": existing.trust_label,
+                    "encryptedAtRest": true,
+                    "rawPathExposed": false,
+                    "keyMaterialExposedToRenderer": false
+                }));
+            }
+        }
         if document.dictionaries.len() >= MAX_DICTIONARIES {
             return Err(TerminologyError::new(
                 "TERMINOLOGY_DICTIONARY_LIMIT",
@@ -397,6 +518,12 @@ impl TerminologyService {
             enabled: true,
             imported_at_ms: now_ms(),
             entries,
+            package_id: package.package_id.clone(),
+            package_version: package.package_version.clone(),
+            publisher: package.publisher.clone(),
+            language: package.language.clone(),
+            signature_key_id: package.signature_key_id.clone(),
+            trust_label: package.trust_label.clone(),
         });
         self.write_document_unlocked(&document)?;
         Ok(json!({
@@ -405,6 +532,12 @@ impl TerminologyService {
             "name": name,
             "entryCount": entry_count,
             "enabled": true,
+            "packageId": package.package_id,
+            "packageVersion": package.package_version,
+            "publisher": package.publisher,
+            "language": package.language,
+            "signatureKeyId": package.signature_key_id,
+            "trustLabel": package.trust_label,
             "encryptedAtRest": true,
             "rawPathExposed": false,
             "keyMaterialExposedToRenderer": false
@@ -718,7 +851,14 @@ impl TerminologyService {
                     "name": dictionary.name,
                     "enabled": dictionary.enabled,
                     "assignedToRecording": assignments.contains(dictionary.id.as_str()),
-                    "entryCount": dictionary.entries.len()
+                    "entryCount": dictionary.entries.len(),
+                    "packageId": dictionary.package_id,
+                    "packageVersion": dictionary.package_version,
+                    "publisher": dictionary.publisher,
+                    "language": dictionary.language,
+                    "signatureKeyId": dictionary.signature_key_id,
+                    "trustLabel": dictionary.trust_label,
+                    "signatureVerified": dictionary.signature_key_id.is_some()
                 })
             })
             .collect::<Vec<_>>();
@@ -730,7 +870,7 @@ impl TerminologyService {
             "assignmentCount": document.assignments.iter().filter(|assignment| assignment.enabled).count(),
             "decisionCount": document.decisions.len(),
             "dictionaries": dictionaries,
-            "supportedFormats": ["txt", "csv", "json"],
+            "supportedFormats": ["candordict", "txt", "csv", "json"],
             "encryptedAtRest": true,
             "promptWritingRequired": false,
             "automaticCorrection": false,
@@ -1622,6 +1762,7 @@ fn now_ms() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dictionary_package::DictionaryPackageTerm;
     use crate::recording_store::{StartRecordingParams, WriteTranscriptSegmentParams};
     use std::sync::Barrier;
 
@@ -1644,6 +1785,28 @@ mod tests {
             .expect("import dictionary")
     }
 
+    fn verified_package(version: &str, term: &str) -> VerifiedDictionaryPackage {
+        VerifiedDictionaryPackage {
+            package_id: "org.candor.pharmaceutics".to_string(),
+            name: "Pharmaceutics".to_string(),
+            version: version.to_string(),
+            publisher: "Candor".to_string(),
+            language: "en".to_string(),
+            minimum_candor_version: "0.4.0".to_string(),
+            key_id: "candor-test-key".to_string(),
+            trust_label: "candor-verified".to_string(),
+            entries: vec![DictionaryPackageTerm {
+                canonical_term: term.to_string(),
+                aliases: Vec::new(),
+                pronunciation_hints: Vec::new(),
+                definition: None,
+                category: Some("pharmaceutics".to_string()),
+                case_sensitive: false,
+                enabled: true,
+            }],
+        }
+    }
+
     #[test]
     fn dictionary_round_trip_is_encrypted_and_pathless() {
         let (root, key_root) = roots("round-trip");
@@ -1660,6 +1823,42 @@ mod tests {
         let bytes = fs::read(root.join(STORE_FILE)).expect("encrypted store");
         assert!(!String::from_utf8_lossy(&bytes).contains("pharmacokinetics"));
         assert_eq!(status["rawPathExposed"], false);
+    }
+
+    #[test]
+    fn signed_package_reports_a_newer_version_without_replacing_installed_data() {
+        let (root, key_root) = roots("package-upgrade");
+        let service = TerminologyService::with_test_roots(root, key_root);
+        let first = service
+            .import_verified_package(verified_package("1.0.0", "pharmacokinetics"))
+            .expect("initial package import");
+        assert_eq!(first["imported"], true);
+
+        let newer = service
+            .import_verified_package(verified_package("1.1.0", "pharmacodynamics"))
+            .expect("newer package inspection");
+        assert_eq!(newer["alreadyInstalled"], true);
+        assert_eq!(newer["upgradeAvailable"], true);
+        assert_eq!(newer["installedVersion"], "1.0.0");
+        assert_eq!(newer["availableVersion"], "1.1.0");
+
+        let status = service.status(TerminologyStatusParams { recording_id: None });
+        assert_eq!(status["dictionaryCount"], 1);
+        assert_eq!(status["entryCount"], 1);
+        assert_eq!(status["dictionaries"][0]["packageVersion"], "1.0.0");
+        let document = service
+            .load_document()
+            .expect("encrypted terminology store");
+        assert_eq!(document.dictionaries.len(), 1);
+        assert_eq!(
+            document.dictionaries[0].package_version.as_deref(),
+            Some("1.0.0")
+        );
+        assert_eq!(document.dictionaries[0].entries.len(), 1);
+        assert_eq!(
+            document.dictionaries[0].entries[0].canonical_term,
+            "pharmacokinetics"
+        );
     }
 
     #[test]

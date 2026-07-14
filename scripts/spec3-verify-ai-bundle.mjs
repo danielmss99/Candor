@@ -35,8 +35,8 @@ const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_ASSETS = 64;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const SAFE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/i;
-const CAPABILITIES = new Set(["speech", "language"]);
-const KINDS = new Set(["runtime", "library", "model"]);
+const CAPABILITIES = new Set(["speech", "language", "terminology"]);
+const KINDS = new Set(["runtime", "library", "model", "data"]);
 const MANIFEST_FIELDS = new Set([
   "manifestVersion",
   "bundleVersion",
@@ -397,6 +397,7 @@ export function verifyBundle(root, options = {}) {
       ["speech", "model"],
       ["language", "runtime"],
       ["language", "model"],
+      ["terminology", "data"],
     ];
     for (const [capability, kind] of requiredPairs) {
       if (!hostAssets.some((asset) => asset.capability === capability && asset.kind === kind && asset.required === true)) {
@@ -513,6 +514,13 @@ function verifyDecisionLocks(manifest, requireReady) {
           failures.push(`release profile ${manifest.packageProfile} requires speech model ${modelId}`);
         }
       }
+      failures.push(...verifySpeechProfileMembership(manifest, modelLock, hostAssets));
+      if (profile.requiresGeneralDictionary !== true) {
+        failures.push(`release profile ${manifest.packageProfile} must require a general dictionary`);
+      }
+      if (!hostAssets.some((asset) => asset.capability === "terminology" && asset.kind === "data" && asset.required === true)) {
+        failures.push(`release profile ${manifest.packageProfile} requires a signed general dictionary`);
+      }
     }
     const selectedLanguageCandidate = modelLock.language?.candidates?.find(
       (candidate) => candidate.id === modelLock.language?.selectedModel,
@@ -531,6 +539,21 @@ function verifyDecisionLocks(manifest, requireReady) {
   return failures;
 }
 
+function verifySpeechProfileMembership(manifest, modelLock, hostAssets) {
+  const failures = [];
+  for (const asset of hostAssets.filter((candidate) => candidate.capability === "speech" && candidate.kind === "model")) {
+    const lockedCandidate = modelLock.speech?.candidates?.find((candidate) => candidate.id === asset.modelId);
+    if (!lockedCandidate) {
+      failures.push(`speech model ${asset.modelId ?? "<missing>"} is not declared in model-lock.json`);
+      continue;
+    }
+    if (!lockedCandidate.packageProfiles?.includes(manifest.packageProfile)) {
+      failures.push(`speech model ${asset.modelId} is not approved for profile ${manifest.packageProfile}`);
+    }
+  }
+  return failures;
+}
+
 function makeFixture(root) {
   mkdirSync(path.join(root, "notices"), { recursive: true });
   mkdirSync(path.join(root, "assets"), { recursive: true });
@@ -540,6 +563,7 @@ function makeFixture(root) {
     ["speech-model", "speech", "model", "assets/speech.bin", "speech-default"],
     ["language-runtime", "language", "runtime", `assets/language-runtime.${process.platform === "win32" ? "exe" : "bin"}`, null],
     ["language-model", "language", "model", "assets/language-model.gguf", "language-default"],
+    ["general-dictionary", "terminology", "data", "assets/general.candordict", null],
   ];
   const assets = definitions.map(([id, capability, kind, relativePath, modelId]) => {
     const content = Buffer.from(`fixture:${id}`);
@@ -551,7 +575,11 @@ function makeFixture(root) {
       id,
       capability,
       kind,
-      engine: capability === "speech" ? "whisper.cpp" : "llama.cpp",
+      engine: capability === "speech"
+        ? "whisper.cpp"
+        : capability === "language"
+          ? "llama.cpp"
+          : "candor-dictionary-v1",
       relativePath,
       sha256: createHash("sha256").update(content).digest("hex"),
       bytes: content.length,
@@ -619,6 +647,22 @@ function runSelfTest() {
       throw new Error("selected model digest mismatch was accepted");
     }
     fixtureModelLock.speech.candidates[0].expectedSha256 = manifest.assets[0].sha256;
+
+    const profileFailures = verifySpeechProfileMembership(
+      { packageProfile: "complete" },
+      {
+        speech: {
+          candidates: [
+            { id: "speech-default", packageProfiles: ["complete"] },
+            { id: "speech-maximum", packageProfiles: ["complete-max"] },
+          ],
+        },
+      },
+      [{ capability: "speech", kind: "model", modelId: "speech-maximum" }],
+    );
+    if (!profileFailures.some((failure) => failure.includes("not approved for profile complete"))) {
+      throw new Error("a maximum-only speech model was accepted in the complete profile");
+    }
 
     manifest.assets[0].sha256 = "0".repeat(64);
     writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest));

@@ -15,7 +15,11 @@ const api = Object.freeze({
     getCapabilities: () => invoke("candor-core:core-capabilities"),
     retryCore: () => invoke("candor-app:retryCore"),
     listJobs: () => invoke("candor-jobs:list"),
+    getActiveJobs: () => invoke("candor-jobs:activeSummary"),
     getJob: (jobId: string) => invoke("candor-jobs:get", { jobId }),
+    cancelJob: (jobId: string) => invoke("candor-jobs:cancel", { jobId }),
+    cancelAllJobs: () => invoke("candor-jobs:cancelAll"),
+    retryJob: (jobId: string) => invoke("candor-jobs:retry", { jobId }),
     acknowledgeJob: (jobId: string) => invoke("candor-jobs:acknowledge", { jobId }),
     prepareDiagnostics: () => invoke("candor-diagnostics:preview"),
     saveDiagnostics: () => invoke("candor-diagnostics:saveLocal"),
@@ -77,6 +81,8 @@ const api = Object.freeze({
     getStatus: (recordingId?: string) =>
       invoke("candor-core:terminology-status", recordingId ? { recordingId } : {}),
     importDictionary: () => invoke("candor-terminology:importFromFile"),
+    importDictionaryPackage: (sourceFileName: string, archiveBytes: Uint8Array) =>
+      invoke("candor-terminology:importPackageBytes", { sourceFileName, archiveBytes }),
     setEnabled: (dictionaryId: string, enabled: boolean) =>
       invoke("candor-core:terminology-set-enabled", { dictionaryId, enabled }),
     assignToMeeting: (recordingId: string, dictionaryId: string, enabled: boolean) =>

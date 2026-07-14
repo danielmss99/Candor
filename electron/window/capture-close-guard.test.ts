@@ -33,6 +33,10 @@ describe("capture close guard", () => {
       phase: () => "idle",
       confirmStopAndQuit: vi.fn(async () => false),
       finalizeCapture: vi.fn(async () => undefined),
+      activeBackgroundJobCount: vi.fn(async () => 0),
+      confirmBackgroundJobs: vi.fn(async () => "keep-open" as const),
+      pauseBackgroundJobs: vi.fn(async () => undefined),
+      cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore,
       reportFailure: vi.fn(async () => undefined),
     });
@@ -53,6 +57,10 @@ describe("capture close guard", () => {
       phase: () => "recording",
       confirmStopAndQuit: vi.fn(async () => false),
       finalizeCapture,
+      activeBackgroundJobCount: vi.fn(async () => 0),
+      confirmBackgroundJobs: vi.fn(async () => "keep-open" as const),
+      pauseBackgroundJobs: vi.fn(async () => undefined),
+      cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore,
       reportFailure: vi.fn(async () => undefined),
     });
@@ -73,6 +81,10 @@ describe("capture close guard", () => {
       phase: () => "recording",
       confirmStopAndQuit: vi.fn(async () => true),
       finalizeCapture: vi.fn(async () => { order.push("finalize"); }),
+      activeBackgroundJobCount: vi.fn(async () => 0),
+      confirmBackgroundJobs: vi.fn(async () => "keep-open" as const),
+      pauseBackgroundJobs: vi.fn(async () => undefined),
+      cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore: vi.fn(async () => { order.push("shutdown"); }),
       reportFailure: vi.fn(async () => undefined),
     });
@@ -88,6 +100,10 @@ describe("capture close guard", () => {
       phase: () => "finalizing",
       confirmStopAndQuit: vi.fn(async () => true),
       finalizeCapture: vi.fn(async () => { throw new Error("CORE_CAPTURE_FINALIZE_TIMEOUT"); }),
+      activeBackgroundJobCount: vi.fn(async () => 0),
+      confirmBackgroundJobs: vi.fn(async () => "keep-open" as const),
+      pauseBackgroundJobs: vi.fn(async () => undefined),
+      cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore: vi.fn(async () => undefined),
       reportFailure,
     });
@@ -97,5 +113,47 @@ describe("capture close guard", () => {
     expect(reportFailure).toHaveBeenCalledOnce();
     expect(failedGuard.approved()).toBe(false);
     expect(failedWindow.isDestroyed()).toBe(false);
+  });
+
+  it("requires an explicit choice when background jobs are active", async () => {
+    const keepOpenWindow = new FakeWindow();
+    const keepOpenShutdown = vi.fn(async () => undefined);
+    const keepOpenGuard = installCaptureCloseGuard(keepOpenWindow as unknown as BrowserWindow, {
+      phase: () => "idle",
+      confirmStopAndQuit: vi.fn(async () => false),
+      finalizeCapture: vi.fn(async () => undefined),
+      activeBackgroundJobCount: vi.fn(async () => 2),
+      confirmBackgroundJobs: vi.fn(async () => "keep-open" as const),
+      pauseBackgroundJobs: vi.fn(async () => undefined),
+      cancelBackgroundJobs: vi.fn(async () => undefined),
+      shutdownCore: keepOpenShutdown,
+      reportFailure: vi.fn(async () => undefined),
+    });
+
+    keepOpenGuard.requestClose();
+    await settle();
+    expect(keepOpenShutdown).not.toHaveBeenCalled();
+    expect(keepOpenWindow.isDestroyed()).toBe(false);
+
+    const pauseWindow = new FakeWindow();
+    const pauseJobs = vi.fn(async () => undefined);
+    const pauseShutdown = vi.fn(async () => undefined);
+    const pauseGuard = installCaptureCloseGuard(pauseWindow as unknown as BrowserWindow, {
+      phase: () => "idle",
+      confirmStopAndQuit: vi.fn(async () => false),
+      finalizeCapture: vi.fn(async () => undefined),
+      activeBackgroundJobCount: vi.fn(async () => 1),
+      confirmBackgroundJobs: vi.fn(async () => "pause-and-quit" as const),
+      pauseBackgroundJobs: pauseJobs,
+      cancelBackgroundJobs: vi.fn(async () => undefined),
+      shutdownCore: pauseShutdown,
+      reportFailure: vi.fn(async () => undefined),
+    });
+
+    pauseGuard.requestClose();
+    await settle();
+    expect(pauseJobs).toHaveBeenCalledOnce();
+    expect(pauseShutdown).toHaveBeenCalledOnce();
+    expect(pauseWindow.isDestroyed()).toBe(true);
   });
 });

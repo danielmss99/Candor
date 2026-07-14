@@ -254,6 +254,10 @@ impl BundledAiAssets {
         }
     }
 
+    pub fn general_dictionary(&self) -> Result<Option<VerifiedBundledAsset>, BundledAssetError> {
+        self.verified_asset("terminology", "data", None)
+    }
+
     fn verified_asset(
         &self,
         capability: &str,
@@ -562,8 +566,14 @@ fn host_matches(record: &BundledAssetRecord) -> bool {
 
 fn record_is_valid(record: &BundledAssetRecord) -> bool {
     valid_id(&record.id)
-        && matches!(record.capability.as_str(), "speech" | "language")
-        && matches!(record.kind.as_str(), "runtime" | "library" | "model")
+        && matches!(
+            record.capability.as_str(),
+            "speech" | "language" | "terminology"
+        )
+        && matches!(
+            record.kind.as_str(),
+            "runtime" | "library" | "model" | "data"
+        )
         && !record.engine.trim().is_empty()
         && valid_relative_path(&record.relative_path)
         && valid_sha256(&record.sha256)

@@ -54,6 +54,7 @@ interface SettingsViewProps {
   onTranscriptionQualityChange: (tier: TranscriptionQualityTier, languagePreference?: TranscriptionLanguagePreference) => void;
   onRunTranscriptionBenchmark: (tier: "balanced" | "maximum") => void;
   onImportDictionary: () => void;
+  onImportDictionaryFile?: (file: File) => void;
   onSetDictionaryEnabled: (dictionaryId: string, enabled: boolean) => void;
   onAssignDictionary: (dictionaryId: string, enabled: boolean) => void;
   onReviewTerminology: () => void;
@@ -201,6 +202,7 @@ export function SettingsView(props: SettingsViewProps) {
           selectedRecordingId={props.selectedRecordingId}
           busy={Boolean(props.busy)}
           onImport={props.onImportDictionary}
+          onImportFile={props.onImportDictionaryFile ?? (() => undefined)}
           onSetEnabled={props.onSetDictionaryEnabled}
           onAssignToMeeting={props.onAssignDictionary}
           onReview={props.onReviewTerminology}

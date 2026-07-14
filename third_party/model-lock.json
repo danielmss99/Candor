@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedOn": "2026-07-13",
+  "updatedOn": "2026-07-14",
   "sourcePolicy": "official-immutable-revisions-only",
   "speech": {
     "selectionStatus": "benchmark-pending",
@@ -105,12 +105,14 @@
     "complete": {
       "speechModelIds": ["small.en", "small", "large-v3-turbo"],
       "includesMaximumAccuracy": false,
-      "requiresSelectedLanguageModel": true
+      "requiresSelectedLanguageModel": true,
+      "requiresGeneralDictionary": true
     },
     "complete-max": {
       "speechModelIds": ["small.en", "small", "large-v3-turbo", "large-v3"],
       "includesMaximumAccuracy": true,
-      "requiresSelectedLanguageModel": true
+      "requiresSelectedLanguageModel": true,
+      "requiresGeneralDictionary": true
     }
   }
 }

@@ -15,6 +15,13 @@ export interface CaptureCloseGuardDependencies {
   phase(): CaptureGuardPhase;
   confirmStopAndQuit(window: BrowserWindow, phase: CaptureGuardPhase): Promise<boolean>;
   finalizeCapture(): Promise<void>;
+  activeBackgroundJobCount(): Promise<number>;
+  confirmBackgroundJobs(
+    window: BrowserWindow,
+    activeCount: number,
+  ): Promise<"keep-open" | "pause-and-quit" | "cancel-and-quit">;
+  pauseBackgroundJobs(): Promise<void>;
+  cancelBackgroundJobs(): Promise<void>;
   shutdownCore(): Promise<void>;
   reportFailure(window: BrowserWindow, message: string): Promise<void>;
 }
@@ -59,6 +66,13 @@ export function installCaptureCloseGuard(
           const confirmed = await dependencies.confirmStopAndQuit(window, phase);
           if (!confirmed) return;
           await dependencies.finalizeCapture();
+        }
+        const activeCount = await dependencies.activeBackgroundJobCount();
+        if (activeCount > 0) {
+          const decision = await dependencies.confirmBackgroundJobs(window, activeCount);
+          if (decision === "keep-open") return;
+          if (decision === "cancel-and-quit") await dependencies.cancelBackgroundJobs();
+          else await dependencies.pauseBackgroundJobs();
         }
         await approveAndClose();
       } catch (error) {

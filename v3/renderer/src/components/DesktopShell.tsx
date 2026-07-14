@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { RecordAction } from "./RecordAction";
-import type { AppView, PersistentAlert, RecordingSummary } from "../core/contracts";
+import { BackgroundActivity } from "../features/jobs/BackgroundActivity";
+import type { AppView, JsonObject, PersistentAlert, RecordingSummary } from "../core/contracts";
 
 interface DesktopShellProps {
   view: AppView;
@@ -13,6 +14,7 @@ interface DesktopShellProps {
   notice: string;
   error: string;
   persistentAlerts?: PersistentAlert[];
+  jobs?: JsonObject[];
   children: ReactNode;
   onHome: () => void;
   onStartRecording: () => void;
@@ -21,6 +23,10 @@ interface DesktopShellProps {
   onCloseMeeting: (recordingId: string) => void;
   onDismissNotice: () => void;
   onDismissError: () => void;
+  onCancelJob?: (jobId: string) => void;
+  onRetryJob?: (jobId: string) => void;
+  onCancelAllJobs?: () => void;
+  onAcknowledgeJob?: (jobId: string) => void;
 }
 
 export function DesktopShell({
@@ -34,6 +40,7 @@ export function DesktopShell({
   notice,
   error,
   persistentAlerts = [],
+  jobs = [],
   children,
   onHome,
   onStartRecording,
@@ -42,6 +49,10 @@ export function DesktopShell({
   onCloseMeeting,
   onDismissNotice,
   onDismissError,
+  onCancelJob = () => undefined,
+  onRetryJob = () => undefined,
+  onCancelAllJobs = () => undefined,
+  onAcknowledgeJob = () => undefined,
 }: DesktopShellProps) {
   const navigation: Array<[AppView, string]> = [["home", "Home"], ["library", "Meetings"], ["settings", "Settings"]];
   const openTabs = openMeetingIds.map((id) => recordings.find((recording) => recording.recordingId === id)).filter((recording): recording is RecordingSummary => Boolean(recording));
@@ -55,6 +66,7 @@ export function DesktopShell({
           {openTabs.length ? openTabs.map((recording) => <div className="session-tab" key={recording.recordingId} data-active={selectedRecordingId === recording.recordingId}><button type="button" aria-current={selectedRecordingId === recording.recordingId ? "page" : undefined} onClick={() => onOpenRecording(recording.recordingId)}><span className="tab-dot" />{recording.label}</button><button className="tab-close" type="button" aria-label={`Close ${recording.label}`} title="Close meeting tab" onClick={() => onCloseMeeting(recording.recordingId)}>x</button></div>) : <div className="session-tab placeholder" data-active="true"><button type="button" aria-current="page" onClick={() => onNavigate("meeting")}><span className="tab-dot" />New local meeting</button></div>}
           {overflowMeetings.length ? <details className="session-overflow"><summary aria-label="Open another meeting" title="More meetings">+{overflowMeetings.length}</summary><div>{overflowMeetings.slice(0, 12).map((recording) => <button type="button" key={recording.recordingId} onClick={() => onOpenRecording(recording.recordingId)}>{recording.label}</button>)}</div></details> : null}
         </nav>
+        <BackgroundActivity jobs={jobs} onCancel={onCancelJob} onRetry={onRetryJob} onCancelAll={onCancelAllJobs} onOpenMeeting={onOpenRecording} onDismiss={onAcknowledgeJob} />
         <span className="local-only-status"><span className="status-dot ok" />Local only</span>
       </header>
       <div className="desktop-body">

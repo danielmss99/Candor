@@ -1,3 +1,4 @@
+import { useState, type DragEvent } from "react";
 import type {
   TerminologyCorrectionProposal,
   TerminologyStatus,
@@ -9,6 +10,7 @@ interface TerminologySettingsProps {
   selectedRecordingId: string;
   busy: boolean;
   onImport: () => void;
+  onImportFile: (file: File) => void;
   onSetEnabled: (dictionaryId: string, enabled: boolean) => void;
   onAssignToMeeting: (dictionaryId: string, enabled: boolean) => void;
   onReview: () => void;
@@ -16,8 +18,27 @@ interface TerminologySettingsProps {
 }
 
 export function TerminologySettings(props: TerminologySettingsProps) {
+  const [dragging, setDragging] = useState(false);
+
+  const handleDrop = (event: DragEvent<HTMLElement>) => {
+    event.preventDefault();
+    setDragging(false);
+    const file = event.dataTransfer.files.item(0);
+    if (file) props.onImportFile(file);
+  };
+
   return (
-    <section className="settings-group terminology-settings" aria-labelledby="terminology-heading">
+    <section
+      className="settings-group terminology-settings"
+      aria-labelledby="terminology-heading"
+      data-dragging={dragging || undefined}
+      onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
+      onDragOver={(event) => event.preventDefault()}
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
+      }}
+      onDrop={handleDrop}
+    >
       <div className="settings-group-heading">
         <div>
           <h3 id="terminology-heading">Domain dictionaries</h3>
@@ -27,6 +48,10 @@ export function TerminologySettings(props: TerminologySettingsProps) {
           Import dictionary
         </button>
       </div>
+      <div className="dictionary-drop-zone" aria-label="Drop a signed Candor dictionary package">
+        <strong>Signed dictionary packages</strong>
+        <span>Drop a .candordict file here</span>
+      </div>
       {props.status.state === "corrupt" ? (
         <div className="inline-alert" role="alert">
           The encrypted dictionary store needs repair. Existing meetings were not changed.
@@ -34,7 +59,7 @@ export function TerminologySettings(props: TerminologySettingsProps) {
       ) : props.status.dictionaries.length === 0 ? (
         <div className="settings-empty-state">
           <strong>No dictionaries yet</strong>
-          <span>Import a TXT, CSV, or JSON terminology file.</span>
+          <span>Import a signed .candordict package or a plain TXT, CSV, or JSON terminology file.</span>
         </div>
       ) : (
         <div className="terminology-list">
@@ -42,7 +67,7 @@ export function TerminologySettings(props: TerminologySettingsProps) {
             <article key={dictionary.dictionaryId}>
               <div>
                 <strong>{dictionary.name}</strong>
-                <small>{dictionary.entryCount.toLocaleString()} terms</small>
+                <small>{dictionary.entryCount.toLocaleString()} terms · {dictionaryTrustLabel(dictionary.trustLabel)}</small>
               </div>
               <label>
                 <input
@@ -100,4 +125,11 @@ export function TerminologySettings(props: TerminologySettingsProps) {
       ) : null}
     </section>
   );
+}
+
+function dictionaryTrustLabel(trustLabel: string | null): string {
+  if (trustLabel === "verified-candor-bundle") return "Verified by Candor";
+  if (trustLabel === "verified-organization") return "Verified organization pack";
+  if (trustLabel === "community-unverified") return "Community pack - unverified";
+  return "Local dictionary";
 }

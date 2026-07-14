@@ -26,8 +26,11 @@ export function registerJobsIpc(dependencies: IpcDependencies): void {
   };
 
   register("candor-jobs:list", "jobs.list");
+  register("candor-jobs:activeSummary", "jobs.activeSummary");
   register("candor-jobs:get", "jobs.get");
   register("candor-jobs:cancel", "jobs.cancel");
+  register("candor-jobs:cancelAll", "jobs.cancelAll");
+  register("candor-jobs:retry", "jobs.retry");
   register("candor-jobs:acknowledge", "jobs.acknowledge");
   register("candor-transcript:startQualityBenchmark", "transcription.quality.benchmark.start");
   register("candor-transcript:start", "transcription.start");

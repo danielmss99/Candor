@@ -4,6 +4,7 @@ import { EmptyState } from "../../v3/renderer/src/components/EmptyState";
 import {
   type AppView,
   type BundledAiStatus,
+  type JsonObject,
   type MeetingPrivacyReceipt,
   type NetworkCapabilities,
   type PersistentAlert,
@@ -25,6 +26,7 @@ import { AnimatedTranscript, type MotionTranscriptSegment } from "../../v3/rende
 export const VISUAL_SCENARIOS = [
   "home-empty",
   "home-populated",
+  "background-activity",
   "live-recording",
   "live-finalizing",
   "live-low-disk",
@@ -197,9 +199,10 @@ interface ShellProps {
   alerts?: PersistentAlert[];
   error?: string;
   recordings?: RecordingSummary[];
+  jobs?: JsonObject[];
 }
 
-function Shell({ view, children, activeCapture = false, alerts = [], error = "", recordings = allMeetings.slice(0, 12) }: ShellProps) {
+function Shell({ view, children, activeCapture = false, alerts = [], error = "", recordings = allMeetings.slice(0, 12), jobs = [] }: ShellProps) {
   return (
     <DesktopShell
       view={view}
@@ -212,6 +215,7 @@ function Shell({ view, children, activeCapture = false, alerts = [], error = "",
       notice=""
       error={error}
       persistentAlerts={alerts}
+      jobs={jobs}
       onHome={noop}
       onStartRecording={noop}
       onNavigate={noop}
@@ -223,6 +227,37 @@ function Shell({ view, children, activeCapture = false, alerts = [], error = "",
       {children}
     </DesktopShell>
   );
+}
+
+function BackgroundActivityFixture() {
+  useEffect(() => {
+    document.querySelector<HTMLDetailsElement>(".background-activity")?.setAttribute("open", "");
+  }, []);
+  const jobs: JsonObject[] = [
+    {
+      jobId: "a".repeat(32),
+      type: "transcription",
+      state: "running",
+      stage: "transcribing",
+      recordingId: primaryMeeting.recordingId,
+      progress: { completed: 3, total: 5, unit: "stage" },
+      estimatedRemainingMs: 180_000,
+      terminal: false,
+      retryable: false,
+    },
+    {
+      jobId: "b".repeat(32),
+      type: "recap",
+      state: "queued",
+      stage: "queued",
+      recordingId: primaryMeeting.recordingId,
+      progress: { completed: 0, total: 1, unit: "job" },
+      estimatedRemainingMs: null,
+      terminal: false,
+      retryable: false,
+    },
+  ];
+  return <Shell view="home" jobs={jobs}><Home populated /></Shell>;
 }
 
 function Home({ populated, storageLevel = "ok" }: { populated: boolean; storageLevel?: string }) {
@@ -499,6 +534,7 @@ function renderScenario(scenario: VisualScenario): ReactNode {
   if (scenario === "core-incompatible") return <StartupRecovery message="Protocol version mismatch. This local core is incompatible." retrying={false} onRetry={noop} />;
   if (scenario === "home-empty") return <Shell view="home" recordings={[]}><Home populated={false} /></Shell>;
   if (scenario === "home-populated") return <Shell view="home"><Home populated /></Shell>;
+  if (scenario === "background-activity") return <BackgroundActivityFixture />;
   if (scenario === "live-recording") return <Shell view="meeting" activeCapture><Live active label="Recording" jobLabel="Transcript ready" /></Shell>;
   if (scenario === "live-finalizing") return <Shell view="meeting" alerts={[{ id: "finalizing", severity: "info", title: "Finishing safely", message: "Candor is flushing the final local audio chunk. Keep the app open." }]}><Live active={false} busy label="Finalizing recording" jobLabel="Saving local audio" /></Shell>;
   if (scenario === "live-low-disk") return <Shell view="meeting" activeCapture alerts={[{ id: "low-disk", severity: "warning", title: "Storage is running low", message: "12 minutes of estimated recording time remain. Stop soon or free space." }]}><Live active label="Recording with low storage" jobLabel="Storage warning" /></Shell>;

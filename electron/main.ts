@@ -115,6 +115,40 @@ function createWindow(smoke = false): BrowserWindow {
         return result.response === 1;
       },
       finalizeCapture: () => coreClient.finalizeCaptureForClose(),
+      activeBackgroundJobCount: async () => {
+        const response = await coreClient.call("jobs.activeSummary", null);
+        if (!response.ok) throw new Error(response.error?.code ?? "JOB_SUMMARY_FAILED");
+        const value = response.result;
+        if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
+        const activeCount = (value as Record<string, unknown>).activeCount;
+        return typeof activeCount === "number" && Number.isSafeInteger(activeCount)
+          ? activeCount
+          : 0;
+      },
+      confirmBackgroundJobs: async (window, activeCount) => {
+        const noun = activeCount === 1 ? "job is" : "jobs are";
+        const result = await dialog.showMessageBox(window, {
+          type: "question",
+          title: "Background processing is still in progress",
+          message: `${activeCount} local ${noun} still running.`,
+          detail: "Keep Candor open to finish now, pause safely until the next launch, or cancel the jobs without deleting meeting data.",
+          buttons: ["Keep Candor running", "Pause and close", "Cancel jobs and close"],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+        if (result.response === 1) return "pause-and-quit";
+        if (result.response === 2) return "cancel-and-quit";
+        return "keep-open";
+      },
+      pauseBackgroundJobs: async () => {
+        const response = await coreClient.call("jobs.pauseAll", null);
+        if (!response.ok) throw new Error(response.error?.code ?? "JOB_PAUSE_FAILED");
+      },
+      cancelBackgroundJobs: async () => {
+        const response = await coreClient.call("jobs.cancelAll", null);
+        if (!response.ok) throw new Error(response.error?.code ?? "JOB_CANCEL_FAILED");
+      },
       shutdownCore: () => coreClient.shutdown(),
       reportFailure: async (window, message) => {
         await dialog.showMessageBox(window, {
