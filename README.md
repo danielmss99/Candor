@@ -24,7 +24,10 @@ React renderer
 - `v3/renderer/` owns the React and TypeScript desktop interface.
 - `crates/candor-core/` owns capture, durable recording, vault access,
   transcription, local AI, exports, retention, and privacy facts.
-- `electron-builder.v3.yml` is the only active packaging configuration.
+- `electron-builder.v3.yml` is the production Complete packaging configuration.
+- `electron-builder.source-interface.yml` is the separate CI and developer
+  verification configuration. It uses the `Candor Source Interface` product
+  name and a distinct application ID.
 
 The renderer has no Node.js access, generic filesystem API, arbitrary process
 execution, raw vault paths, or vault keys. Electron and the Rust core communicate
@@ -73,12 +76,14 @@ Common commands:
 | `npm run build` | Build the release Rust core, Electron main, and renderer |
 | `npm run start` | Launch already-built local artifacts |
 | `npm run preview` | Build and launch the built renderer in Electron |
-| `npm run dist` | Build installers for the current operating system |
+| `npm run dist` | Build a source-interface verification installer, not a public release |
 | `npm test` | Run the Vitest suite |
 | `npm run v3:verify` | Run the staged local proof stack from M0 through M5 |
 | `npm run audit:source` | Run the Electron/Rust source-security audit |
-| `npm run electron:v3:pack` | Produce an unpacked Electron package |
+| `npm run electron:v3:pack` | Produce an unpacked `Candor Source Interface` package |
 | `npm run electron:v3:dist:ai-release` | Build a public candidate only after the complete bundled-AI gate passes |
+| `npm run release:complete` | Build Complete only when its exact profile, models, licenses, and evidence pass |
+| `npm run release:complete-max` | Build Complete Max only when the Large model and full profile pass |
 | `npm run m0:packaged-smoke` | Exercise the packaged application and sidecar |
 | `npm run spec3:packaged-ai-smoke` | Prove the packaged AI boundary and meeting-data isolation |
 
@@ -100,6 +105,13 @@ This source revision contains the packaging and verification boundary but no
 selected model weights or llama.cpp executable. The release-ready manifest is
 therefore false, and `npm run electron:v3:dist:ai-release` must fail until
 licensing, provenance, benchmarks, notices, and real assets are complete.
+`npm run package:source-interface` is the CI/developer package path. Its product
+name is `Candor Source Interface`, its application ID is separate from Candor,
+and its installer name cannot be confused with a Complete release. It is never
+a Complete product artifact. No general-purpose npm command invokes the
+production builder configuration directly. Public release automation must use
+`release:complete` or `release:complete-max`, which first require the matching
+manifest profile and fail closed before packaging.
 
 ## Data Safety
 

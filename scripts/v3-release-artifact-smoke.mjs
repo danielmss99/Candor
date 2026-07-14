@@ -358,30 +358,27 @@ function macosDmgSmoke() {
     attach = runTool(hdiutil.path, ["attach", dmgPath, "-nobrowse", "-readonly", "-mountpoint", mountPoint]);
     if (!attach.ok) failures.push("hdiutil could not mount the macOS DMG");
 
+    const macBundleNames = ["Candor.app", "Candor Source Interface.app"];
+    const mountedBundleName = macBundleNames.find((name) => existsSync(join(mountPoint, name))) ?? macBundleNames[0];
+    const unpackedBundleRoots = ["mac", "mac-arm64"].flatMap((directory) =>
+      macBundleNames.map((name) => join(releaseDir, directory, name)),
+    );
+
     const requiredEntries = [
       compareExtractedToAny(
         mountPoint,
-        "Candor.app/Contents/MacOS/Candor",
-        [
-          rel(join(releaseDir, "mac", "Candor.app", "Contents", "MacOS", "Candor")),
-          rel(join(releaseDir, "mac-arm64", "Candor.app", "Contents", "MacOS", "Candor")),
-        ],
+        join(mountedBundleName, "Contents", "MacOS", "Candor"),
+        unpackedBundleRoots.map((root) => rel(join(root, "Contents", "MacOS", "Candor"))),
       ),
       compareExtractedToAny(
         mountPoint,
-        "Candor.app/Contents/Resources/app.asar",
-        [
-          rel(join(releaseDir, "mac", "Candor.app", "Contents", "Resources", "app.asar")),
-          rel(join(releaseDir, "mac-arm64", "Candor.app", "Contents", "Resources", "app.asar")),
-        ],
+        join(mountedBundleName, "Contents", "Resources", "app.asar"),
+        unpackedBundleRoots.map((root) => rel(join(root, "Contents", "Resources", "app.asar"))),
       ),
       compareExtractedToAny(
         mountPoint,
-        "Candor.app/Contents/Resources/bin/candor-core",
-        [
-          rel(join(releaseDir, "mac", "Candor.app", "Contents", "Resources", "bin", "candor-core")),
-          rel(join(releaseDir, "mac-arm64", "Candor.app", "Contents", "Resources", "bin", "candor-core")),
-        ],
+        join(mountedBundleName, "Contents", "Resources", "bin", "candor-core"),
+        unpackedBundleRoots.map((root) => rel(join(root, "Contents", "Resources", "bin", "candor-core"))),
       ),
     ];
     for (const entry of requiredEntries) {
@@ -391,7 +388,7 @@ function macosDmgSmoke() {
       }
     }
 
-    const appPath = join(mountPoint, "Candor.app");
+    const appPath = join(mountPoint, mountedBundleName);
     const infoPlistPath = join(appPath, "Contents", "Info.plist");
     const sidecarPath = join(appPath, "Contents", "Resources", "bin", "candor-core");
     const plutil = commandOnPath(["plutil"]);

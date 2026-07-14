@@ -1,6 +1,7 @@
 mod bundled_ai_assets;
 mod capture_service;
 mod consent_store;
+mod grounded_output;
 mod job_manager;
 mod local_ai_service;
 mod local_instruct_assets;
@@ -10,6 +11,8 @@ mod model_manager;
 mod os_key_store;
 mod recording_store;
 mod report_export;
+mod terminology_dictionary;
+mod transcription_quality;
 mod transcription_service;
 mod update_policy;
 mod v2_importer;
@@ -49,6 +52,15 @@ use recording_store::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use terminology_dictionary::{
+    TerminologyAssignParams, TerminologyDecisionParams, TerminologyError, TerminologyImportParams,
+    TerminologyProposalParams, TerminologyService, TerminologySetEnabledParams,
+    TerminologyStatusParams,
+};
+use transcription_quality::{
+    TranscriptionBenchmarkMeasurement, TranscriptionBenchmarkParams, TranscriptionQualityError,
+    TranscriptionQualityUpdateParams,
+};
 use transcription_service::{
     TranscriptionError, TranscriptionProofParams, TranscriptionRunLocalParams, TranscriptionService,
 };
@@ -194,6 +206,7 @@ struct CoreState {
     recent_request_ids: RecentRequestIds,
     shutdown_requested: bool,
     startup_recovery: StartupRecoveryStatus,
+    terminology_service: TerminologyService,
     transcription_service: TranscriptionService,
     update_policy: UpdatePolicy,
     v2_importer: V2Importer,
@@ -211,6 +224,13 @@ impl CoreState {
                 .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
         );
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
+        let transcription_quality_root = recording_store
+            .settings_root_for_core()
+            .join("transcription");
+        let terminology_service = TerminologyService::with_roots(
+            recording_store.settings_root_for_core().join("terminology"),
+            recording_store.key_root_for_core(),
+        );
         Self {
             started_at_ms,
             bundled_ai_assets: bundled_ai_assets.clone(),
@@ -220,9 +240,10 @@ impl CoreState {
             local_instruct_assets: LocalInstructAssetManager::with_root(
                 instruct_assets_root.clone(),
             ),
-            local_instruct_model: LocalInstructModelService::with_sources(
+            local_instruct_model: LocalInstructModelService::with_sources_and_terminology(
                 instruct_assets_root,
                 bundled_ai_assets.clone(),
+                terminology_service.clone(),
             ),
             job_manager: JobManager::new(PROTOCOL_VERSION),
             model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
@@ -231,7 +252,11 @@ impl CoreState {
             recent_request_ids: RecentRequestIds::default(),
             shutdown_requested: false,
             startup_recovery,
-            transcription_service: TranscriptionService,
+            terminology_service: terminology_service.clone(),
+            transcription_service: TranscriptionService::with_quality_and_terminology(
+                transcription_quality_root,
+                terminology_service,
+            ),
             update_policy: UpdatePolicy,
             v2_importer: V2Importer,
             vault_store,
@@ -253,6 +278,13 @@ impl CoreState {
                 .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
         );
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
+        let transcription_quality_root = recording_store
+            .settings_root_for_core()
+            .join("transcription");
+        let terminology_service = TerminologyService::with_roots(
+            recording_store.settings_root_for_core().join("terminology"),
+            recording_store.key_root_for_core(),
+        );
         let bundled_ai_assets = BundledAiAssets::disabled();
         Self {
             started_at_ms,
@@ -263,9 +295,10 @@ impl CoreState {
             local_instruct_assets: LocalInstructAssetManager::with_root(
                 instruct_assets_root.clone(),
             ),
-            local_instruct_model: LocalInstructModelService::with_sources(
+            local_instruct_model: LocalInstructModelService::with_sources_and_terminology(
                 instruct_assets_root,
                 bundled_ai_assets.clone(),
+                terminology_service.clone(),
             ),
             job_manager: JobManager::new(PROTOCOL_VERSION),
             model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
@@ -274,7 +307,11 @@ impl CoreState {
             recent_request_ids: RecentRequestIds::default(),
             shutdown_requested: false,
             startup_recovery,
-            transcription_service: TranscriptionService,
+            terminology_service: terminology_service.clone(),
+            transcription_service: TranscriptionService::with_quality_and_terminology(
+                transcription_quality_root,
+                terminology_service,
+            ),
             update_policy: UpdatePolicy,
             v2_importer: V2Importer,
             vault_store,
@@ -413,6 +450,14 @@ fn make_transcription_error(id: Value, error: TranscriptionError) -> RpcResponse
     make_error(id, error.code, error.message)
 }
 
+fn make_transcription_quality_error(id: Value, error: TranscriptionQualityError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
+fn make_terminology_error(id: Value, error: TerminologyError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
 fn make_model_error(id: Value, error: ModelManagerError) -> RpcResponse {
     make_error(id, error.code, error.message)
 }
@@ -441,11 +486,11 @@ fn decode_params<T>(id: Value, params: Value) -> Result<T, RpcResponse>
 where
     T: for<'de> Deserialize<'de>,
 {
-    serde_json::from_value::<T>(params).map_err(|err| {
+    serde_json::from_value::<T>(params).map_err(|_| {
         make_error(
             id,
             "INVALID_PARAMS",
-            format!("invalid request parameters: {err}"),
+            "request parameters did not match the operation contract",
         )
     })
 }
@@ -453,10 +498,7 @@ where
 fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
     let id = req.id.clone();
     let result = match req.method.as_str() {
-        "core.ping" => json!({
-            "pong": true,
-            "echo": req.params,
-        }),
+        "core.ping" => json!({ "pong": true }),
         "core.version" => json!({
             "version": CORE_VERSION,
             "protocolVersion": PROTOCOL_VERSION,
@@ -537,6 +579,15 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "ai.ask.start",
                 "ai.recap.start",
                 "transcription.status",
+                "transcription.quality.status",
+                "transcription.quality.update",
+                "transcription.quality.benchmark.start",
+                "terminology.status",
+                "terminology.import",
+                "terminology.setEnabled",
+                "terminology.assign",
+                "terminology.proposals",
+                "terminology.decide",
                 "transcription.runLocal",
                 "transcription.start",
                 "transcription.proofSynthetic",
@@ -1084,25 +1135,30 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             let store = state.recording_store.clone();
             let asset_root = store.models_root_for_core().join("instruct");
             let bundled_ai_assets = state.bundled_ai_assets.clone();
+            let terminology_service = state.terminology_service.clone();
             match state.job_manager.submit("recap", true, move |context| {
                 context.progress("preparing", 0, Some(3), Some("stage"));
                 let recording_id = params.recording_id;
                 let mut result = None;
                 if matches!(params.quality, AiJobQuality::Best) {
-                    let service =
-                        LocalInstructModelService::with_sources(asset_root, bundled_ai_assets);
+                    let service = LocalInstructModelService::with_sources_and_terminology(
+                        asset_root,
+                        bundled_ai_assets,
+                        terminology_service,
+                    );
                     let mut scheduler = LocalModelScheduler::default();
                     if service.status(&scheduler)["ready"] == true {
                         context.progress("generating", 1, Some(3), Some("stage"));
                         result = Some(
                             service
-                                .recap(
+                                .recap_cancellable(
                                     &store,
                                     &mut scheduler,
                                     LocalInstructRecapParams {
                                         recording_id: recording_id.clone(),
                                         max_tokens: None,
                                     },
+                                    context.cancellation_flag(),
                                 )
                                 .map_err(|error| {
                                     JobFailure::new(error.code, error.message, true)
@@ -1148,20 +1204,24 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             let store = state.recording_store.clone();
             let asset_root = store.models_root_for_core().join("instruct");
             let bundled_ai_assets = state.bundled_ai_assets.clone();
+            let terminology_service = state.terminology_service.clone();
             match state.job_manager.submit("ask", true, move |context| {
                 context.progress("preparing", 0, Some(3), Some("stage"));
                 let recording_id = params.recording_id;
                 let question = params.question;
                 let mut result = None;
                 if matches!(params.quality, AiJobQuality::Best) {
-                    let service =
-                        LocalInstructModelService::with_sources(asset_root, bundled_ai_assets);
+                    let service = LocalInstructModelService::with_sources_and_terminology(
+                        asset_root,
+                        bundled_ai_assets,
+                        terminology_service,
+                    );
                     let mut scheduler = LocalModelScheduler::default();
                     if service.status(&scheduler)["ready"] == true {
                         context.progress("answering", 1, Some(3), Some("stage"));
                         result = Some(
                             service
-                                .ask(
+                                .ask_cancellable(
                                     &store,
                                     &mut scheduler,
                                     LocalInstructAskParams {
@@ -1169,6 +1229,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                                         question: question.clone(),
                                         max_tokens: None,
                                     },
+                                    context.cancellation_flag(),
                                 )
                                 .map_err(|error| {
                                     JobFailure::new(error.code, error.message, true)
@@ -1203,6 +1264,163 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                     .map_err(|error| JobFailure::new(error.code, error.message, true))?;
                 Ok(result)
             }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
+        "terminology.status" => {
+            let params = match decode_params::<TerminologyStatusParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            state.terminology_service.status(params)
+        }
+        "terminology.import" => {
+            let params = match decode_params::<TerminologyImportParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.terminology_service.import_dictionary(params) {
+                Ok(value) => value,
+                Err(error) => return make_terminology_error(id, error),
+            }
+        }
+        "terminology.setEnabled" => {
+            let params = match decode_params::<TerminologySetEnabledParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.terminology_service.set_enabled(params) {
+                Ok(value) => value,
+                Err(error) => return make_terminology_error(id, error),
+            }
+        }
+        "terminology.assign" => {
+            let params = match decode_params::<TerminologyAssignParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state
+                .terminology_service
+                .assign(&state.recording_store, params)
+            {
+                Ok(value) => value,
+                Err(error) => return make_terminology_error(id, error),
+            }
+        }
+        "terminology.proposals" => {
+            let params = match decode_params::<TerminologyProposalParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state
+                .terminology_service
+                .proposals(&state.recording_store, params)
+            {
+                Ok(value) => value,
+                Err(error) => return make_terminology_error(id, error),
+            }
+        }
+        "terminology.decide" => {
+            let params = match decode_params::<TerminologyDecisionParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state
+                .terminology_service
+                .decide(&state.recording_store, params)
+            {
+                Ok(value) => value,
+                Err(error) => return make_terminology_error(id, error),
+            }
+        }
+        "transcription.quality.status" => state.transcription_service.quality_status(),
+        "transcription.quality.update" => {
+            let params =
+                match decode_params::<TranscriptionQualityUpdateParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.transcription_service.update_quality(params) {
+                Ok(value) => value,
+                Err(error) => return make_transcription_quality_error(id, error),
+            }
+        }
+        "transcription.quality.benchmark.start" => {
+            let params = match decode_params::<TranscriptionBenchmarkParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            if state.capture_manager.is_active() {
+                return make_error(
+                    id,
+                    "TRANSCRIPTION_BENCHMARK_CAPTURE_ACTIVE",
+                    "the local performance check cannot run during an active recording",
+                );
+            }
+            match state.job_manager.has_active_type("local-ai-benchmark") {
+                Ok(true) => {
+                    return make_error(
+                        id,
+                        "TRANSCRIPTION_BENCHMARK_ALREADY_RUNNING",
+                        "a local performance check is already running",
+                    )
+                }
+                Ok(false) => {}
+                Err(error) => return make_job_error(id, error),
+            }
+            let store = state.recording_store.clone();
+            let model_manager = state.model_manager.clone();
+            let service = state.transcription_service.clone();
+            let asset_root = store.models_root_for_core().join("instruct");
+            let bundled_ai_assets = state.bundled_ai_assets.clone();
+            let terminology_service = state.terminology_service.clone();
+            match state
+                .job_manager
+                .submit("local-ai-benchmark", true, move |context| {
+                    let tier = params.tier;
+                    let cancellation = context.cancellation_flag();
+                    let mut scheduler = LocalModelScheduler::default();
+                    context.progress("measuring-transcription", 0, Some(3), Some("stage"));
+                    let whisper = match service.benchmark_whisper_cancellable(
+                        &store,
+                        &mut scheduler,
+                        &model_manager,
+                        params,
+                        cancellation.clone(),
+                    ) {
+                        Ok(measurement) => measurement,
+                        Err(error) => {
+                            let _ = service.record_quality_benchmark_failure(tier, error.code);
+                            return Err(JobFailure::new(error.code, error.message, true));
+                        }
+                    };
+                    context.progress("measuring-local-ai", 1, Some(3), Some("stage"));
+                    let local_ai = LocalInstructModelService::with_sources_and_terminology(
+                        asset_root,
+                        bundled_ai_assets,
+                        terminology_service,
+                    );
+                    let llm = match local_ai.benchmark_cancellable(&mut scheduler, cancellation) {
+                        Ok(measurement) => measurement,
+                        Err(error) => {
+                            let _ = service.record_quality_benchmark_failure(tier, error.code);
+                            return Err(JobFailure::new(error.code, error.message, true));
+                        }
+                    };
+                    context.progress("saving-local-results", 2, Some(3), Some("stage"));
+                    service
+                        .record_quality_benchmark(TranscriptionBenchmarkMeasurement {
+                            tier,
+                            whisper_real_time_factor: whisper.real_time_factor,
+                            llm_estimated_tokens_per_second: llm.estimated_tokens_per_second,
+                            whisper_model_sha256: whisper.model_sha256,
+                            llm_model_sha256: llm.model_sha256,
+                        })
+                        .map_err(|error| JobFailure::new(error.code, error.message, true))
+                }) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
             }
@@ -1255,16 +1473,22 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             };
             let store = state.recording_store.clone();
             let model_manager = state.model_manager.clone();
+            let mut service = state.transcription_service.clone();
             match state
                 .job_manager
                 .submit("transcription", true, move |context| {
                     let recording_id = params.recording_id.clone();
                     context.progress("loading-audio", 0, Some(3), Some("stage"));
                     let mut scheduler = LocalModelScheduler::default();
-                    let mut service = TranscriptionService;
                     context.progress("transcribing", 1, Some(3), Some("stage"));
                     let value = service
-                        .run_local(&store, &mut scheduler, &model_manager, params)
+                        .run_local_cancellable(
+                            &store,
+                            &mut scheduler,
+                            &model_manager,
+                            params,
+                            context.cancellation_flag(),
+                        )
                         .map_err(|error| JobFailure::new(error.code, error.message, true))?;
                     context.progress("saving-transcript", 2, Some(3), Some("stage"));
                     let model = value.get("model").and_then(Value::as_object);
@@ -1414,7 +1638,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             match state.recording_store.transcript(params) {
-                Ok(value) => value,
+                Ok(value) => match state.terminology_service.apply_accepted_corrections(value) {
+                    Ok(value) => value,
+                    Err(error) => return make_terminology_error(id, error),
+                },
                 Err(error) => return make_recording_error(id, error),
             }
         }
@@ -1424,7 +1651,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             match state.recording_store.transcript_page(params) {
-                Ok(value) => value,
+                Ok(value) => match state.terminology_service.apply_accepted_corrections(value) {
+                    Ok(value) => value,
+                    Err(error) => return make_terminology_error(id, error),
+                },
                 Err(error) => return make_recording_error(id, error),
             }
         }

@@ -16,6 +16,8 @@ const defaultResourcesRoots = process.platform === "win32"
     ? [
         path.join(releaseRoot, "mac", "Candor.app", "Contents", "Resources"),
         path.join(releaseRoot, "mac-arm64", "Candor.app", "Contents", "Resources"),
+        path.join(releaseRoot, "mac", "Candor Source Interface.app", "Contents", "Resources"),
+        path.join(releaseRoot, "mac-arm64", "Candor Source Interface.app", "Contents", "Resources"),
       ]
     : [path.join(releaseRoot, "linux-unpacked", "resources")];
 const resourcesRoot = resourcesArgument >= 0

@@ -9,6 +9,8 @@ import {
   type PersistentAlert,
   type RecapItem,
   type RecordingSummary,
+  type TerminologyStatus,
+  type TranscriptionQualityStatus,
 } from "../../v3/renderer/src/core/contracts";
 import { MeetingDetailView } from "../../v3/renderer/src/features/detail/MeetingDetailView";
 import { ExportView, type ExportSectionState } from "../../v3/renderer/src/features/export/ExportView";
@@ -36,6 +38,7 @@ export const VISUAL_SCENARIOS = [
   "export-failed",
   "settings-normal",
   "settings-advanced",
+  "settings-local-ai-ready",
   "settings-local-ai-checking",
   "settings-local-ai-repair",
   "core-unavailable",
@@ -60,6 +63,33 @@ const bundledAiReady: BundledAiStatus = {
   repairAction: "none",
   speech: { state: "ready", ready: true, available: true, requiredAssets: 1, verifiedAssets: 1, modelId: "base.en", failureCode: null },
   language: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "candor-local", failureCode: null },
+};
+
+const transcriptionQuality: TranscriptionQualityStatus = {
+  state: "ready",
+  tier: "balanced",
+  languagePreference: "english",
+  recommendedTier: "balanced",
+  benchmarkState: "measured",
+  benchmarkFailureTier: null,
+  estimatedRealTimeFactor: null,
+  estimatedMinutesPerHour: 15,
+  estimatedCompletionAvailable: true,
+  fallbackApplied: false,
+  guardReason: null,
+  tiers: [
+    { id: "fast", label: "Fast", available: true, recommended: false, guardReason: null },
+    { id: "balanced", label: "Balanced", available: true, recommended: true, guardReason: null },
+    { id: "maximum", label: "Maximum accuracy", available: false, recommended: false, guardReason: "maximum-requires-passing-local-benchmark" },
+  ],
+};
+
+const terminologyStatus: TerminologyStatus = {
+  state: "ready",
+  dictionaryCount: 1,
+  entryCount: 1842,
+  encryptedAtRest: true,
+  dictionaries: [{ dictionaryId: "pharmaceutics", name: "Pharmaceutics", entryCount: 1842, enabled: true, assignedToMeeting: true }],
 };
 
 const allMeetings: RecordingSummary[] = Array.from({ length: 1_000 }, (_, index) => ({
@@ -353,11 +383,11 @@ function Export() {
   );
 }
 
-function Settings({ advanced, repair = false, checking = false }: { advanced: boolean; repair?: boolean; checking?: boolean }) {
+function Settings({ advanced, repair = false, checking = false, localAi = false }: { advanced: boolean; repair?: boolean; checking?: boolean; localAi?: boolean }) {
   const baselineUnavailable = repair || checking;
   return (
     <SettingsView
-      section={baselineUnavailable ? "models" : advanced ? "storage" : "general"}
+      section={baselineUnavailable || localAi ? "models" : advanced ? "storage" : "general"}
       advancedOpen={advanced}
       busy=""
       activeCapture={false}
@@ -388,6 +418,10 @@ function Settings({ advanced, repair = false, checking = false }: { advanced: bo
         repairAction: "reinstall-candor",
         speech: { ...bundledAiReady.speech, state: "corrupt", ready: false, verifiedAssets: 0, failureCode: "BUNDLED_AI_ASSET_HASH_MISMATCH" },
       } : bundledAiReady}
+      transcriptionQuality={transcriptionQuality}
+      terminologyStatus={terminologyStatus}
+      terminologyProposals={[]}
+      selectedRecordingId={primaryMeeting.recordingId}
       models={baselineUnavailable ? [] : [{ modelId: "base.en", language: "English", installed: true, verified: true, bytes: 148_000_000, failureCode: "" }]}
       selectedModel="base.en"
       defaultModel="base.en"
@@ -413,6 +447,12 @@ function Settings({ advanced, repair = false, checking = false }: { advanced: bo
       onImportModel={noop}
       onSelectedModelChange={noop}
       onAiModeChange={noop}
+      onTranscriptionQualityChange={noop}
+      onImportDictionary={noop}
+      onSetDictionaryEnabled={noop}
+      onAssignDictionary={noop}
+      onReviewTerminology={noop}
+      onDecideTerminology={noop}
       onInstructSetupOpenChange={noop}
       onInstructAssetKindChange={noop}
       onInstructExpectedShaChange={noop}
@@ -471,6 +511,7 @@ function renderScenario(scenario: VisualScenario): ReactNode {
   if (scenario === "export-failed") return <Shell view="export" error="The report could not be saved. Choose another local folder and try again."><Export /></Shell>;
   if (scenario === "settings-normal") return <Shell view="settings"><Settings advanced={false} /></Shell>;
   if (scenario === "settings-advanced") return <Shell view="settings"><Settings advanced /></Shell>;
+  if (scenario === "settings-local-ai-ready") return <Shell view="settings"><Settings advanced={false} localAi /></Shell>;
   if (scenario === "settings-local-ai-checking") return <Shell view="settings"><Settings advanced checking /></Shell>;
   if (scenario === "settings-local-ai-repair") return <Shell view="settings"><Settings advanced repair /></Shell>;
   if (scenario === "permission-denied") return <Shell view="meeting" alerts={[{ id: "permission", severity: "error", title: "Microphone permission denied", message: "Allow microphone access in system settings before starting a recording.", actions: [{ label: "Review recording settings", primary: true, onActivate: noop }] }]}><Live active={false} consentReady={false} label="Recording unavailable" jobLabel="Permission required" /></Shell>;

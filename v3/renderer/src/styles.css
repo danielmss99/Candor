@@ -2395,6 +2395,37 @@ p {
   padding-top: 0;
 }
 
+.meeting-local-status {
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  display: flex;
+  gap: 22px;
+  margin: 0;
+  min-height: 38px;
+  padding: 0 2px;
+}
+
+.meeting-local-status div {
+  align-items: baseline;
+  display: flex;
+  gap: 7px;
+}
+
+.meeting-local-status dt,
+.meeting-local-status dd {
+  font-size: 12px;
+  margin: 0;
+}
+
+.meeting-local-status dt {
+  color: var(--text-secondary);
+}
+
+.meeting-local-status dd {
+  color: var(--success);
+  font-weight: 650;
+}
+
 .local-ai-checking,
 .local-ai-unavailable,
 .local-ai-repair {
@@ -2485,6 +2516,200 @@ p {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
   margin-top: 14px;
+}
+
+.settings-group-heading {
+  align-items: flex-start;
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+}
+
+.settings-group-heading h3,
+.settings-group-heading p {
+  margin: 0;
+}
+
+.settings-group-heading p {
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.45;
+  margin-top: 5px;
+}
+
+.settings-status-label {
+  color: var(--text-secondary);
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.quality-choice-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.quality-choice {
+  align-items: center;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  min-height: 58px;
+  padding: 10px 12px;
+  text-align: left;
+  width: 100%;
+}
+
+.quality-choice:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.quality-choice.selected {
+  background: var(--bg-selected);
+  border-color: var(--accent-primary);
+}
+
+.quality-choice[aria-disabled="true"] {
+  opacity: 0.72;
+}
+
+.quality-choice-radio {
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  height: 16px;
+  position: relative;
+  width: 16px;
+}
+
+.quality-choice.selected .quality-choice-radio::after {
+  background: var(--accent-primary);
+  border-radius: 50%;
+  content: "";
+  inset: 3px;
+  position: absolute;
+}
+
+.quality-choice strong,
+.quality-choice small {
+  display: block;
+}
+
+.quality-choice small {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  margin-top: 3px;
+}
+
+.transcription-time-estimate {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 10px 0 0;
+}
+
+.language-preference-row {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.terminology-list,
+.terminology-proposal-list {
+  border-top: 1px solid var(--border-subtle);
+  display: grid;
+  margin-top: 14px;
+}
+
+.terminology-list article {
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(160px, 1fr) auto auto;
+  min-height: 54px;
+  padding: 9px 0;
+}
+
+.terminology-list article > div,
+.terminology-proposal-list article > div:first-child,
+.settings-empty-state {
+  display: grid;
+  gap: 3px;
+}
+
+.terminology-list small,
+.terminology-proposal-list small,
+.settings-empty-state span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.terminology-list label {
+  align-items: center;
+  display: flex;
+  font-size: 12px;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.settings-empty-state {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.terminology-review-row {
+  border-top: 1px solid var(--border-subtle);
+  margin-top: 14px;
+  padding-top: 14px;
+}
+
+.terminology-proposal-list article {
+  align-items: center;
+  border-bottom: 1px solid var(--border-subtle);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 12px 0;
+}
+
+.terminology-proposal-list del {
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+.risk-label {
+  color: var(--info);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.risk-label.high {
+  color: var(--error);
+}
+
+.inline-alert {
+  border-left: 3px solid var(--error);
+  color: var(--text-primary);
+  margin-top: 14px;
+  padding: 8px 10px;
+}
+
+@media (max-width: 1080px) {
+  .terminology-list article {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .terminology-list article > div {
+    grid-column: 1 / -1;
+  }
 }
 
 .model-choice-list > button {

@@ -55,8 +55,23 @@ interface CandorApiV2 {
   };
   transcript: {
     getStatus(): Promise<JsonValue>;
-    start(input: { recordingId: string; channel?: string; modelId?: string; language?: string; initialPrompt?: string }): Promise<JobAccepted>;
+    getQuality(): Promise<JsonValue>;
+    setQuality(input: { tier: "fast" | "balanced" | "maximum"; languagePreference?: "english" | "multilingual" }): Promise<JsonValue>;
+    startQualityBenchmark(input: { tier: "balanced" | "maximum" }): Promise<JobAccepted>;
+    start(input: { recordingId: string; channel?: string; modelId?: string }): Promise<JobAccepted>;
     cancel(jobId: string): Promise<JsonValue>;
+  };
+  terminology: {
+    getStatus(recordingId?: string): Promise<JsonValue>;
+    importDictionary(): Promise<JsonValue>;
+    setEnabled(dictionaryId: string, enabled: boolean): Promise<JsonValue>;
+    assignToMeeting(recordingId: string, dictionaryId: string, enabled: boolean): Promise<JsonValue>;
+    getCorrectionProposals(recordingId: string): Promise<JsonValue>;
+    decideCorrection(
+      recordingId: string,
+      proposalId: string,
+      decision: "accepted" | "rejected",
+    ): Promise<JsonValue>;
   };
   ai: {
     getStatus(): Promise<JsonValue>;

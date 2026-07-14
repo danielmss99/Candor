@@ -1,33 +1,116 @@
 {
   "schemaVersion": 1,
   "updatedOn": "2026-07-13",
+  "sourcePolicy": "official-immutable-revisions-only",
   "speech": {
     "selectionStatus": "benchmark-pending",
     "selectedModel": null,
     "candidates": [
       {
-        "id": "base.en",
-        "expectedSha256": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
-        "language": "english",
-        "provenanceStatus": "existing-candor-allowlist"
-      },
-      {
-        "id": "base",
-        "expectedSha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
-        "language": "multilingual",
-        "provenanceStatus": "existing-candor-allowlist"
-      },
-      {
         "id": "small.en",
-        "expectedSha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+        "productTier": "fast",
         "language": "english",
-        "provenanceStatus": "existing-candor-allowlist"
+        "expectedSha256": "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+        "bytes": 487614201,
+        "sourceUrl": "https://huggingface.co/ggerganov/whisper.cpp",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "licenseExpression": "MIT",
+        "provenanceStatus": "official-source-pinned",
+        "benchmarkStatus": "pending",
+        "packageProfiles": ["complete", "complete-max"]
+      },
+      {
+        "id": "small",
+        "productTier": "fast",
+        "language": "multilingual",
+        "expectedSha256": "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",
+        "bytes": 487601967,
+        "sourceUrl": "https://huggingface.co/ggerganov/whisper.cpp",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "licenseExpression": "MIT",
+        "provenanceStatus": "official-source-pinned",
+        "benchmarkStatus": "pending",
+        "packageProfiles": ["complete", "complete-max"]
+      },
+      {
+        "id": "large-v3-turbo",
+        "productTier": "balanced",
+        "language": "multilingual",
+        "expectedSha256": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+        "bytes": 1624555275,
+        "sourceUrl": "https://huggingface.co/ggerganov/whisper.cpp",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "licenseExpression": "MIT",
+        "provenanceStatus": "official-source-pinned",
+        "benchmarkStatus": "pending",
+        "packageProfiles": ["complete", "complete-max"]
+      },
+      {
+        "id": "large-v3",
+        "productTier": "maximum",
+        "language": "multilingual",
+        "expectedSha256": "64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2",
+        "bytes": 3095033483,
+        "sourceUrl": "https://huggingface.co/ggerganov/whisper.cpp",
+        "revision": "5359861c739e955e79d9a303bcbc70fb988958b1",
+        "licenseExpression": "MIT",
+        "provenanceStatus": "official-source-pinned",
+        "benchmarkStatus": "pending",
+        "packageProfiles": ["complete-max"]
       }
     ]
   },
   "language": {
-    "selectionStatus": "blocked-license-provenance-and-benchmark-review",
+    "selectionStatus": "blocked-conversion-quality-and-redistribution-review",
     "selectedModel": null,
-    "candidates": []
+    "candidates": [
+      {
+        "id": "qwen3-4b-instruct-2507-q4_k_m",
+        "role": "primary",
+        "sourceModel": "Qwen3-4B-Instruct-2507",
+        "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+        "revision": "cdbee75f17c01a7cc42f958dc650907174af0554",
+        "format": "GGUF",
+        "quantization": "Q4_K_M",
+        "expectedSha256": null,
+        "bytes": null,
+        "artifactStatus": "reproducible-conversion-pending",
+        "licenseExpression": "Apache-2.0",
+        "thinking": "disabled",
+        "benchmarkStatus": "pending",
+        "redistributionReview": "pending",
+        "packageProfiles": ["complete", "complete-max"]
+      },
+      {
+        "id": "qwen3-4b-official-q4_k_m",
+        "role": "fallback",
+        "sourceModel": "Qwen3-4B-GGUF",
+        "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
+        "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
+        "filename": "Qwen3-4B-Q4_K_M.gguf",
+        "format": "GGUF",
+        "quantization": "Q4_K_M",
+        "expectedSha256": "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+        "bytes": 2497280256,
+        "artifactStatus": "official-artifact-pinned",
+        "licenseExpression": "Apache-2.0",
+        "thinking": "disabled",
+        "benchmarkStatus": "pending",
+        "redistributionReview": "pending",
+        "packageProfiles": ["complete", "complete-max"]
+      }
+    ]
+  },
+  "packageProfiles": {
+    "complete": {
+      "speechModelIds": ["small.en", "small", "large-v3-turbo"],
+      "includesMaximumAccuracy": false,
+      "requiresSelectedLanguageModel": true
+    },
+    "complete-max": {
+      "speechModelIds": ["small.en", "small", "large-v3-turbo", "large-v3"],
+      "includesMaximumAccuracy": true,
+      "requiresSelectedLanguageModel": true
+    }
   }
 }

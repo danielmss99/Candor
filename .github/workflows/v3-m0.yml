@@ -105,8 +105,8 @@ jobs:
       - name: Run staged v3 verification
         run: npm run v3:verify
 
-      - name: Package M0 release artifacts
-        run: npm run electron:v3:dist
+      - name: Package source-interface verification artifacts
+        run: npm run package:source-interface
 
       - name: Configure Linux Chromium sandbox for runtime proof
         if: runner.os == 'Linux'

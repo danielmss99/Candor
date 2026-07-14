@@ -467,6 +467,14 @@ impl RecordingStore {
         self.root.join("models")
     }
 
+    pub(crate) fn settings_root_for_core(&self) -> PathBuf {
+        self.root.join("settings")
+    }
+
+    pub(crate) fn key_root_for_core(&self) -> PathBuf {
+        self.root.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn local_data_root_for_core(&self) -> PathBuf {
         self.root.clone()

@@ -137,6 +137,27 @@ function capturingCoreWithHungStatus(): string {
 const settle = (milliseconds = 20) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 describe("core client process boundary", () => {
+  it("validates private job parameters before starting the core process", async () => {
+    let spawnCount = 0;
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods: new Set([...allowedMethods, "ai.ask.start"]),
+      isDev: false,
+      spawnCore: () => {
+        spawnCount += 1;
+        return spawnNode(responsiveCore());
+      },
+    });
+
+    await expect(client.call("ai.ask.start", {
+      recordingId: "recording-1",
+      question: "x".repeat(501),
+      quality: "fast",
+    })).rejects.toMatchObject({ code: "CORE_PARAMS_SCHEMA_INVALID" });
+    expect(spawnCount).toBe(0);
+    expect(client.snapshot()).toMatchObject({ state: "stopped" });
+  });
+
   it("passes the trusted packaged AI root only through the main-process spawn environment", async () => {
     let spawnedEnvironment: NodeJS.ProcessEnv | undefined;
     const client = new CoreClient({
@@ -387,8 +408,15 @@ describe("core client process boundary", () => {
             jobId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             type: "export",
             state: "running",
+            createdAt: "2026-07-14T05:00:00Z",
+            updatedAt: "2026-07-14T05:00:01Z",
+            stage: "rendering",
+            progress: { completed: 1, total: 2, unit: "stage" },
+            error: null,
+            cancelRequested: false,
             terminal: false,
-            rawPathExposed: false
+            rawPathExposed: false,
+            keyMaterialExposedToRenderer: false
           }
         }) + "\\n");
       }

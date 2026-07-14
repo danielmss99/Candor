@@ -39,6 +39,7 @@ const files = [
   "vite.v3.config.ts",
   "scripts/m0-packaged-smoke.mjs",
   "electron-builder.v3.yml",
+  "electron-builder.source-interface.yml",
 ];
 
 const requiredMainPatterns = [

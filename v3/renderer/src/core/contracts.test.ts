@@ -3,11 +3,13 @@ import {
   EXPECTED_PROTOCOL_VERSION,
   ProtocolValidationError,
   parseBundledAiStatus,
+  parseAnswer,
   parseMeetingPrivacyReceipt,
   parseProtocolVersion,
   parseRecap,
   parseRecordingPage,
   parseTranscriptPage,
+  parseTranscriptionQualityStatus,
 } from "./contracts";
 
 describe("versioned Candor contracts", () => {
@@ -160,5 +162,99 @@ describe("versioned Candor contracts", () => {
       summary: "Local summary",
       citations: [{ segmentIndex: 0, quote: "Evidence", text: 42 }],
     })).toThrow("citations[0].text");
+  });
+
+  it("requires strict source-linked metadata for llama.cpp output", () => {
+    const strict = {
+      engine: "llama-cpp-local",
+      outputSchemaVersion: 1,
+      strictOutputValidated: true,
+      groundingMethod: "strict-source-id-and-exact-critical-evidence-v1",
+    };
+    expect(() => parseRecap({
+      ...strict,
+      summary: "Grounded recap",
+      decisions: [],
+      actions: [],
+      risks: [],
+      questions: [],
+      citations: [],
+      recapMarkdown: "Grounded recap",
+    })).not.toThrow();
+    expect(() => parseRecap({ ...strict, strictOutputValidated: false }))
+      .toThrow("strict source-linked");
+    expect(() => parseAnswer({
+      ...strict,
+      question: "What changed?",
+      answer: "No grounded answer was found in this meeting.",
+      answerFound: false,
+      citations: [],
+    })).not.toThrow();
+    expect(() => parseAnswer({
+      ...strict,
+      outputSchemaVersion: 2,
+      answer: "Unsupported",
+      citations: [],
+    })).toThrow("strict source-linked");
+  });
+
+  it("validates benchmark state and retry tier without exposing raw measurements", () => {
+    const status = {
+      implemented: true,
+      state: "ready",
+      tier: "fast",
+      languagePreference: "english",
+      recommendedTier: "fast",
+      benchmarkState: "failed",
+      benchmarkFailureTier: "balanced",
+      estimatedRealTimeFactor: null,
+      estimatedMinutesPerHour: null,
+      estimatedCompletionAvailable: false,
+      fallbackApplied: true,
+      guardReason: "balanced-requires-passing-local-benchmark-on-this-device",
+      hardware: {},
+      tiers: [
+        { id: "fast", label: "Fast", available: true, recommended: true, guardReason: null },
+        { id: "balanced", label: "Balanced", available: false, recommended: false, guardReason: "benchmark" },
+        { id: "maximum", label: "Maximum accuracy", available: false, recommended: false, guardReason: "memory" },
+      ],
+      localOnly: true,
+      cloudAi: false,
+      rawModelNamesExposed: false,
+      rawPathExposed: false,
+      keyMaterialExposedToRenderer: false,
+    };
+    expect(parseTranscriptionQualityStatus(status)).toMatchObject({
+      benchmarkState: "failed",
+      benchmarkFailureTier: "balanced",
+    });
+    expect(() => parseTranscriptionQualityStatus({
+      ...status,
+      benchmarkFailureTier: "fast",
+    })).toThrow("benchmarkFailureTier");
+    expect(() => parseTranscriptionQualityStatus({
+      ...status,
+      benchmarkState: "probably-fine",
+    })).toThrow("benchmarkState");
+    expect(parseTranscriptionQualityStatus({
+      ...status,
+      benchmarkState: "measured",
+      benchmarkFailureTier: null,
+      estimatedMinutesPerHour: 15,
+      estimatedCompletionAvailable: true,
+    })).toMatchObject({ estimatedMinutesPerHour: 15 });
+    expect(() => parseTranscriptionQualityStatus({
+      ...status,
+      estimatedMinutesPerHour: 15.5,
+    })).toThrow("estimatedMinutesPerHour");
+    expect(() => parseTranscriptionQualityStatus({
+      ...status,
+      estimatedRealTimeFactor: 0.25,
+    })).toThrow("diagnostics-only");
+    expect(() => parseTranscriptionQualityStatus({
+      ...status,
+      estimatedMinutesPerHour: 15,
+      estimatedCompletionAvailable: false,
+    })).toThrow("consistent");
   });
 });

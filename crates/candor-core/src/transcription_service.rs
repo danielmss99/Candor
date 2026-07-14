@@ -1,6 +1,8 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::local_model_scheduler::{
     LocalModelJobKind, LocalModelScheduler, LocalModelSchedulerError,
@@ -11,12 +13,57 @@ use crate::recording_store::{
     ExportRecordingParams, RecordingIdParams, RecordingStore, RecordingStoreError,
     StartRecordingParams, WriteAudioChunkParams, WriteTranscriptSegmentParams,
 };
+use crate::terminology_dictionary::{TerminologyError, TerminologyService};
+use crate::transcription_quality::{
+    TranscriptionBenchmarkMeasurement, TranscriptionBenchmarkParams, TranscriptionBenchmarkTier,
+    TranscriptionQualityError, TranscriptionQualityService, TranscriptionQualityUpdateParams,
+};
 
 #[cfg(feature = "local-whisper")]
 use crate::recording_store::PcmTrack;
 
+#[cfg(feature = "local-whisper")]
+struct WhisperTrackRequest<'a> {
+    recording_id: &'a str,
+    model_id: &'a str,
+    language: &'a str,
+    initial_prompt: Option<&'a str>,
+}
+
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
-const DEFAULT_LANGUAGE: &str = "en";
+#[cfg(feature = "local-whisper")]
+const BENCHMARK_AUDIO_SECONDS: u32 = 30;
+
+#[derive(Clone, Debug)]
+pub struct WhisperBenchmarkMeasurement {
+    pub real_time_factor: f64,
+    pub model_sha256: String,
+}
+
+fn ensure_transcription_not_cancelled(
+    cancellation: Option<&Arc<AtomicBool>>,
+) -> Result<(), TranscriptionError> {
+    if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+        return Err(TranscriptionError::new(
+            "TRANSCRIPTION_CANCELLED",
+            "local transcription was cancelled",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_is_rejected_before_whisper_startup() {
+        let cancellation = Arc::new(AtomicBool::new(true));
+        let error = ensure_transcription_not_cancelled(Some(&cancellation))
+            .expect_err("cancelled transcription");
+        assert_eq!(error.code, "TRANSCRIPTION_CANCELLED");
+    }
+}
 
 #[derive(Debug)]
 pub struct TranscriptionError {
@@ -51,18 +98,26 @@ impl From<LocalModelSchedulerError> for TranscriptionError {
     }
 }
 
+impl From<TranscriptionQualityError> for TranscriptionError {
+    fn from(error: TranscriptionQualityError) -> Self {
+        Self::new(error.code, error.message)
+    }
+}
+
+impl From<TerminologyError> for TranscriptionError {
+    fn from(error: TerminologyError) -> Self {
+        Self::new(error.code, error.message)
+    }
+}
+
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TranscriptionRunLocalParams {
     pub recording_id: String,
     #[serde(default)]
     pub channel: Option<String>,
     #[serde(default)]
     pub model_id: Option<String>,
-    #[serde(default)]
-    pub language: Option<String>,
-    #[serde(default)]
-    pub initial_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -72,10 +127,73 @@ pub struct TranscriptionProofParams {
     pub label: Option<String>,
 }
 
-#[derive(Default)]
-pub struct TranscriptionService;
+#[derive(Clone)]
+pub struct TranscriptionService {
+    quality: TranscriptionQualityService,
+    terminology: TerminologyService,
+}
 
 impl TranscriptionService {
+    pub fn with_quality_and_terminology(
+        root: std::path::PathBuf,
+        terminology: TerminologyService,
+    ) -> Self {
+        Self {
+            quality: TranscriptionQualityService::with_root(root),
+            terminology,
+        }
+    }
+
+    pub fn quality_status(&self) -> Value {
+        self.quality.status()
+    }
+
+    pub fn update_quality(
+        &self,
+        params: TranscriptionQualityUpdateParams,
+    ) -> Result<Value, TranscriptionQualityError> {
+        self.quality.update(params)
+    }
+
+    pub fn benchmark_whisper_cancellable(
+        &self,
+        store: &RecordingStore,
+        scheduler: &mut LocalModelScheduler,
+        model_manager: &ModelManager,
+        params: TranscriptionBenchmarkParams,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<WhisperBenchmarkMeasurement, TranscriptionError> {
+        ensure_transcription_not_cancelled(Some(&cancellation))?;
+        let job_id = scheduler.start_job(LocalModelJobKind::Whisper, "quality-benchmark")?;
+        #[cfg(feature = "local-whisper")]
+        let result = run_whisper_benchmark(store, model_manager, params.tier, Some(cancellation));
+        #[cfg(not(feature = "local-whisper"))]
+        let result = {
+            let _ = (store, model_manager, params, cancellation);
+            Err(TranscriptionError::new(
+                "TRANSCRIPTION_BENCHMARK_ENGINE_UNAVAILABLE",
+                "the packaged local Whisper runtime is unavailable",
+            ))
+        };
+        scheduler.finish_job(job_id);
+        result
+    }
+
+    pub fn record_quality_benchmark(
+        &self,
+        measurement: TranscriptionBenchmarkMeasurement,
+    ) -> Result<Value, TranscriptionQualityError> {
+        self.quality.record_benchmark(measurement)
+    }
+
+    pub fn record_quality_benchmark_failure(
+        &self,
+        tier: TranscriptionBenchmarkTier,
+        failure_code: &'static str,
+    ) -> Result<(), TranscriptionQualityError> {
+        self.quality.record_benchmark_failure(tier, failure_code)
+    }
+
     pub fn status(
         &self,
         store: &RecordingStore,
@@ -100,10 +218,13 @@ impl TranscriptionService {
             "bundledDefaultsSupported": true,
             "bundledAssets": model_status.get("bundledAssets").cloned().unwrap_or(Value::Null),
             "modelPathAcceptedFromRenderer": false,
-            "recordingInput": "recordingId+optionalChannel",
+            "recordingInput": "recordingId+optionalChannel+advancedModelOverride",
+            "userPromptInputAccepted": false,
+            "terminologyContext": "automatic-local-dictionary-selection",
             "acceptedAudioFormat": "pcm_s16le",
             "targetSampleRateHz": WHISPER_SAMPLE_RATE,
             "scheduler": scheduler_status,
+            "quality": self.quality.status(),
             "rawPathExposed": false,
             "keyMaterialExposedToRenderer": false
         })
@@ -117,7 +238,21 @@ impl TranscriptionService {
         params: TranscriptionRunLocalParams,
     ) -> Result<Value, TranscriptionError> {
         let job_id = scheduler.start_job(LocalModelJobKind::Whisper, "transcription.runLocal")?;
-        let result = self.run_local_inner(store, model_manager, params);
+        let result = self.run_local_inner(store, model_manager, params, None);
+        scheduler.finish_job(job_id);
+        result
+    }
+
+    pub fn run_local_cancellable(
+        &mut self,
+        store: &RecordingStore,
+        scheduler: &mut LocalModelScheduler,
+        model_manager: &ModelManager,
+        params: TranscriptionRunLocalParams,
+        cancellation: Arc<AtomicBool>,
+    ) -> Result<Value, TranscriptionError> {
+        let job_id = scheduler.start_job(LocalModelJobKind::Whisper, "transcription.runLocal")?;
+        let result = self.run_local_inner(store, model_manager, params, Some(cancellation));
         scheduler.finish_job(job_id);
         result
     }
@@ -127,29 +262,70 @@ impl TranscriptionService {
         store: &RecordingStore,
         model_manager: &ModelManager,
         params: TranscriptionRunLocalParams,
+        cancellation: Option<Arc<AtomicBool>>,
     ) -> Result<Value, TranscriptionError> {
-        let model_id = model_manager.resolve_model_id(params.model_id)?;
-        let language = normalize_language(params.language)?;
-        let initial_prompt = normalize_initial_prompt(params.initial_prompt)?;
+        ensure_transcription_not_cancelled(cancellation.as_ref())?;
+        let quality = self.quality.resolve()?;
+        let model_id = match params.model_id {
+            Some(model_id) => model_manager.resolve_model_id(Some(model_id))?,
+            None => quality.model_id.to_string(),
+        };
+        let language = quality.language_preference.whisper_language().to_string();
+        let initial_prompt = self
+            .terminology
+            .whisper_prompt(store, &params.recording_id)?;
         let channel = normalize_optional_channel(params.channel)?;
         let track = store.pcm_track_for_transcription(&params.recording_id, channel.as_deref())?;
 
         #[cfg(feature = "local-whisper")]
         {
-            run_whisper_track(
+            let mut result = run_whisper_track(
                 store,
                 model_manager,
-                &params.recording_id,
-                &model_id,
-                &language,
-                initial_prompt.as_deref(),
+                WhisperTrackRequest {
+                    recording_id: &params.recording_id,
+                    model_id: &model_id,
+                    language: &language,
+                    initial_prompt: initial_prompt.as_deref(),
+                },
                 track,
-            )
+                cancellation,
+            )?;
+            if let Some(object) = result.as_object_mut() {
+                object.insert(
+                    "qualityTier".to_string(),
+                    Value::String(quality.tier.id().to_string()),
+                );
+                object.insert(
+                    "qualityFallbackApplied".to_string(),
+                    Value::Bool(quality.fallback_applied),
+                );
+                object.insert(
+                    "qualityGuardReason".to_string(),
+                    quality
+                        .guard_reason
+                        .map(|reason| Value::String(reason.to_string()))
+                        .unwrap_or(Value::Null),
+                );
+                object.insert(
+                    "terminologyContextApplied".to_string(),
+                    Value::Bool(initial_prompt.is_some()),
+                );
+                object.insert("userPromptAccepted".to_string(), Value::Bool(false));
+            }
+            Ok(result)
         }
 
         #[cfg(not(feature = "local-whisper"))]
         {
-            let _ = (language, initial_prompt, track, model_manager);
+            let _ = (
+                language,
+                initial_prompt,
+                track,
+                model_manager,
+                quality,
+                cancellation,
+            );
             Err(TranscriptionError::new(
                 "TRANSCRIPTION_ENGINE_UNAVAILABLE",
                 format!(
@@ -248,6 +424,91 @@ impl TranscriptionService {
     }
 }
 
+#[cfg(feature = "local-whisper")]
+fn run_whisper_benchmark(
+    store: &RecordingStore,
+    model_manager: &ModelManager,
+    tier: TranscriptionBenchmarkTier,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> Result<WhisperBenchmarkMeasurement, TranscriptionError> {
+    use std::time::Instant;
+    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+    ensure_transcription_not_cancelled(cancellation.as_ref())?;
+    let verified_model = model_manager.verified_model_path(store, tier.model_id())?;
+    let audio = deterministic_benchmark_audio();
+    let context =
+        WhisperContext::new_with_params(&verified_model.path, WhisperContextParameters::default())
+            .map_err(|_| {
+                TranscriptionError::new(
+            "TRANSCRIPTION_BENCHMARK_MODEL_LOAD_FAILED",
+            "the verified local Whisper model could not be loaded for the performance check",
+        )
+            })?;
+    let mut state = context.create_state().map_err(|_| {
+        TranscriptionError::new(
+            "TRANSCRIPTION_BENCHMARK_ENGINE_FAILED",
+            "the local Whisper performance check could not initialize",
+        )
+    })?;
+    let mut whisper_params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    whisper_params.set_n_threads(
+        std::thread::available_parallelism()
+            .map(|count| count.get() as i32)
+            .unwrap_or(4),
+    );
+    whisper_params.set_language(Some("en"));
+    whisper_params.set_translate(false);
+    whisper_params.set_print_special(false);
+    whisper_params.set_print_progress(false);
+    whisper_params.set_print_realtime(false);
+    whisper_params.set_print_timestamps(false);
+    whisper_params.set_tdrz_enable(false);
+    if let Some(cancellation) = cancellation.clone() {
+        let abort_callback: Box<dyn FnMut() -> bool> =
+            Box::new(move || cancellation.load(Ordering::SeqCst));
+        whisper_params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
+    }
+
+    let started = Instant::now();
+    if state.full(whisper_params, &audio).is_err() {
+        ensure_transcription_not_cancelled(cancellation.as_ref())?;
+        return Err(TranscriptionError::new(
+            "TRANSCRIPTION_BENCHMARK_ENGINE_FAILED",
+            "the local Whisper performance check did not complete",
+        ));
+    }
+    ensure_transcription_not_cancelled(cancellation.as_ref())?;
+    let elapsed_seconds = started.elapsed().as_secs_f64();
+    let real_time_factor = elapsed_seconds / f64::from(BENCHMARK_AUDIO_SECONDS);
+    if !real_time_factor.is_finite() || real_time_factor <= 0.0 {
+        return Err(TranscriptionError::new(
+            "TRANSCRIPTION_BENCHMARK_MEASUREMENT_INVALID",
+            "the local Whisper performance check returned an invalid measurement",
+        ));
+    }
+    Ok(WhisperBenchmarkMeasurement {
+        real_time_factor,
+        model_sha256: verified_model.sha256,
+    })
+}
+
+#[cfg(feature = "local-whisper")]
+fn deterministic_benchmark_audio() -> Vec<f32> {
+    let sample_count = WHISPER_SAMPLE_RATE as usize * BENCHMARK_AUDIO_SECONDS as usize;
+    let mut seed = 0x43_41_4e_44_u32;
+    (0..sample_count)
+        .map(|index| {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = ((seed >> 8) as f32 / 16_777_215.0) * 2.0 - 1.0;
+            let seconds = index as f32 / WHISPER_SAMPLE_RATE as f32;
+            let carrier = (seconds * 2.0 * std::f32::consts::PI * 173.0).sin();
+            let envelope = 0.25 + 0.75 * (seconds * 2.0 * std::f32::consts::PI * 3.0).sin().abs();
+            (carrier * 0.012 + noise * 0.004) * envelope
+        })
+        .collect()
+}
+
 fn write_pcm_chunk(
     store: &RecordingStore,
     recording_id: &str,
@@ -265,42 +526,6 @@ fn write_pcm_chunk(
         start_ms: Some(start_ms),
     })?;
     Ok(())
-}
-
-fn normalize_language(value: Option<String>) -> Result<String, TranscriptionError> {
-    let language = value.unwrap_or_else(|| DEFAULT_LANGUAGE.to_string());
-    let language = language.trim();
-    let valid = language == "auto"
-        || (!language.is_empty()
-            && language.len() <= 16
-            && language
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'));
-    if valid {
-        Ok(language.to_string())
-    } else {
-        Err(TranscriptionError::new(
-            "TRANSCRIPTION_LANGUAGE_INVALID",
-            "language must be auto or a short ASCII language tag",
-        ))
-    }
-}
-
-fn normalize_initial_prompt(value: Option<String>) -> Result<Option<String>, TranscriptionError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let prompt = value.trim();
-    if prompt.is_empty() {
-        return Ok(None);
-    }
-    if prompt.len() > 1_000 {
-        return Err(TranscriptionError::new(
-            "TRANSCRIPTION_PROMPT_TOO_LONG",
-            "initial prompt must be at most 1000 bytes",
-        ));
-    }
-    Ok(Some(prompt.to_string()))
 }
 
 fn normalize_optional_channel(value: Option<String>) -> Result<Option<String>, TranscriptionError> {
@@ -327,13 +552,18 @@ fn normalize_optional_channel(value: Option<String>) -> Result<Option<String>, T
 fn run_whisper_track(
     store: &RecordingStore,
     model_manager: &ModelManager,
-    recording_id: &str,
-    model_id: &str,
-    language: &str,
-    initial_prompt: Option<&str>,
+    request: WhisperTrackRequest<'_>,
     track: PcmTrack,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<Value, TranscriptionError> {
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+    let WhisperTrackRequest {
+        recording_id,
+        model_id,
+        language,
+        initial_prompt,
+    } = request;
 
     let verified_model = model_manager.verified_model_path(store, model_id)?;
     let audio = pcm16le_to_mono_16k(&track)?;
@@ -373,9 +603,20 @@ fn run_whisper_track(
         whisper_params.set_initial_prompt(prompt);
     }
 
-    state
-        .full(whisper_params, &audio)
-        .map_err(|err| TranscriptionError::new("TRANSCRIPTION_ENGINE_FAILED", err.to_string()))?;
+    if let Some(cancellation) = cancellation.clone() {
+        let abort_callback: Box<dyn FnMut() -> bool> =
+            Box::new(move || cancellation.load(Ordering::SeqCst));
+        whisper_params.set_abort_callback_safe::<_, Box<dyn FnMut() -> bool>>(Some(abort_callback));
+    }
+
+    if let Err(error) = state.full(whisper_params, &audio) {
+        ensure_transcription_not_cancelled(cancellation.as_ref())?;
+        return Err(TranscriptionError::new(
+            "TRANSCRIPTION_ENGINE_FAILED",
+            error.to_string(),
+        ));
+    }
+    ensure_transcription_not_cancelled(cancellation.as_ref())?;
 
     let speaker = speaker_for_channel(&track.channel);
     let mut written_segments = 0_u64;

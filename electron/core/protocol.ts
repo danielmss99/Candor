@@ -127,6 +127,56 @@ export function parseCoreResponseLine(line: string): CoreResponse {
   return response;
 }
 
+const CORE_JOB_TYPES = new Set([
+  "ask",
+  "export",
+  "legacy-import",
+  "local-ai-benchmark",
+  "local-ai-component-import",
+  "recap",
+  "speech-model-import",
+  "speech-model-verification",
+  "transcription",
+]);
+const CORE_JOB_STATES = new Set(["queued", "running", "completed", "failed", "cancelled"]);
+const TERMINAL_JOB_STATES = new Set(["completed", "failed", "cancelled"]);
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function validJobProgress(value: unknown): boolean {
+  const progress = recordValue(value);
+  if (!progress || !Number.isSafeInteger(progress.completed) || Number(progress.completed) < 0) {
+    return false;
+  }
+  if (progress.total !== undefined && progress.total !== null) {
+    if (!Number.isSafeInteger(progress.total) || Number(progress.total) < Number(progress.completed)) {
+      return false;
+    }
+  }
+  return progress.unit === undefined
+    || (typeof progress.unit === "string" && progress.unit.length > 0 && progress.unit.length <= 32);
+}
+
+function validJobError(value: unknown, state: string, jobId: string): boolean {
+  if (state !== "failed") return value === null;
+  const error = recordValue(value);
+  return Boolean(
+    error
+    && typeof error.code === "string"
+    && error.code.length > 0
+    && typeof error.title === "string"
+    && typeof error.message === "string"
+    && typeof error.retryable === "boolean"
+    && error.severity === "error"
+    && error.correlationId === jobId
+    && error.rawPathExposed === false,
+  );
+}
+
 export function parseCoreEventLine(line: string): CoreEvent | null {
   let parsed: unknown;
   try {
@@ -148,13 +198,26 @@ export function parseCoreEventLine(line: string): CoreEvent | null {
     throw new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core emitted an invalid job event", false);
   }
   const payload = value.payload as Record<string, unknown>;
+  const state = typeof payload.state === "string" ? payload.state : "";
+  const terminal = typeof payload.terminal === "boolean" ? payload.terminal : false;
   if (
     typeof payload.jobId !== "string" ||
     !/^[a-f0-9]{32}$/.test(payload.jobId) ||
     typeof payload.type !== "string" ||
-    typeof payload.state !== "string" ||
+    !CORE_JOB_TYPES.has(payload.type) ||
+    !CORE_JOB_STATES.has(state) ||
     typeof payload.terminal !== "boolean" ||
-    payload.rawPathExposed !== false
+    terminal !== TERMINAL_JOB_STATES.has(state) ||
+    typeof payload.cancelRequested !== "boolean" ||
+    typeof payload.createdAt !== "string" ||
+    Number.isNaN(Date.parse(payload.createdAt)) ||
+    typeof payload.updatedAt !== "string" ||
+    Number.isNaN(Date.parse(payload.updatedAt)) ||
+    (payload.stage !== null && (typeof payload.stage !== "string" || payload.stage.length < 1 || payload.stage.length > 64)) ||
+    !validJobProgress(payload.progress) ||
+    !validJobError(payload.error, state, payload.jobId) ||
+    payload.rawPathExposed !== false ||
+    payload.keyMaterialExposedToRenderer !== false
   ) {
     throw new CoreClientError("CORE_PROTOCOL_FAULT", "candor-core emitted an invalid job event payload", false);
   }

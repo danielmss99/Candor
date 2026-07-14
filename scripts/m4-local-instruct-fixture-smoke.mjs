@@ -138,9 +138,12 @@ function writeFixture() {
       fixtureBinary,
       [
         "@echo off",
-        "echo ## Fixture Recap [s0]",
-        "echo - Decision: Candor keeps AI local [s0]",
-        "echo - Action: Priya validates cited Ask output [s1]",
+        "findstr /C:\"Question:\" \"%4\" >nul",
+        "if %errorlevel%==0 (",
+        "echo {\"schemaVersion\":1,\"summary\":[],\"decisions\":[],\"actions\":[],\"risks\":[],\"questions\":[],\"answer\":{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"sourceIds\":[\"s1\"]}}",
+        ") else (",
+        "echo {\"schemaVersion\":1,\"summary\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"decisions\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"actions\":[{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"owner\":\"Priya\",\"dueDate\":null,\"confidence\":\"high\",\"sourceIds\":[\"s1\"]}],\"risks\":[],\"questions\":[],\"answer\":null}",
+        ")",
       ].join("\r\n"),
       "utf8",
     );
@@ -150,9 +153,11 @@ function writeFixture() {
       fixtureBinary,
       [
         "#!/usr/bin/env sh",
-        "printf '%s\\n' '## Fixture Recap [s0]'",
-        "printf '%s\\n' '- Decision: Candor keeps AI local [s0]'",
-        "printf '%s\\n' '- Action: Priya validates cited Ask output [s1]'",
+        "if grep -q 'Question:' \"$4\"; then",
+        "  printf '%s\\n' '{\"schemaVersion\":1,\"summary\":[],\"decisions\":[],\"actions\":[],\"risks\":[],\"questions\":[],\"answer\":{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"sourceIds\":[\"s1\"]}}'",
+        "else",
+        "  printf '%s\\n' '{\"schemaVersion\":1,\"summary\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"decisions\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"actions\":[{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"owner\":\"Priya\",\"dueDate\":null,\"confidence\":\"high\",\"sourceIds\":[\"s1\"]}],\"risks\":[],\"questions\":[],\"answer\":null}'",
+        "fi",
       ].join("\n"),
       "utf8",
     );
@@ -306,12 +311,14 @@ function assertInstructResult(value, label, mode) {
   record(value?.modelRequired === true, `${label} did not require a local model`);
   record(value?.modelOutputGrounded === true, `${label} did not core-ground model output`);
   record(
-    value?.groundingMethod === "core-lexical-overlap-speaker-aware",
+    value?.groundingMethod === "strict-source-id-and-exact-critical-evidence-v1",
     `${label} returned the wrong grounding method`,
   );
+  record(value?.strictOutputValidated === true, `${label} did not validate strict JSON output`);
+  record(value?.outputSchemaVersion === 1, `${label} returned the wrong output schema`);
   record(value?.citationsVerifiedFromOutput === true, `${label} did not verify citations from output`);
   record(value?.citations?.length >= 1, `${label} returned no parsed citations`);
-  record(JSON.stringify(value).includes("[s0]"), `${label} did not preserve bracketed citation output`);
+  record(JSON.stringify(value).includes("[s"), `${label} did not preserve rendered citations`);
 }
 
 function writeProofArtifact() {

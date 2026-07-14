@@ -23,6 +23,10 @@ const defaultBundleRoot = path.join(repoRoot, "build", "ai-bundle");
 const strict = process.argv.includes("--require-ready");
 const selfTest = process.argv.includes("--self-test");
 const rootArgumentIndex = process.argv.indexOf("--root");
+const profileArgumentIndex = process.argv.indexOf("--profile");
+const expectedProfile = profileArgumentIndex >= 0
+  ? process.argv[profileArgumentIndex + 1] ?? ""
+  : null;
 const bundleRoot = rootArgumentIndex >= 0
   ? path.resolve(process.argv[rootArgumentIndex + 1] ?? "")
   : defaultBundleRoot;
@@ -39,6 +43,7 @@ const MANIFEST_FIELDS = new Set([
   "releaseReady",
   "fixture",
   "selectionStatus",
+  "packageProfile",
   "repairPolicy",
   "assets",
 ]);
@@ -213,6 +218,7 @@ export function verifyBundle(root, options = {}) {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const requireReady = options.requireReady ?? false;
+  const requiredProfile = options.requiredProfile ?? null;
   const manifest = loadManifest(root, failures);
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
     return { ok: false, failures, warnings, manifest: null, verifiedAssets: [] };
@@ -227,6 +233,12 @@ export function verifyBundle(root, options = {}) {
   if (typeof manifest.fixture !== "boolean") failures.push("fixture must be boolean");
   if (typeof manifest.selectionStatus !== "string" || !manifest.selectionStatus.trim()) {
     failures.push("selectionStatus must be a non-empty string");
+  }
+  if (typeof manifest.packageProfile !== "string" || !manifest.packageProfile.trim()) {
+    failures.push("packageProfile must be a non-empty string");
+  }
+  if (requiredProfile !== null && manifest.packageProfile !== requiredProfile) {
+    failures.push(`packageProfile must be ${requiredProfile} for this package command`);
   }
   if (manifest.fixture === true && manifest.releaseReady === true) {
     failures.push("a fixture manifest can never be release-ready");
@@ -308,9 +320,9 @@ export function verifyBundle(root, options = {}) {
       failures.push(`${label} can declare modelId and modelCard only for model assets`);
     }
     if (relevantToHost(asset, platform, arch)) {
-      const selector = asset.capability === "language" || (asset.capability === "speech" && asset.kind === "model")
-        ? `${asset.capability}:${asset.kind}`
-        : `${asset.capability}:${asset.kind}:${asset.modelId ?? ""}`;
+      const selector = asset.kind === "model"
+        ? `${asset.capability}:${asset.kind}:${asset.modelId ?? ""}`
+        : `${asset.capability}:${asset.kind}`;
       if (hostSelectors.has(selector)) failures.push(`${label} duplicates packaged selector ${selector}`);
       hostSelectors.add(selector);
     }
@@ -411,6 +423,7 @@ function writeProof(result, root) {
     mode,
     manifestVersion: result.manifest?.manifestVersion ?? null,
     bundleVersion: result.manifest?.bundleVersion ?? null,
+    packageProfile: result.manifest?.packageProfile ?? null,
     releaseReady: result.manifest?.releaseReady === true,
     fixture: result.manifest?.fixture === true,
     verifiedAssetCount: result.verifiedAssets.length,
@@ -462,13 +475,25 @@ function verifyDecisionLocks(manifest, requireReady) {
     failures.push("speech model candidate hashes are incomplete");
   }
   if (!Array.isArray(modelLock.language?.candidates)
-      || modelLock.language.candidates.some((candidate) => !candidate?.expectedSha256?.match(SHA256_PATTERN))) {
-    failures.push("language model candidate hashes are incomplete");
+      || modelLock.language.candidates.some((candidate) => (
+        candidate?.expectedSha256 !== null
+          && !candidate?.expectedSha256?.match(SHA256_PATTERN)
+      ))) {
+    failures.push("language model candidate hashes are invalid");
+  }
+  if (modelLock.language?.candidates?.some((candidate) => (
+    candidate?.expectedSha256 === null
+      && candidate?.artifactStatus !== "reproducible-conversion-pending"
+  ))) {
+    failures.push("an undigested language candidate must be explicitly conversion-pending");
   }
   const selectedReleaseClaimed = requireReady
     || manifest?.releaseReady === true
     || manifest?.selectionStatus === "release-selected";
   if (selectedReleaseClaimed) {
+    if (!new Set(["complete", "complete-max"]).has(manifest?.packageProfile)) {
+      failures.push("release bundle packageProfile must be complete or complete-max");
+    }
     if (modelLock.speech?.selectionStatus !== "release-selected" || typeof modelLock.speech?.selectedModel !== "string") {
       failures.push("release bundle requires a benchmarked speech model in model-lock.json");
     }
@@ -477,6 +502,23 @@ function verifyDecisionLocks(manifest, requireReady) {
     }
     if (languageRuntime?.selectionStatus !== "release-selected") {
       failures.push("release bundle requires a tested language runtime in runtime-lock.json");
+    }
+    const profile = modelLock.packageProfiles?.[manifest?.packageProfile];
+    if (!profile || !Array.isArray(profile.speechModelIds)) {
+      failures.push("release bundle package profile is absent from model-lock.json");
+    } else {
+      const hostAssets = (manifest?.assets ?? []).filter((asset) => relevantToHost(asset, process.platform, process.arch));
+      for (const modelId of profile.speechModelIds) {
+        if (!hostAssets.some((asset) => asset.capability === "speech" && asset.kind === "model" && asset.modelId === modelId)) {
+          failures.push(`release profile ${manifest.packageProfile} requires speech model ${modelId}`);
+        }
+      }
+    }
+    const selectedLanguageCandidate = modelLock.language?.candidates?.find(
+      (candidate) => candidate.id === modelLock.language?.selectedModel,
+    );
+    if (!selectedLanguageCandidate?.expectedSha256?.match(SHA256_PATTERN)) {
+      failures.push("release-selected language model must have an exact artifact digest");
     }
     failures.push(...verifySelectedAssetBindings(
       manifest,
@@ -530,6 +572,7 @@ function makeFixture(root) {
     releaseReady: true,
     fixture: false,
     selectionStatus: "release-selected",
+    packageProfile: "complete",
     repairPolicy: "signed-installer-only",
     assets,
   };
@@ -613,7 +656,13 @@ function runSelfTest() {
 if (selfTest) {
   runSelfTest();
 } else {
-  const result = verifyBundle(bundleRoot, { requireReady: strict });
+  if (expectedProfile !== null && !new Set(["complete", "complete-max"]).has(expectedProfile)) {
+    throw new Error("--profile must be complete or complete-max");
+  }
+  const result = verifyBundle(bundleRoot, {
+    requireReady: strict,
+    requiredProfile: expectedProfile,
+  });
   result.failures.push(...verifyDecisionLocks(result.manifest, strict));
   result.ok = result.failures.length === 0;
   const proofPath = writeProof(result, bundleRoot);
