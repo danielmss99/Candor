@@ -46,6 +46,24 @@ function defaultExecutableCandidates() {
         "MacOS",
         "Candor",
       ),
+      join(
+        repoRoot,
+        "release-v3",
+        "mac",
+        "Candor Source Interface.app",
+        "Contents",
+        "MacOS",
+        "Candor",
+      ),
+      join(
+        repoRoot,
+        "release-v3",
+        "mac-arm64",
+        "Candor Source Interface.app",
+        "Contents",
+        "MacOS",
+        "Candor",
+      ),
     ];
   }
   return [

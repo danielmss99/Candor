@@ -1,0 +1,12 @@
+extends: ./electron-builder.v3.yml
+appId: com.candor.v3.source-interface
+productName: Candor Source Interface
+directories:
+  output: release-v3
+  buildResources: build
+win:
+  executableName: Candor
+mac:
+  executableName: Candor
+linux:
+  executableName: candor

@@ -1,5 +1,6 @@
 import { PrivacyReceipt } from "../privacy/PrivacyReceipt";
-import { asArray, asBool, asNumber, asObject, asString, formatBytes, metric, type AiMode, type BundledAiStatus, type InstructAssetKind, type JsonObject, type MeetingPrivacyReceipt, type ModelRow, type NetworkCapabilities, type SettingsSection } from "../../core/contracts";
+import { TerminologySettings } from "../terminology/TerminologySettings";
+import { asArray, asBool, asNumber, asObject, asString, formatBytes, metric, type AiMode, type BundledAiStatus, type InstructAssetKind, type JsonObject, type MeetingPrivacyReceipt, type ModelRow, type NetworkCapabilities, type SettingsSection, type TerminologyCorrectionProposal, type TerminologyStatus, type TranscriptionLanguagePreference, type TranscriptionQualityStatus, type TranscriptionQualityTier } from "../../core/contracts";
 
 interface SettingsStatuses {
   core: JsonObject;
@@ -19,6 +20,12 @@ interface SettingsViewProps {
   combinedCaptureAvailable: boolean;
   statuses: SettingsStatuses;
   bundledAiStatus: BundledAiStatus;
+  transcriptionQuality: TranscriptionQualityStatus;
+  transcriptionBenchmarkActive: boolean;
+  transcriptionBenchmarkNeedsRetry: boolean;
+  terminologyStatus: TerminologyStatus;
+  terminologyProposals: TerminologyCorrectionProposal[];
+  selectedRecordingId: string;
   models: ModelRow[];
   selectedModel: string;
   defaultModel: string;
@@ -44,6 +51,13 @@ interface SettingsViewProps {
   onImportModel: () => void;
   onSelectedModelChange: (modelId: string) => void;
   onAiModeChange: (mode: AiMode) => void;
+  onTranscriptionQualityChange: (tier: TranscriptionQualityTier, languagePreference?: TranscriptionLanguagePreference) => void;
+  onRunTranscriptionBenchmark: (tier: "balanced" | "maximum") => void;
+  onImportDictionary: () => void;
+  onSetDictionaryEnabled: (dictionaryId: string, enabled: boolean) => void;
+  onAssignDictionary: (dictionaryId: string, enabled: boolean) => void;
+  onReviewTerminology: () => void;
+  onDecideTerminology: (proposalId: string, decision: "accepted" | "rejected") => void;
   onInstructSetupOpenChange: (open: boolean) => void;
   onInstructAssetKindChange: (kind: InstructAssetKind) => void;
   onInstructExpectedShaChange: (value: string) => void;
@@ -70,6 +84,25 @@ export function SettingsView(props: SettingsViewProps) {
     const statusUnavailable = props.bundledAiStatus.state === "unavailable";
     const transcriptionLabel = checking && !speechReady ? "Checking..." : speechReady ? "Ready on this device" : "Not set up";
     const summaryLabel = checking && !languageReady ? "Checking..." : languageReady ? "Enhanced local mode ready" : "Fast local mode available";
+    const benchmarkLabel = props.transcriptionBenchmarkActive
+      ? "Checking this computer..."
+      : props.transcriptionBenchmarkNeedsRetry
+          ? "Performance check needs retry"
+        : props.transcriptionQuality.benchmarkState === "measured"
+          ? "Measured locally"
+          : "Performance check pending";
+    const completionEstimate = props.transcriptionQuality.estimatedCompletionAvailable
+      && props.transcriptionQuality.estimatedMinutesPerHour !== null
+      ? `About ${props.transcriptionQuality.estimatedMinutesPerHour} minutes for a 1-hour meeting`
+      : null;
+    const maximumTier = props.transcriptionQuality.tiers.find((tier) => tier.id === "maximum");
+    const maximumCheckAvailable = props.transcriptionQuality.benchmarkState === "measured"
+      && Boolean(maximumTier?.guardReason?.includes("benchmark"));
+    const manualBenchmarkTier = props.transcriptionBenchmarkNeedsRetry
+      ? props.transcriptionQuality.benchmarkFailureTier ?? "balanced"
+      : maximumCheckAvailable
+        ? "maximum"
+        : null;
     return (
       <div className="settings-panel-content">
         <header><h2>Local AI</h2><p>Offline transcription and meeting assistance on this computer</p></header>
@@ -97,6 +130,82 @@ export function SettingsView(props: SettingsViewProps) {
             <div><dt>Required downloads</dt><dd>None</dd></div>
           </dl>
         </section>
+        <section className="settings-group" aria-labelledby="transcription-quality-heading">
+          <div className="settings-group-heading">
+            <div>
+              <h3 id="transcription-quality-heading">Transcription quality</h3>
+              <p>Saved for future meetings. Candor never interrupts recording with a model choice.</p>
+            </div>
+            <span className="settings-status-label">
+              {benchmarkLabel}
+            </span>
+          </div>
+          <div className="quality-choice-list" role="radiogroup" aria-label="Transcription quality">
+            {props.transcriptionQuality.tiers.map((tier) => {
+              const selected = props.transcriptionQuality.tier === tier.id;
+              const description = tier.id === "fast"
+                ? "Lowest resource use"
+                : tier.id === "balanced"
+                  ? "Best mix of speed and accuracy"
+                  : "Highest quality, with a longer processing time";
+              return (
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  aria-disabled={!tier.available}
+                  className={selected ? "quality-choice selected" : "quality-choice"}
+                  disabled={Boolean(props.busy) || !tier.available}
+                  key={tier.id}
+                  onClick={() => props.onTranscriptionQualityChange(tier.id)}
+                >
+                  <span className="quality-choice-radio" aria-hidden="true" />
+                  <span>
+                    <strong>{tier.label}{tier.recommended ? " · Recommended" : ""}</strong>
+                    <small>{tier.available ? description : qualityGuardCopy(tier.guardReason)}</small>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+          {completionEstimate ? (
+            <p className="transcription-time-estimate" role="status">{completionEstimate}</p>
+          ) : null}
+          <div className="settings-row-title language-preference-row">
+            <div>
+              <strong>Meeting language</strong>
+              <span>Choose multilingual when meetings may use languages other than English.</span>
+            </div>
+            <div className="segmented-control" role="group" aria-label="Meeting language">
+              <button type="button" aria-pressed={props.transcriptionQuality.languagePreference === "english"} disabled={Boolean(props.busy)} onClick={() => props.onTranscriptionQualityChange(props.transcriptionQuality.tier, "english")}>English</button>
+              <button type="button" aria-pressed={props.transcriptionQuality.languagePreference === "multilingual"} disabled={Boolean(props.busy)} onClick={() => props.onTranscriptionQualityChange(props.transcriptionQuality.tier, "multilingual")}>Multilingual</button>
+            </div>
+          </div>
+          {manualBenchmarkTier && props.bundledAiStatus.ready ? (
+            <div className="settings-actions benchmark-retry-action">
+              <button
+                type="button"
+                onClick={() => props.onRunTranscriptionBenchmark(manualBenchmarkTier)}
+                disabled={Boolean(props.busy) || props.activeCapture || props.transcriptionBenchmarkActive}
+              >
+                {props.transcriptionBenchmarkNeedsRetry
+                  ? `Retry ${manualBenchmarkTier === "maximum" ? "maximum accuracy" : "performance"} check`
+                  : "Check Maximum accuracy"}
+              </button>
+            </div>
+          ) : null}
+        </section>
+        <TerminologySettings
+          status={props.terminologyStatus}
+          proposals={props.terminologyProposals}
+          selectedRecordingId={props.selectedRecordingId}
+          busy={Boolean(props.busy)}
+          onImport={props.onImportDictionary}
+          onSetEnabled={props.onSetDictionaryEnabled}
+          onAssignToMeeting={props.onAssignDictionary}
+          onReview={props.onReviewTerminology}
+          onDecide={props.onDecideTerminology}
+        />
         <section className="settings-group">
           <div className="settings-row-title">
             <div><strong>Generation mode</strong><span id="local-ai-mode-status-settings">{props.aiModeStatus}</span></div>
@@ -106,7 +215,7 @@ export function SettingsView(props: SettingsViewProps) {
             </div>
           </div>
         </section>
-        <details className="instruct-setup" open={props.instructSetupOpen} onToggle={(event) => props.onInstructSetupOpenChange(event.currentTarget.open)}>
+        {props.advancedOpen ? <details className="instruct-setup" open={props.instructSetupOpen} onToggle={(event) => props.onInstructSetupOpenChange(event.currentTarget.open)}>
           <summary><span><strong>Advanced model override</strong><em>{speechReady && languageReady ? "Optional" : "Manual setup"}</em></span></summary>
           <div className="instruct-setup-body">
             <div className="settings-row-title">
@@ -139,7 +248,7 @@ export function SettingsView(props: SettingsViewProps) {
             </label>
             <button type="button" className="secondary-button full-width" onClick={props.onImportInstructAsset} disabled={Boolean(props.busy)}>{props.busy === "instruct-asset" ? "Checking integrity..." : `Choose ${props.instructAssetKind === "runner" ? "processing component" : "language model"}`}</button>
           </div>
-        </details>
+        </details> : null}
       </div>
     );
   };
@@ -157,7 +266,15 @@ export function SettingsView(props: SettingsViewProps) {
     if (props.section === "export") return <div className="settings-panel-content"><header><h2>Export</h2><p>Local files only</p></header><dl className="settings-facts"><div><dt>Markdown</dt><dd>Available locally</dd></div><div><dt>WAV</dt><dd>Available locally</dd></div><div><dt>Word</dt><dd>Editable, local</dd></div><div><dt>PDF</dt><dd>Searchable, local</dd></div><div><dt>Public links</dt><dd>Unavailable</dd></div></dl><button className="primary-button" type="button" onClick={props.onOpenExport}>Open export flow</button></div>;
     return <div className="settings-panel-content"><header><h2>General</h2><p>Everyday controls for this computer</p></header><dl className="settings-facts"><div><dt>Meeting storage</dt><dd>{asBool(props.statuses.vault.encrypted) ? "Encrypted on this device" : "Stored on this device"}</dd></div><div><dt>Updates</dt><dd>{asBool(props.statuses.updates.backgroundChecks) ? "Background checks on" : "Manual checks only"}</dd></div><div><dt>Deletion</dt><dd>{asString(props.statuses.retention.policy) === "manual-delete-only" ? "Delete only when you choose" : "Managed locally"}</dd></div><div><dt>Account</dt><dd>Not required</dd></div></dl><button type="button" className="secondary-button" onClick={props.onRefreshLocalSettings} disabled={Boolean(props.busy)}>Refresh local settings</button></div>;
   };
-  const basicSections: Array<[SettingsSection, string]> = [["general", "General"], ["recording", "Recording"], ["export", "Export"], ["license", "License"]];
-  const advancedSections: Array<[SettingsSection, string]> = [["models", "Local AI"], ["storage", "Storage and retention"], ["privacy", "Privacy and network"], ["diagnostics", "Diagnostics"]];
+  const basicSections: Array<[SettingsSection, string]> = [["general", "General"], ["recording", "Recording"], ["models", "AI & Transcription"], ["export", "Export"], ["license", "License"]];
+  const advancedSections: Array<[SettingsSection, string]> = [["storage", "Storage and retention"], ["privacy", "Privacy and network"], ["diagnostics", "Diagnostics"]];
   return <section className="page-view" data-view="settings"><header className="screen-heading"><h1>Settings</h1><p>Local controls for Candor on this computer</p></header><div className="settings-layout"><nav aria-label="Settings sections"><span>BASIC</span>{basicSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}<button type="button" className="advanced-settings-toggle" aria-expanded={props.advancedOpen} onClick={props.onToggleAdvanced}>{props.advancedOpen ? "Hide advanced settings" : "Show advanced settings"}</button>{props.advancedOpen ? <><span>ADVANCED</span>{advancedSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}</> : null}</nav><section className="settings-panel">{renderPanel()}</section></div></section>;
+}
+
+function qualityGuardCopy(reason: string | null): string {
+  if (!reason) return "Unavailable on this computer";
+  if (reason.includes("16gb")) return "Requires at least 16 GB of memory";
+  if (reason.includes("8gb")) return "Requires at least 8 GB of memory";
+  if (reason.includes("benchmark")) return "Available after a passing local performance check";
+  return "Unavailable on this computer";
 }

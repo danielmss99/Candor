@@ -24,6 +24,7 @@ const noParameterMethods = new Set([
   "ai.instructStatus",
   "ai.schedulerStatus",
   "transcription.status",
+  "transcription.quality.status",
   "recording.durable.status",
   "retention.status",
 ]);
@@ -107,6 +108,13 @@ function requiredRecordingId(method: string, value: unknown): string {
   return value;
 }
 
+function requiredLocalId(method: string, value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(value)) {
+    return fail(method, `${field} is invalid`);
+  }
+  return value;
+}
+
 function optionalModelId(method: string, value: unknown): string | undefined {
   if (value === undefined) return undefined;
   if (!validModelId(value)) return fail(method, "modelId is invalid");
@@ -187,18 +195,14 @@ function pagedRecordingInput(method: string, input: unknown, transcript: boolean
 
 function transcriptionInput(method: string, input: unknown): JsonValue {
   const value = objectInput(method, input);
-  exactFields(method, value, ["recordingId", "channel", "modelId", "language", "initialPrompt"]);
+  exactFields(method, value, ["recordingId", "channel", "modelId"]);
   const result: Record<string, JsonValue> = {
     recordingId: requiredRecordingId(method, value.recordingId),
   };
   const channel = optionalString(method, value.channel, "channel", INPUT_LIMITS.channel);
   const modelId = optionalModelId(method, value.modelId);
-  const language = optionalString(method, value.language, "language", INPUT_LIMITS.language);
-  const initialPrompt = optionalString(method, value.initialPrompt, "initialPrompt", INPUT_LIMITS.initialPrompt);
   if (channel !== undefined) result.channel = channel;
   if (modelId !== undefined) result.modelId = modelId;
-  if (language !== undefined) result.language = language;
-  if (initialPrompt !== undefined) result.initialPrompt = initialPrompt;
   return result;
 }
 
@@ -252,6 +256,61 @@ export function validateRendererCoreParams(method: string, input: unknown): Json
   if (method === "ai.askHeuristic") return recordingQuestion(method, input, false);
   if (method === "ai.askInstruct") return recordingQuestion(method, input, true);
   if (method === "ai.recapInstruct") return recordingOnly(method, input, true);
+  if (method === "transcription.quality.update") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["tier", "languagePreference"]);
+    if (value.tier !== "fast" && value.tier !== "balanced" && value.tier !== "maximum") {
+      return fail(method, "tier must be fast, balanced, or maximum");
+    }
+    if (value.languagePreference !== undefined
+        && value.languagePreference !== "english"
+        && value.languagePreference !== "multilingual") {
+      return fail(method, "languagePreference must be english or multilingual");
+    }
+    return {
+      tier: value.tier,
+      ...(value.languagePreference === undefined ? {} : { languagePreference: value.languagePreference }),
+    };
+  }
+  if (method === "terminology.status") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["recordingId"]);
+    return value.recordingId === undefined
+      ? {}
+      : { recordingId: requiredRecordingId(method, value.recordingId) };
+  }
+  if (method === "terminology.setEnabled") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["dictionaryId", "enabled"]);
+    if (typeof value.enabled !== "boolean") return fail(method, "enabled must be a boolean");
+    return {
+      dictionaryId: requiredLocalId(method, value.dictionaryId, "dictionaryId"),
+      enabled: value.enabled,
+    };
+  }
+  if (method === "terminology.assign") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["recordingId", "dictionaryId", "enabled"]);
+    if (typeof value.enabled !== "boolean") return fail(method, "enabled must be a boolean");
+    return {
+      recordingId: requiredRecordingId(method, value.recordingId),
+      dictionaryId: requiredLocalId(method, value.dictionaryId, "dictionaryId"),
+      enabled: value.enabled,
+    };
+  }
+  if (method === "terminology.proposals") return recordingOnly(method, input);
+  if (method === "terminology.decide") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["recordingId", "proposalId", "decision"]);
+    if (value.decision !== "accepted" && value.decision !== "rejected") {
+      return fail(method, "decision must be accepted or rejected");
+    }
+    return {
+      recordingId: requiredRecordingId(method, value.recordingId),
+      proposalId: requiredLocalId(method, value.proposalId, "proposalId"),
+      decision: value.decision,
+    };
+  }
   if (recordingIdMethods.has(method)) return recordingOnly(method, input);
   if (method === "transcription.runLocal") return transcriptionInput(method, input);
   if (method === "recording.durable.listPage") return pagedRecordingInput(method, input, false);

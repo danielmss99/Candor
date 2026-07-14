@@ -4,6 +4,7 @@
   "releaseReady": false,
   "fixture": false,
   "selectionStatus": "no-default-selected",
+  "packageProfile": "source-interface",
   "repairPolicy": "signed-installer-only",
   "assets": []
 }

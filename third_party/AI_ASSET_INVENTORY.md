@@ -29,9 +29,11 @@ include both license texts.
 
 ## Speech models
 
-`base.en`, `base`, and `small.en` remain benchmark candidates. Their existing
-Candor SHA-256 allowlist values are recorded in `model-lock.json`, but no model
-is selected for the release bundle. Selection still requires:
+`small.en`, multilingual `small`, `large-v3-turbo`, and `large-v3` are the
+source-pinned benchmark candidates. The intended product mapping is Fast,
+Balanced, and Maximum accuracy respectively. Their official artifact size and
+SHA-256 values are recorded in `model-lock.json`, but no model is selected for
+the release bundle. Selection still requires:
 
 - authoritative source and model-card capture;
 - redistribution review and complete notice text;
@@ -48,7 +50,11 @@ still required.
 
 ## Instruction model
 
-No default instruction model is selected. Candor will not package one until all
+Qwen3-4B-Instruct-2507 is the primary source candidate. Its exact Q4_K_M
+artifact remains intentionally undigested because no matching official GGUF was
+available during inspection and the reproducible conversion has not run. The
+official Qwen3-4B Q4_K_M artifact is pinned as a fallback candidate only. No
+default instruction model is selected. Candor will not package either until all
 of the following are documented:
 
 - exact upstream revision and original model license;

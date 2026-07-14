@@ -13,6 +13,7 @@ export type FieldRule =
   | "boolean"
   | "capture-session-or-null"
   | "integer"
+  | "integer-or-null"
   | "number"
   | "object"
   | "string"
@@ -42,6 +43,8 @@ function fieldMatches(value: JsonValue, rule: FieldRule): boolean {
       );
     case "integer":
       return typeof value === "number" && Number.isSafeInteger(value);
+    case "integer-or-null":
+      return value === null || (typeof value === "number" && Number.isSafeInteger(value));
     case "number":
       return typeof value === "number" && Number.isFinite(value);
     case "object":

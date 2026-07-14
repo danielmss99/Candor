@@ -609,9 +609,11 @@ function assertInstructResult(value, label, mode) {
   record(value?.promptDeletedAfterRun === true, `${label} did not delete the prompt file`);
   record(value?.modelOutputGrounded === true, `${label} did not core-ground model output`);
   record(
-    value?.groundingMethod === "core-lexical-overlap-speaker-aware",
+    value?.groundingMethod === "strict-source-id-and-exact-critical-evidence-v1",
     `${label} returned the wrong grounding method`,
   );
+  record(value?.strictOutputValidated === true, `${label} did not validate strict JSON output`);
+  record(value?.outputSchemaVersion === 1, `${label} returned the wrong output schema`);
   record(value?.citationsVerifiedFromOutput === true, `${label} returned no verified citations`);
 }
 

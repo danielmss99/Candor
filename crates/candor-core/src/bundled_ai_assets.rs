@@ -72,6 +72,8 @@ struct BundledManifest {
     release_ready: bool,
     fixture: bool,
     selection_status: String,
+    #[serde(default)]
+    package_profile: Option<String>,
     repair_policy: String,
     #[serde(default)]
     assets: Vec<BundledAssetRecord>,
@@ -120,6 +122,7 @@ struct BundleSnapshot {
     release_ready: bool,
     fixture: bool,
     selection_status: String,
+    package_profile: Option<String>,
     state: &'static str,
     failure_code: Option<&'static str>,
     assets: Vec<InspectedAsset>,
@@ -133,6 +136,7 @@ impl BundleSnapshot {
             release_ready: false,
             fixture: false,
             selection_status: state.to_string(),
+            package_profile: None,
             state,
             failure_code: Some(failure_code),
             assets: Vec::new(),
@@ -212,6 +216,7 @@ impl BundledAiAssets {
             "releaseReady": snapshot.release_ready,
             "fixture": snapshot.fixture,
             "selectionStatus": snapshot.selection_status,
+            "packageProfile": snapshot.package_profile,
             "state": aggregate_state,
             "ready": ready,
             "repairRequired": repair_required,
@@ -300,6 +305,10 @@ impl BundledAiAssets {
         if manifest.manifest_version != MANIFEST_VERSION
             || manifest.bundle_version.trim().is_empty()
             || manifest.selection_status.trim().is_empty()
+            || manifest
+                .package_profile
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
             || manifest.repair_policy != "signed-installer-only"
             || manifest.assets.len() > MAX_ASSETS
             || (manifest.fixture && manifest.release_ready)
@@ -313,6 +322,7 @@ impl BundledAiAssets {
                 release_ready: manifest.release_ready,
                 fixture: manifest.fixture,
                 selection_status: manifest.selection_status,
+                package_profile: manifest.package_profile,
                 state: if manifest.release_ready {
                     "missing"
                 } else {
@@ -342,17 +352,15 @@ impl BundledAiAssets {
             if !host_matches(record) {
                 continue;
             }
-            let selector = if record.capability == "language"
-                || record.capability == "speech" && record.kind == "model"
-            {
-                format!("{}:{}", record.capability, record.kind)
-            } else {
+            let selector = if record.kind == "model" {
                 format!(
                     "{}:{}:{}",
                     record.capability,
                     record.kind,
                     record.model_id.as_deref().unwrap_or_default()
                 )
+            } else {
+                format!("{}:{}", record.capability, record.kind)
             };
             if !selectors.insert(selector) {
                 manifest_invalid = true;
@@ -370,6 +378,7 @@ impl BundledAiAssets {
                 release_ready: manifest.release_ready,
                 fixture: manifest.fixture,
                 selection_status: manifest.selection_status,
+                package_profile: manifest.package_profile,
                 state: "incompatible",
                 failure_code: Some("BUNDLED_AI_PLATFORM_UNSUPPORTED"),
                 assets,
@@ -384,6 +393,7 @@ impl BundledAiAssets {
             release_ready: manifest.release_ready,
             fixture: manifest.fixture,
             selection_status: manifest.selection_status,
+            package_profile: manifest.package_profile,
             state,
             failure_code,
             assets,
@@ -948,7 +958,7 @@ mod tests {
             "language-model-two",
             "language",
             "model",
-            Some("language-two"),
+            Some("language-one"),
         );
         write_manifest(
             &root,

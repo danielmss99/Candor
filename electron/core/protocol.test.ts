@@ -81,8 +81,15 @@ describe("core protocol", () => {
         jobId: "a".repeat(32),
         type: "export",
         state: "running",
+        createdAt: "2026-07-14T05:00:00Z",
+        updatedAt: "2026-07-14T05:00:01Z",
+        stage: "rendering",
+        progress: { completed: 1, total: 2, unit: "stage" },
+        error: null,
+        cancelRequested: false,
         terminal: false,
         rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
       },
     }))).toMatchObject({ event: "jobs.changed", payload: { state: "running" } });
     expect(() => parseCoreEventLine(JSON.stringify({
@@ -90,6 +97,32 @@ describe("core protocol", () => {
       event: "jobs.changed",
       payload: { jobId: "not-safe" },
     }))).toThrow("invalid job event payload");
+    const validPayload = {
+      jobId: "b".repeat(32),
+      type: "transcription",
+      state: "running",
+      createdAt: "2026-07-14T05:00:00Z",
+      updatedAt: "2026-07-14T05:00:01Z",
+      stage: "transcribing",
+      progress: { completed: 1, total: 3, unit: "stage" },
+      error: null,
+      cancelRequested: false,
+      terminal: false,
+      rawPathExposed: false,
+      keyMaterialExposedToRenderer: false,
+    };
+    for (const mutation of [
+      { type: "almost-a-job" },
+      { state: "almost-finished" },
+      { state: "completed", terminal: false },
+      { progress: { completed: 4, total: 3, unit: "stage" } },
+    ]) {
+      expect(() => parseCoreEventLine(JSON.stringify({
+        protocolVersion: CORE_PROTOCOL_VERSION,
+        event: "jobs.changed",
+        payload: { ...validPayload, ...mutation },
+      }))).toThrow("invalid job event payload");
+    }
   });
 
   it("keeps every preload core channel inside the named registry", () => {

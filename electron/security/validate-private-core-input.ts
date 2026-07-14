@@ -1,5 +1,6 @@
 import type { JsonValue } from "../core/json.js";
 import { INPUT_LIMITS, validModelId, validRecordingId } from "./input-limits.js";
+import { validateRendererCoreParams } from "./validate-core-input.js";
 
 const IMPORT_ID = /^[A-Za-z0-9_-]{1,96}$/;
 const JOB_ID = /^[a-f0-9]{32}$/;
@@ -70,6 +71,16 @@ function recordingOnly(method: string, value: unknown): JsonValue {
 }
 
 export function validatePrivateCoreParams(method: string, input: unknown): JsonValue {
+  if (
+    method === "ai.askHeuristic"
+    || method === "ai.recapHeuristic"
+    || method === "ai.askInstruct"
+    || method === "ai.recapInstruct"
+    || method === "transcription.runLocal"
+    || method === "export.create"
+  ) {
+    return validateRendererCoreParams(method, input);
+  }
   if (method === "core.shutdown" || method === "jobs.list" || method === "recording.durable.recover") {
     if (input !== null && input !== undefined) fail(method, "parameters are not accepted");
     return null;
@@ -80,8 +91,35 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
     if (typeof value.jobId !== "string" || !JOB_ID.test(value.jobId)) fail(method, "jobId is invalid");
     return { jobId: value.jobId };
   }
+  if (method === "transcription.quality.benchmark.start") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["tier"]);
+    if (value.tier !== "balanced" && value.tier !== "maximum") {
+      fail(method, "tier must be balanced or maximum");
+    }
+    return { tier: value.tier };
+  }
   if (method === "transcription.start") {
     return validateRendererCoreParamsAlias("transcription.runLocal", input);
+  }
+  if (method === "terminology.import") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["name", "format", "content"]);
+    const name = requiredString(
+      method,
+      value.name,
+      "name",
+      INPUT_LIMITS.terminologyDictionaryName,
+    ).trim();
+    if (!name) fail(method, "name must not be blank");
+    if (value.format !== "txt" && value.format !== "csv" && value.format !== "json") {
+      fail(method, "format must be txt, csv, or json");
+    }
+    const content = requiredString(method, value.content, "content", INPUT_LIMITS.terminologyFileBytes);
+    if (Buffer.byteLength(content, "utf8") > INPUT_LIMITS.terminologyFileBytes) {
+      fail(method, "content exceeds the local terminology file limit");
+    }
+    return { name, format: value.format, content };
   }
   if (method === "models.verify.start") {
     const value = objectInput(method, input);
@@ -198,20 +236,16 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
 function validateRendererCoreParamsAlias(method: string, input: unknown): JsonValue {
   if (method === "transcription.runLocal") {
     const value = objectInput(method, input);
-    exactFields(method, value, ["recordingId", "channel", "modelId", "language", "initialPrompt"]);
+    exactFields(method, value, ["recordingId", "channel", "modelId"]);
     const result: Record<string, JsonValue> = {
       recordingId: requiredRecordingId(method, value.recordingId),
     };
     const channel = optionalString(method, value.channel, "channel", INPUT_LIMITS.channel);
-    const language = optionalString(method, value.language, "language", INPUT_LIMITS.language);
-    const prompt = optionalString(method, value.initialPrompt, "initialPrompt", INPUT_LIMITS.initialPrompt);
     if (value.modelId !== undefined) {
       if (!validModelId(value.modelId)) fail(method, "modelId is invalid");
       result.modelId = value.modelId;
     }
     if (channel !== undefined) result.channel = channel;
-    if (language !== undefined) result.language = language;
-    if (prompt !== undefined) result.initialPrompt = prompt;
     return result;
   }
   const value = objectInput(method, input);

@@ -1,5 +1,7 @@
 import type { JsonValue } from "./json.js";
+import { CoreClientError } from "./core-errors.js";
 import {
+  createRuntimeSchema,
   jsonObjectResultSchema,
   jsonParamsSchema,
   type FieldRule,
@@ -30,6 +32,153 @@ interface OperationConfig {
   readonly timeoutMs?: number;
   readonly mode?: CoreOperationMode;
   readonly result: Readonly<Record<string, FieldRule>>;
+  readonly resultSchema?: JsonRuntimeSchema;
+}
+
+function invalidResult(method: string, field: string): never {
+  throw new CoreClientError(
+    "CORE_RESULT_SCHEMA_INVALID",
+    `candor-core returned an invalid ${field} field for ${method}`,
+    false,
+  );
+}
+
+function objectResult(value: JsonValue, method: string, field: string): Record<string, JsonValue> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return invalidResult(method, field);
+  }
+  return value;
+}
+
+function transcriptionQualityResultSchema(method: string): JsonRuntimeSchema {
+  const outer = jsonObjectResultSchema(method, {
+    implemented: "boolean",
+    state: "string",
+    tier: "string",
+    languagePreference: "string",
+    recommendedTier: "string",
+    benchmarkState: "string",
+    estimatedMinutesPerHour: "integer-or-null",
+    estimatedCompletionAvailable: "boolean",
+    hardware: "object",
+    tiers: "array",
+    localOnly: "boolean",
+    cloudAi: "boolean",
+    rawPathExposed: "boolean",
+  });
+  return createRuntimeSchema(`${method}.result`, (value) => {
+    const parsed = outer.parse(value);
+    const result = objectResult(parsed, method, "result");
+    const estimate = result.estimatedMinutesPerHour;
+    if (
+      result.localOnly !== true
+      || result.cloudAi !== false
+      || result.rawPathExposed !== false
+      || result.estimatedRealTimeFactor !== null
+      || (estimate !== null && (
+        typeof estimate !== "number"
+        || estimate < 1
+        || estimate > 60
+      ))
+      || result.estimatedCompletionAvailable !== (estimate !== null)
+    ) {
+      return invalidResult(method, "local completion estimate");
+    }
+    return parsed;
+  });
+}
+
+function strictLocalAiResultSchema(method: string, mode: "ask" | "recap"): JsonRuntimeSchema {
+  const outer = jsonObjectResultSchema(method, {
+    recordingId: "string",
+    engine: "string",
+    citations: "array",
+    localOnly: "boolean",
+    rawPathExposed: "boolean",
+  });
+  return createRuntimeSchema(`${method}.result`, (value) => {
+    const parsed = outer.parse(value);
+    const result = objectResult(parsed, method, "result");
+    if (result.localOnly !== true || result.rawPathExposed !== false) {
+      return invalidResult(method, "local custody");
+    }
+    if (result.engine !== "llama-cpp-local") return parsed;
+    if (
+      result.strictOutputValidated !== true
+      || result.outputSchemaVersion !== 1
+      || result.groundingMethod !== "strict-source-id-and-exact-critical-evidence-v1"
+      || result.modelOutputGrounded !== true
+      || result.citationsAddedByCore !== false
+      || result.unsupportedClaimsRemoved !== 0
+    ) {
+      return invalidResult(method, "strict grounding metadata");
+    }
+
+    const citations = result.citations as JsonValue[];
+    const citationIds = new Set<string>();
+    for (const [index, value] of citations.entries()) {
+      const citation = objectResult(value, method, `citations[${index}]`);
+      if (
+        typeof citation.citationId !== "string"
+        || !/^s\d+$/.test(citation.citationId)
+        || typeof citation.segmentIndex !== "number"
+        || !Number.isSafeInteger(citation.segmentIndex)
+        || typeof citation.startMs !== "number"
+        || !Number.isSafeInteger(citation.startMs)
+        || typeof citation.quote !== "string"
+        || citation.quote.length === 0
+        || citation.rawPathExposed !== false
+      ) {
+        return invalidResult(method, `citations[${index}]`);
+      }
+      if (citationIds.has(citation.citationId)) {
+        return invalidResult(method, `citations[${index}].citationId`);
+      }
+      citationIds.add(citation.citationId);
+    }
+
+    if (!Array.isArray(result.sourceIds) || result.sourceIds.some((sourceId) => (
+      typeof sourceId !== "string" || !citationIds.has(sourceId)
+    ))) {
+      return invalidResult(method, "sourceIds");
+    }
+
+    const sectionNames = ["decisions", "actions", "risks", "questions"] as const;
+    for (const sectionName of sectionNames) {
+      const section = result[sectionName];
+      if (!Array.isArray(section)) return invalidResult(method, sectionName);
+      for (const [index, value] of section.entries()) {
+        const claim = objectResult(value, method, `${sectionName}[${index}]`);
+        if (
+          typeof claim.text !== "string"
+          || claim.text.length === 0
+          || !Array.isArray(claim.sourceIds)
+          || claim.sourceIds.length === 0
+          || claim.sourceIds.some((sourceId) => typeof sourceId !== "string" || !citationIds.has(sourceId))
+        ) {
+          return invalidResult(method, `${sectionName}[${index}]`);
+        }
+        if (sectionName === "actions"
+            && claim.confidence !== "high"
+            && claim.confidence !== "medium"
+            && claim.confidence !== "low") {
+          return invalidResult(method, `${sectionName}[${index}].confidence`);
+        }
+      }
+    }
+
+    if (mode === "ask") {
+      if (typeof result.answer !== "string" || typeof result.answerFound !== "boolean") {
+        return invalidResult(method, "answer");
+      }
+      if (result.answerFound && (result.sourceIds as JsonValue[]).length === 0) {
+        return invalidResult(method, "answer sourceIds");
+      }
+    } else if (typeof result.summary !== "string" || typeof result.recapMarkdown !== "string") {
+      return invalidResult(method, "recap content");
+    }
+    return parsed;
+  });
 }
 
 const rendererConfigs: readonly OperationConfig[] = [
@@ -56,15 +205,17 @@ const rendererConfigs: readonly OperationConfig[] = [
   { method: "models.verifyLocal", channel: "candor-core:models-verify-local", timeoutMs: 120_000, result: { modelId: "string", installed: "boolean", verified: "boolean", rawPathExposed: "boolean" } },
   { method: "ai.status", channel: "candor-core:ai-status", result: { implemented: "boolean", localOnly: "boolean", engine: "string", rawPathExposed: "boolean" } },
   { method: "ai.bundledAssetsStatus", channel: "candor-core:ai-bundled-assets-status", result: { implemented: "boolean", localOnly: "boolean", cloudAi: "boolean", releaseReady: "boolean", fixture: "boolean", selectionStatus: "string", state: "string", ready: "boolean", repairRequired: "boolean", repairPolicy: "string", repairAction: "string", speech: "object", language: "object", requiredDownload: "boolean", backgroundDownloads: "boolean", runtimePathAcceptedFromRenderer: "boolean", rawPathExposed: "boolean", hashExposed: "boolean", keyMaterialExposedToRenderer: "boolean" } },
-  { method: "ai.askHeuristic", channel: "candor-core:ai-ask-heuristic", mode: "job", result: { recordingId: "string", question: "string", answer: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" } },
-  { method: "ai.recapHeuristic", channel: "candor-core:ai-recap-heuristic", mode: "job", result: { recordingId: "string", summary: "string", decisions: "array", actions: "array", recapMarkdown: "string", localOnly: "boolean", rawPathExposed: "boolean" } },
   { method: "ai.instructAssetsStatus", channel: "candor-core:ai-instruct-assets-status", result: { implemented: "boolean", localOnly: "boolean", rawPathExposed: "boolean" } },
   { method: "ai.instructStatus", channel: "candor-core:ai-instruct-status", result: { implemented: "boolean", localOnly: "boolean", rawPathExposed: "boolean" } },
-  { method: "ai.askInstruct", channel: "candor-core:ai-ask-instruct", timeoutMs: 10_000, mode: "job", result: { recordingId: "string", mode: "string", output: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" } },
-  { method: "ai.recapInstruct", channel: "candor-core:ai-recap-instruct", timeoutMs: 10_000, mode: "job", result: { recordingId: "string", mode: "string", output: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" } },
   { method: "ai.schedulerStatus", channel: "candor-core:ai-scheduler-status", result: { implemented: "boolean", active: "boolean", singleLocalModelJob: "boolean", rawPathExposed: "boolean" } },
   { method: "transcription.status", channel: "candor-core:transcription-status", result: { implemented: "boolean", active: "boolean", localOnly: "boolean", engine: "string", rawPathExposed: "boolean" } },
-  { method: "transcription.runLocal", channel: "candor-core:transcription-run-local", timeoutMs: 10_000, mode: "job", result: { recordingId: "string", engine: "string", segmentCount: "integer", rawPathExposed: "boolean" } },
+  { method: "transcription.quality.status", channel: "candor-core:transcription-quality-status", result: { implemented: "boolean", state: "string", tier: "string", languagePreference: "string", recommendedTier: "string", benchmarkState: "string", estimatedMinutesPerHour: "integer-or-null", estimatedCompletionAvailable: "boolean", hardware: "object", tiers: "array", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" }, resultSchema: transcriptionQualityResultSchema("transcription.quality.status") },
+  { method: "transcription.quality.update", channel: "candor-core:transcription-quality-update", result: { implemented: "boolean", state: "string", tier: "string", languagePreference: "string", recommendedTier: "string", benchmarkState: "string", estimatedMinutesPerHour: "integer-or-null", estimatedCompletionAvailable: "boolean", hardware: "object", tiers: "array", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" }, resultSchema: transcriptionQualityResultSchema("transcription.quality.update") },
+  { method: "terminology.status", channel: "candor-core:terminology-status", result: { implemented: "boolean", state: "string", dictionaryCount: "integer", entryCount: "integer", dictionaries: "array", encryptedAtRest: "boolean", promptWritingRequired: "boolean", automaticCorrection: "boolean", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" } },
+  { method: "terminology.setEnabled", channel: "candor-core:terminology-set-enabled", result: { dictionaryId: "string", enabled: "boolean", savedLocally: "boolean", rawPathExposed: "boolean" } },
+  { method: "terminology.assign", channel: "candor-core:terminology-assign", result: { recordingId: "string", dictionaryId: "string", assigned: "boolean", savedLocally: "boolean", rawPathExposed: "boolean" } },
+  { method: "terminology.proposals", channel: "candor-core:terminology-proposals", result: { recordingId: "string", proposalCount: "integer", proposals: "array", automaticCorrection: "boolean", approvalRequired: "boolean", rawPathExposed: "boolean" } },
+  { method: "terminology.decide", channel: "candor-core:terminology-decide", result: { recordingId: "string", proposalId: "string", decision: "string", savedLocally: "boolean", encryptedAtRest: "boolean", rawPathExposed: "boolean" } },
   { method: "recording.durable.status", channel: "candor-core:recording-durable-status", result: { rootKind: "string", recordingCount: "integer", storageHealth: "object", rawPathExposed: "boolean" } },
   { method: "recording.durable.listPage", channel: "candor-core:recording-durable-list-page", result: { offset: "integer", limit: "integer", totalCount: "integer", hasMore: "boolean", recordings: "array", rawPathExposed: "boolean" } },
   { method: "recording.durable.read", channel: "candor-core:recording-durable-read", result: { summary: "object", chunks: "array", chunkCount: "integer", rawPathExposed: "boolean" } },
@@ -76,16 +227,23 @@ const rendererConfigs: readonly OperationConfig[] = [
   { method: "recording.notes.read", channel: "candor-core:recording-notes-read", result: { recordingId: "string", markdown: "string", bytes: "integer", rawPathExposed: "boolean" } },
   { method: "recording.notes.save", channel: "candor-core:recording-notes-save", result: { recordingId: "string", markdown: "string", bytes: "integer", rawPathExposed: "boolean" } },
   { method: "retention.status", channel: "candor-core:retention-status", result: { policy: "string", automaticDeletion: "boolean", rawPathExposed: "boolean" } },
-  { method: "export.create", channel: "candor-core:export-create", timeoutMs: 10_000, mode: "job", result: { format: "string", fileName: "string", bytes: "integer", rawPathExposed: "boolean" } },
 ] as const;
 
 const privateConfigs: readonly OperationConfig[] = [
   { method: "core.shutdown", timeoutMs: 2_000, result: { shutdown: "boolean" } },
+  { method: "ai.askHeuristic", mode: "job", result: { recordingId: "string", question: "string", answer: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" } },
+  { method: "ai.recapHeuristic", mode: "job", result: { recordingId: "string", summary: "string", decisions: "array", actions: "array", recapMarkdown: "string", localOnly: "boolean", rawPathExposed: "boolean" } },
+  { method: "ai.askInstruct", timeoutMs: 10_000, mode: "job", result: { recordingId: "string", mode: "string", output: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" }, resultSchema: strictLocalAiResultSchema("ai.askInstruct", "ask") },
+  { method: "ai.recapInstruct", timeoutMs: 10_000, mode: "job", result: { recordingId: "string", mode: "string", output: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" }, resultSchema: strictLocalAiResultSchema("ai.recapInstruct", "recap") },
+  { method: "transcription.runLocal", timeoutMs: 10_000, mode: "job", result: { recordingId: "string", engine: "string", segmentCount: "integer", rawPathExposed: "boolean" } },
+  { method: "export.create", timeoutMs: 10_000, mode: "job", result: { format: "string", fileName: "string", bytes: "integer", rawPathExposed: "boolean" } },
+  { method: "terminology.import", timeoutMs: 15_000, result: { imported: "boolean", dictionaryId: "string", name: "string", entryCount: "integer", enabled: "boolean", encryptedAtRest: "boolean", rawPathExposed: "boolean" } },
   { method: "recording.durable.recover", timeoutMs: 30_000, result: { rootKind: "string", recoveredRecordings: "array", recoveredCount: "integer", quarantinedRecordings: "array", quarantinedCount: "integer", completedDeletionCount: "integer", pendingDeletionCount: "integer", vaultIndex: "object", rawPathExposed: "boolean" } },
   { method: "jobs.list", result: { jobs: "array", jobCount: "integer", rawPathExposed: "boolean" } },
   { method: "jobs.get", result: { jobId: "string", type: "string", state: "string", createdAt: "string", updatedAt: "string", terminal: "boolean", rawPathExposed: "boolean" } },
   { method: "jobs.cancel", result: { jobId: "string", state: "string", cancelRequested: "boolean", terminal: "boolean", rawPathExposed: "boolean" } },
   { method: "jobs.acknowledge", result: { jobId: "string", acknowledged: "boolean", rawPathExposed: "boolean" } },
+  { method: "transcription.quality.benchmark.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
   { method: "transcription.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
   { method: "ai.ask.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
   { method: "ai.recap.start", timeoutMs: 10_000, mode: "job", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
@@ -112,7 +270,7 @@ function defineOperation(config: OperationConfig, scope: CoreOperationScope): Co
   return Object.freeze({
     method: config.method,
     paramsSchema: jsonParamsSchema(config.method, (value) => paramsParser(config.method, value)),
-    resultSchema: jsonObjectResultSchema(config.method, config.result),
+    resultSchema: config.resultSchema ?? jsonObjectResultSchema(config.method, config.result),
     timeoutMs: config.timeoutMs ?? 5_000,
     requiresHandshake: config.method !== "core.version",
     mode: config.mode ?? "request",
@@ -156,13 +314,14 @@ export function getCoreOperation(method: string): CoreOperationDefinition {
 
 const completedJobResultSchemas: ReadonlyMap<string, JsonRuntimeSchema> = new Map([
   ["transcription", jsonObjectResultSchema("transcription job", { recordingId: "string", engine: "string", segmentCount: "integer", rawPathExposed: "boolean" })],
-  ["recap", jsonObjectResultSchema("recap job", { recordingId: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" })],
-  ["ask", jsonObjectResultSchema("ask job", { recordingId: "string", citations: "array", localOnly: "boolean", rawPathExposed: "boolean" })],
+  ["recap", strictLocalAiResultSchema("recap job", "recap")],
+  ["ask", strictLocalAiResultSchema("ask job", "ask")],
   ["export", jsonObjectResultSchema("export job", { format: "string", fileName: "string", bytes: "integer", rawPathExposed: "boolean" })],
   ["legacy-import", jsonObjectResultSchema("legacy import job", { importedCount: "integer", skippedCount: "integer", originalsUntouched: "boolean", rawPathExposed: "boolean" })],
   ["speech-model-verification", jsonObjectResultSchema("speech model verification job", { modelId: "string", installed: "boolean", verified: "boolean", rawPathExposed: "boolean" })],
   ["speech-model-import", jsonObjectResultSchema("speech model import job", { importId: "string", modelId: "string", imported: "boolean", rejected: "boolean", rawPathExposed: "boolean" })],
   ["local-ai-component-import", jsonObjectResultSchema("local AI component import job", { assetKind: "string", imported: "boolean", integrityVerified: "boolean", rawPathExposed: "boolean" })],
+  ["local-ai-benchmark", jsonObjectResultSchema("local AI benchmark job", { benchmarkState: "string", tier: "string", passed: "boolean", whisperMeasured: "boolean", localLlmMeasured: "boolean", localOnly: "boolean", cloudAi: "boolean", rawModelNamesExposed: "boolean", rawHashExposed: "boolean", rawMetricExposed: "boolean", rawPathExposed: "boolean" })],
 ]);
 
 export function validateCompletedJobResult(value: JsonValue): JsonValue {

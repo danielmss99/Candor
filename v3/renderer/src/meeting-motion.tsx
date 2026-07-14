@@ -189,7 +189,7 @@ export function EvidenceTimeline({
       <div className="evidence-controls">
         {audioUrl ? (
           <button type="button" onClick={() => void togglePlayback()}>{playing ? "Pause" : "Play"}</button>
-        ) : (
+        ) : active ? null : (
           <button type="button" onClick={onLoadAudio} disabled={!canMark}>Load audio</button>
         )}
         <SparkButton disabled={!canMark} onActivate={() => onMarkMoment(currentMs)} />

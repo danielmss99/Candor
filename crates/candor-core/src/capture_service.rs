@@ -173,6 +173,10 @@ impl CaptureSink {
 }
 
 impl CaptureManager {
+    pub fn is_active(&self) -> bool {
+        self.active.is_some()
+    }
+
     pub fn status(&mut self) -> Value {
         let active = self.active.as_ref().map(|session| {
             let runtimes = session_runtimes_json(&session.runtimes);

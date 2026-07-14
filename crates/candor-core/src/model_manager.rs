@@ -799,6 +799,13 @@ pub(crate) fn valid_model_ids() -> Vec<&'static str> {
     MODEL_SPECS.iter().map(|spec| spec.id).collect()
 }
 
+pub(crate) fn trusted_model_sha256(model_id: &str) -> Option<&'static str> {
+    MODEL_SPECS
+        .iter()
+        .find(|spec| spec.id == model_id)
+        .map(|spec| spec.expected_sha256)
+}
+
 pub(crate) fn normalize_model_id(value: Option<String>) -> Result<String, ModelManagerError> {
     let model_id = value.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string());
     let model_id = model_id.trim();

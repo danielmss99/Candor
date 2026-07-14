@@ -144,6 +144,10 @@ impl JobContext {
         self.cancellation.load(Ordering::SeqCst)
     }
 
+    pub fn cancellation_flag(&self) -> Arc<AtomicBool> {
+        self.cancellation.clone()
+    }
+
     pub fn progress(&self, stage: &str, completed: u64, total: Option<u64>, unit: Option<&str>) {
         self.manager.update_progress(
             &self.job_id,
@@ -291,6 +295,15 @@ impl JobManager {
         }))
     }
 
+    pub fn has_active_type(&self, job_type: &str) -> Result<bool, JobManagerError> {
+        let jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        Ok(jobs
+            .values()
+            .any(|entry| entry.job_type == job_type && !entry.state.terminal()))
+    }
+
     pub fn cancel(&self, job_id: &str) -> Result<Value, JobManagerError> {
         validate_job_id(job_id)?;
         let result = {
@@ -407,21 +420,26 @@ impl JobManager {
     }
 
     fn mutate(&self, job_id: &str, update: impl FnOnce(&mut JobEntry)) {
-        if let Ok(mut jobs) = self.inner.jobs.lock() {
-            if let Some(entry) = jobs.get_mut(job_id) {
-                update(entry);
-            }
+        let mut jobs = self
+            .inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(entry) = jobs.get_mut(job_id) {
+            update(entry);
         }
+        drop(jobs);
         self.emit(job_id);
     }
 
     fn emit(&self, job_id: &str) {
-        let payload = self
+        let jobs = self
             .inner
             .jobs
             .lock()
-            .ok()
-            .and_then(|jobs| jobs.get(job_id).map(|entry| entry.value(false)));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let payload = jobs.get(job_id).map(|entry| entry.value(false));
+        drop(jobs);
         if let Some(payload) = payload {
             crate::write_protocol_value(&CoreEvent {
                 protocol_version: self.inner.protocol_version,
@@ -469,6 +487,7 @@ fn safe_failure_message(job_type: &str, _message: &str) -> String {
         "speech-model-verification" | "speech-model-import" | "local-ai-component-import" => {
             "The local model could not be verified.".to_string()
         }
+        "local-ai-benchmark" => "The local performance check could not be completed.".to_string(),
         _ => "The local operation could not be completed.".to_string(),
     }
 }
@@ -525,5 +544,24 @@ mod tests {
         let cancelled = wait_for_terminal(&manager, job_id);
         assert_eq!(cancelled["state"], "cancelled");
         assert_eq!(cancelled["result"], Value::Null);
+    }
+
+    #[test]
+    fn active_type_detection_prevents_duplicate_background_work() {
+        let manager = JobManager::new("test-protocol");
+        let accepted = manager
+            .submit("local-ai-benchmark", true, |_context| {
+                thread::sleep(Duration::from_millis(20));
+                Ok(json!({ "measured": true }))
+            })
+            .expect("accepted benchmark");
+        assert!(manager
+            .has_active_type("local-ai-benchmark")
+            .expect("active query"));
+        let job_id = accepted["jobId"].as_str().expect("job id");
+        wait_for_terminal(&manager, job_id);
+        assert!(!manager
+            .has_active_type("local-ai-benchmark")
+            .expect("terminal query"));
     }
 }

@@ -5,7 +5,7 @@ import { PrivacyReceipt } from "./privacy/PrivacyReceipt";
 import { SettingsView } from "./settings/SettingsView";
 import { LiveMeetingView } from "./meeting/LiveMeetingView";
 import { MeetingDetailView } from "./detail/MeetingDetailView";
-import type { BundledAiStatus, MeetingPrivacyReceipt, NetworkCapabilities } from "../core/contracts";
+import type { BundledAiStatus, MeetingPrivacyReceipt, NetworkCapabilities, TerminologyStatus, TranscriptionQualityStatus } from "../core/contracts";
 
 const network: NetworkCapabilities = {
   policy: "disabled-by-default",
@@ -40,6 +40,39 @@ const bundledAiStatus: BundledAiStatus = {
   repairAction: "none",
   speech: { state: "no-default-selected", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: "BUNDLED_AI_NO_DEFAULT_SELECTED" },
   language: { state: "no-default-selected", ready: false, available: false, requiredAssets: 0, verifiedAssets: 0, modelId: null, failureCode: "BUNDLED_AI_NO_DEFAULT_SELECTED" },
+};
+
+const transcriptionQuality: TranscriptionQualityStatus = {
+  state: "ready",
+  tier: "balanced",
+  languagePreference: "english",
+  recommendedTier: "balanced",
+  benchmarkState: "measured",
+  benchmarkFailureTier: null,
+  estimatedRealTimeFactor: null,
+  estimatedMinutesPerHour: null,
+  estimatedCompletionAvailable: false,
+  fallbackApplied: false,
+  guardReason: null,
+  tiers: [
+    { id: "fast", label: "Fast", available: true, recommended: false, guardReason: null },
+    { id: "balanced", label: "Balanced", available: true, recommended: true, guardReason: null },
+    { id: "maximum", label: "Maximum accuracy", available: false, recommended: false, guardReason: "maximum-requires-passing-local-benchmark" },
+  ],
+};
+
+const terminologyStatus: TerminologyStatus = {
+  state: "ready",
+  dictionaryCount: 1,
+  entryCount: 1842,
+  encryptedAtRest: true,
+  dictionaries: [{
+    dictionaryId: "dict-pharma",
+    name: "Pharmaceutics",
+    enabled: true,
+    assignedToRecording: true,
+    entryCount: 1842,
+  }],
 };
 
 describe("simplified product surface", () => {
@@ -99,6 +132,23 @@ describe("simplified product surface", () => {
       combinedCaptureAvailable: false,
       statuses: { core: {}, consent: {}, capture: {}, vault: {}, updates: {}, retention: {}, transcription: {} },
       bundledAiStatus,
+      transcriptionQuality,
+      terminologyStatus,
+      terminologyProposals: [{
+        proposalId: "proposal-1",
+        dictionaryId: "dict-pharma",
+        original: "farmacokinetics",
+        proposed: "pharmacokinetics",
+        sourceSegmentId: "segment-1",
+        sourceSegmentIndex: 0,
+        startMs: 10,
+        confidence: "high" as const,
+        risk: "high" as const,
+        numericMutation: false,
+        requiresApproval: true as const,
+        autoApply: false as const,
+      }],
+      selectedRecordingId: "rec-1",
       models: [],
       selectedModel: "tiny.en",
       defaultModel: "tiny.en",
@@ -118,7 +168,9 @@ describe("simplified product surface", () => {
       networkCapabilities: network,
       custodyItems: [] as Array<[string, string]>,
       diagnosticPreview: null,
-      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
+      transcriptionBenchmarkActive: false,
+      transcriptionBenchmarkNeedsRetry: false,
+      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onTranscriptionQualityChange: vi.fn(), onRunTranscriptionBenchmark: vi.fn(), onImportDictionary: vi.fn(), onSetDictionaryEnabled: vi.fn(), onAssignDictionary: vi.fn(), onReviewTerminology: vi.fn(), onDecideTerminology: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);
@@ -126,7 +178,7 @@ describe("simplified product surface", () => {
     expect(basicMarkup).not.toContain("Diagnostics");
     expect(advancedMarkup).toContain("Privacy and network");
     expect(advancedMarkup).toContain("Diagnostics");
-    expect(advancedMarkup).toContain("Local AI");
+    expect(basicMarkup).toContain("AI &amp; Transcription");
     const repairMarkup = renderToStaticMarkup(
       <SettingsView
         {...baseProps}
@@ -178,6 +230,56 @@ describe("simplified product surface", () => {
     );
     expect(unavailableMarkup).toContain("Included AI status is unavailable");
     expect(unavailableMarkup).toContain("existing meetings remain available");
+    const qualityMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="models" advancedOpen={false} />);
+    expect(qualityMarkup).toContain("Transcription quality");
+    expect(qualityMarkup).toContain("Balanced · Recommended");
+    expect(qualityMarkup).toContain("Fast");
+    expect(qualityMarkup).toContain("Maximum accuracy");
+    expect(qualityMarkup).toContain("Available after a passing local performance check");
+    expect(qualityMarkup).toContain("Domain dictionaries");
+    expect(qualityMarkup).toContain("Pharmaceutics");
+    expect(qualityMarkup).toContain("High-risk term");
+    expect(qualityMarkup).toContain("Accept");
+    expect(qualityMarkup).not.toContain("tiny.en");
+    expect(qualityMarkup).not.toContain("GGUF");
+    expect(qualityMarkup).not.toContain("Integrity fingerprint");
+    const estimatedQualityMarkup = renderToStaticMarkup(
+      <SettingsView
+        {...baseProps}
+        section="models"
+        advancedOpen={false}
+        transcriptionQuality={{
+          ...transcriptionQuality,
+          estimatedMinutesPerHour: 15,
+          estimatedCompletionAvailable: true,
+        }}
+      />,
+    );
+    expect(estimatedQualityMarkup).toContain("About 15 minutes for a 1-hour meeting");
+    const readyBundledAi = {
+      ...bundledAiStatus,
+      releaseReady: true,
+      selectionStatus: "release-selected",
+      state: "ready" as const,
+      ready: true,
+      speech: { ...bundledAiStatus.speech, state: "ready" as const, ready: true, available: true },
+      language: { ...bundledAiStatus.language, state: "ready" as const, ready: true, available: true },
+    };
+    const maximumCheckMarkup = renderToStaticMarkup(
+      <SettingsView {...baseProps} section="models" advancedOpen={false} bundledAiStatus={readyBundledAi} />,
+    );
+    expect(maximumCheckMarkup).toContain("Check Maximum accuracy");
+    const retryMarkup = renderToStaticMarkup(
+      <SettingsView
+        {...baseProps}
+        section="models"
+        advancedOpen={false}
+        bundledAiStatus={readyBundledAi}
+        transcriptionBenchmarkNeedsRetry
+        transcriptionQuality={{ ...transcriptionQuality, benchmarkFailureTier: "maximum" }}
+      />,
+    );
+    expect(retryMarkup).toContain("Retry maximum accuracy check");
     const diagnosticsMarkup = renderToStaticMarkup(<SettingsView {...baseProps} section="diagnostics" advancedOpen diagnosticPreview={{ contentPolicy: "metadata-only-no-user-content" }} />);
     expect(diagnosticsMarkup).toContain("Safe diagnostic report");
     expect(diagnosticsMarkup).toContain("Inspect exact report");
@@ -185,13 +287,24 @@ describe("simplified product surface", () => {
 
   it("provides compact Transcript, Notes, and AI panes without splitting the meeting workflow", () => {
     const markup = renderToStaticMarkup(
-      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="" activeCapture={false} consentReady durationMs={0} audioUrl="" markers={[]} compactPane="notes" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="fast" aiModeStatus="Fast local" captureStatusLabel="Ready" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
+      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="" activeCapture={false} consentReady durationMs={0} audioUrl="" markers={[]} compactPane="notes" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="fast" aiModeStatus="Fast local" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Ready" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
     );
     expect(markup).toContain("Meeting workspace panes");
     expect(markup).toContain("Transcript");
     expect(markup).toContain("Notes");
     expect(markup).toContain(">AI<");
     expect(markup).toContain("Review meeting");
+    expect(markup).toContain("Speech recognition");
+    expect(markup).toContain("Balanced");
+    expect(markup).toContain("Local AI");
+
+    const activeMarkup = renderToStaticMarkup(
+      <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="rec-1" activeCapture consentReady durationMs={5_000} audioUrl="" markers={[]} compactPane="transcript" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="fast" aiModeStatus="Fast local" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Recording" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
+    );
+    expect(activeMarkup).not.toContain("Review meeting");
+    expect(activeMarkup).not.toContain("Load audio");
+    expect(activeMarkup).not.toContain("Transcribe locally");
+    expect(activeMarkup).toContain(">Stop<");
   });
 
   it("offers permanent deletion only for a finished local meeting", () => {

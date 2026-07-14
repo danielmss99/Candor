@@ -43,6 +43,7 @@ export const requiredSourcePaths = [
   "crates/candor-core/src/main.rs",
   "crates/candor-core/src/v2_importer.rs",
   "electron-builder.v3.yml",
+  "electron-builder.source-interface.yml",
   "package.json",
 ];
 
@@ -345,11 +346,37 @@ export function evaluateSourceSecurity(input) {
   includes("package:electron-dev", packageJson, '"dev": "node scripts/electron-dev.mjs --dev"', "root dev is Electron");
   includes("package:electron-build", packageJson, '"build": "npm run electron:v3:build"', "root build is Electron");
   includes("package:electron-dist", packageJson, '"dist": "npm run electron:v3:dist"', "root dist is Electron");
+  includes(
+    "package:source-interface-builder",
+    packageJson,
+    "electron-builder --config electron-builder.source-interface.yml",
+    "ordinary packaging uses the separately identified source-interface product",
+  );
+  includes(
+    "package:complete-release-gate",
+    packageJson,
+    "spec3-verify-ai-bundle.mjs --require-ready --profile complete",
+    "Complete packaging is gated by the exact ready manifest profile",
+  );
 
   const builder = "electron-builder.v3.yml";
   includes("builder:asar", builder, "asar: true", "application source is archived");
   includes("builder:publish-disabled", builder, "publish: null", "automatic publishing is disabled");
   includes("builder:core-resource", builder, "build/core-bin", "staged Rust core is packaged as a resource");
+
+  const sourceInterfaceBuilder = "electron-builder.source-interface.yml";
+  includes(
+    "builder:source-interface-name",
+    sourceInterfaceBuilder,
+    "productName: Candor Source Interface",
+    "developer and CI packages have a visibly different product name",
+  );
+  includes(
+    "builder:source-interface-id",
+    sourceInterfaceBuilder,
+    "appId: com.candor.v3.source-interface",
+    "developer and CI packages use a separate application identity",
+  );
 
   const coreMain = "crates/candor-core/src/main.rs";
   includes("core:bounded-rpc", coreMain, "MAX_RPC_LINE_BYTES", "Rust core bounds JSONL frames");

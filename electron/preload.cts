@@ -64,9 +64,30 @@ const api = Object.freeze({
   }),
   transcript: Object.freeze({
     getStatus: () => invoke("candor-core:transcription-status"),
-    start: (input: { recordingId: string; channel?: string; modelId?: string; language?: string; initialPrompt?: string }) =>
+    getQuality: () => invoke("candor-core:transcription-quality-status"),
+    setQuality: (input: { tier: "fast" | "balanced" | "maximum"; languagePreference?: "english" | "multilingual" }) =>
+      invoke("candor-core:transcription-quality-update", input),
+    startQualityBenchmark: (input: { tier: "balanced" | "maximum" }) =>
+      invoke("candor-transcript:startQualityBenchmark", input),
+    start: (input: { recordingId: string; channel?: string; modelId?: string }) =>
       invoke("candor-transcript:start", input),
     cancel: (jobId: string) => invoke("candor-jobs:cancel", { jobId }),
+  }),
+  terminology: Object.freeze({
+    getStatus: (recordingId?: string) =>
+      invoke("candor-core:terminology-status", recordingId ? { recordingId } : {}),
+    importDictionary: () => invoke("candor-terminology:importFromFile"),
+    setEnabled: (dictionaryId: string, enabled: boolean) =>
+      invoke("candor-core:terminology-set-enabled", { dictionaryId, enabled }),
+    assignToMeeting: (recordingId: string, dictionaryId: string, enabled: boolean) =>
+      invoke("candor-core:terminology-assign", { recordingId, dictionaryId, enabled }),
+    getCorrectionProposals: (recordingId: string) =>
+      invoke("candor-core:terminology-proposals", { recordingId }),
+    decideCorrection: (
+      recordingId: string,
+      proposalId: string,
+      decision: "accepted" | "rejected",
+    ) => invoke("candor-core:terminology-decide", { recordingId, proposalId, decision }),
   }),
   ai: Object.freeze({
     getStatus: () => invoke("candor-core:ai-status"),

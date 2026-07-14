@@ -20,7 +20,7 @@ export type ExportPaperSize = "letter" | "a4";
 export type CompactMeetingPane = "transcript" | "notes" | "ai";
 
 export const EXPECTED_PROTOCOL_VERSION = "m0-jsonrpc-stdio-1";
-export const DEFAULT_MODEL = "base.en";
+export const DEFAULT_MODEL = "small.en";
 export const LIBRARY_PAGE_SIZE = 50;
 export const TRANSCRIPT_PAGE_SIZE = 100;
 
@@ -94,6 +94,64 @@ export interface ModelRow {
   failureCode: string;
 }
 
+export type TranscriptionQualityTier = "fast" | "balanced" | "maximum";
+export type TranscriptionLanguagePreference = "english" | "multilingual";
+export type TranscriptionBenchmarkState = "checking" | "not-run" | "measured" | "failed" | "unavailable";
+
+export interface TranscriptionQualityOption {
+  id: TranscriptionQualityTier;
+  label: string;
+  available: boolean;
+  recommended: boolean;
+  guardReason: string | null;
+}
+
+export interface TranscriptionQualityStatus {
+  state: "checking" | "ready" | "corrupt";
+  tier: TranscriptionQualityTier;
+  languagePreference: TranscriptionLanguagePreference;
+  recommendedTier: TranscriptionQualityTier;
+  benchmarkState: TranscriptionBenchmarkState;
+  benchmarkFailureTier: "balanced" | "maximum" | null;
+  estimatedRealTimeFactor: number | null;
+  estimatedMinutesPerHour: number | null;
+  estimatedCompletionAvailable: boolean;
+  fallbackApplied: boolean;
+  guardReason: string | null;
+  tiers: TranscriptionQualityOption[];
+}
+
+export interface TerminologyDictionaryRow {
+  dictionaryId: string;
+  name: string;
+  enabled: boolean;
+  assignedToRecording: boolean;
+  entryCount: number;
+}
+
+export interface TerminologyStatus {
+  state: "ready" | "corrupt" | "unavailable";
+  dictionaryCount: number;
+  entryCount: number;
+  dictionaries: TerminologyDictionaryRow[];
+  encryptedAtRest: boolean;
+}
+
+export interface TerminologyCorrectionProposal {
+  proposalId: string;
+  dictionaryId: string;
+  original: string;
+  proposed: string;
+  sourceSegmentId: string;
+  sourceSegmentIndex: number;
+  startMs: number;
+  confidence: "high" | "medium";
+  risk: "high" | "standard";
+  numericMutation: boolean;
+  requiresApproval: true;
+  autoApply: false;
+}
+
 export type BundledAssetState =
   | "checking"
   | "ready"
@@ -136,6 +194,7 @@ export interface RecapItem {
   startMs: number;
   segmentIndex: number;
   quote: string;
+  confidence?: "high" | "medium" | "low";
 }
 
 export interface LocalAiRecap {
@@ -408,6 +467,235 @@ export function parseModels(value: unknown): ModelRow[] {
   });
 }
 
+const TRANSCRIPTION_QUALITY_TIERS = new Set<TranscriptionQualityTier>([
+  "fast",
+  "balanced",
+  "maximum",
+]);
+
+function transcriptionQualityTier(value: unknown, field: string): TranscriptionQualityTier {
+  const tier = stringField(value, field) as TranscriptionQualityTier;
+  if (!TRANSCRIPTION_QUALITY_TIERS.has(tier)) {
+    throw new ProtocolValidationError(field, "fast, balanced, or maximum");
+  }
+  return tier;
+}
+
+export function parseTranscriptionQualityStatus(value: unknown): TranscriptionQualityStatus {
+  const object = expectObject(value, "transcription.quality.status");
+  if (
+    object.implemented !== true
+    || object.localOnly !== true
+    || object.cloudAi !== false
+    || object.rawModelNamesExposed !== false
+    || object.rawPathExposed !== false
+    || object.keyMaterialExposedToRenderer !== false
+  ) {
+    throw new ProtocolValidationError(
+      "transcription.quality.status",
+      "a local-only pathless quality policy without raw model exposure",
+    );
+  }
+  expectObject(object.hardware, "transcription.quality.status.hardware");
+  const state = stringField(object.state, "transcription.quality.status.state");
+  if (state !== "ready" && state !== "corrupt") {
+    throw new ProtocolValidationError("transcription.quality.status.state", "ready or corrupt");
+  }
+  const languagePreference = stringField(
+    object.languagePreference,
+    "transcription.quality.status.languagePreference",
+  );
+  if (languagePreference !== "english" && languagePreference !== "multilingual") {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.languagePreference",
+      "english or multilingual",
+    );
+  }
+  const tiers = optionalArray(object.tiers, "transcription.quality.status.tiers")
+    .map((item, index): TranscriptionQualityOption => {
+      const option = expectObject(item, `transcription.quality.status.tiers[${index}]`);
+      return {
+        id: transcriptionQualityTier(option.id, `transcription.quality.status.tiers[${index}].id`),
+        label: stringField(option.label, `transcription.quality.status.tiers[${index}].label`),
+        available: booleanField(option.available, `transcription.quality.status.tiers[${index}].available`),
+        recommended: booleanField(option.recommended, `transcription.quality.status.tiers[${index}].recommended`),
+        guardReason: nullableStringField(option.guardReason, `transcription.quality.status.tiers[${index}].guardReason`),
+      };
+    });
+  if (tiers.length !== 3 || new Set(tiers.map((tier) => tier.id)).size !== 3) {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.tiers",
+      "one Fast, Balanced, and Maximum option",
+    );
+  }
+  const benchmarkState = stringField(
+    object.benchmarkState,
+    "transcription.quality.status.benchmarkState",
+  ) as TranscriptionBenchmarkState;
+  if (!new Set(["not-run", "measured", "failed", "unavailable"]).has(benchmarkState)) {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.benchmarkState",
+      "not-run, measured, failed, or unavailable",
+    );
+  }
+  const benchmarkFailureTier = nullableStringField(
+    object.benchmarkFailureTier,
+    "transcription.quality.status.benchmarkFailureTier",
+  );
+  if (benchmarkFailureTier !== null
+      && benchmarkFailureTier !== "balanced"
+      && benchmarkFailureTier !== "maximum") {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.benchmarkFailureTier",
+      "balanced, maximum, or null",
+    );
+  }
+  const estimatedMinutesPerHour = nullableNumberField(
+    object.estimatedMinutesPerHour,
+    "transcription.quality.status.estimatedMinutesPerHour",
+  );
+  if (estimatedMinutesPerHour !== null && (
+    !Number.isSafeInteger(estimatedMinutesPerHour)
+    || estimatedMinutesPerHour < 1
+    || estimatedMinutesPerHour > 60
+  )) {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.estimatedMinutesPerHour",
+      "an integer from 1 through 60, or null",
+    );
+  }
+  const estimatedRealTimeFactor = nullableNumberField(
+    object.estimatedRealTimeFactor,
+    "transcription.quality.status.estimatedRealTimeFactor",
+  );
+  if (estimatedRealTimeFactor !== null) {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.estimatedRealTimeFactor",
+      "null because raw benchmark measurements are diagnostics-only",
+    );
+  }
+  const estimatedCompletionAvailable = booleanField(
+    object.estimatedCompletionAvailable,
+    "transcription.quality.status.estimatedCompletionAvailable",
+  );
+  if (estimatedCompletionAvailable !== (estimatedMinutesPerHour !== null)) {
+    throw new ProtocolValidationError(
+      "transcription.quality.status.estimatedCompletionAvailable",
+      "a value consistent with the rounded completion estimate",
+    );
+  }
+  return {
+    state,
+    tier: transcriptionQualityTier(object.tier, "transcription.quality.status.tier"),
+    languagePreference,
+    recommendedTier: transcriptionQualityTier(
+      object.recommendedTier,
+      "transcription.quality.status.recommendedTier",
+    ),
+    benchmarkState,
+    benchmarkFailureTier,
+    estimatedRealTimeFactor,
+    estimatedMinutesPerHour,
+    estimatedCompletionAvailable,
+    fallbackApplied: booleanField(
+      object.fallbackApplied,
+      "transcription.quality.status.fallbackApplied",
+    ),
+    guardReason: nullableStringField(object.guardReason, "transcription.quality.status.guardReason"),
+    tiers,
+  };
+}
+
+export function parseTerminologyStatus(value: unknown): TerminologyStatus {
+  const object = expectObject(value, "terminology.status");
+  if (
+    object.implemented !== true
+    || object.localOnly !== true
+    || object.cloudAi !== false
+    || object.promptWritingRequired !== false
+    || object.automaticCorrection !== false
+    || object.rawPathExposed !== false
+    || object.keyMaterialExposedToRenderer !== false
+  ) {
+    throw new ProtocolValidationError(
+      "terminology.status",
+      "an automatic, local-only, pathless dictionary policy without automatic correction",
+    );
+  }
+  const state = stringField(object.state, "terminology.status.state");
+  if (state !== "ready" && state !== "corrupt" && state !== "unavailable") {
+    throw new ProtocolValidationError("terminology.status.state", "ready, corrupt, or unavailable");
+  }
+  const dictionaries = expectArray(object.dictionaries, "terminology.status.dictionaries")
+    .map((item, index): TerminologyDictionaryRow => {
+      const dictionary = expectObject(item, `terminology.status.dictionaries[${index}]`);
+      return {
+        dictionaryId: stringField(dictionary.dictionaryId, `terminology.status.dictionaries[${index}].dictionaryId`),
+        name: stringField(dictionary.name, `terminology.status.dictionaries[${index}].name`),
+        enabled: booleanField(dictionary.enabled, `terminology.status.dictionaries[${index}].enabled`),
+        assignedToRecording: booleanField(
+          dictionary.assignedToRecording,
+          `terminology.status.dictionaries[${index}].assignedToRecording`,
+        ),
+        entryCount: numberField(dictionary.entryCount, `terminology.status.dictionaries[${index}].entryCount`),
+      };
+    });
+  return {
+    state,
+    dictionaryCount: numberField(object.dictionaryCount, "terminology.status.dictionaryCount"),
+    entryCount: numberField(object.entryCount, "terminology.status.entryCount"),
+    dictionaries,
+    encryptedAtRest: booleanField(object.encryptedAtRest, "terminology.status.encryptedAtRest"),
+  };
+}
+
+export function parseTerminologyProposals(value: unknown): TerminologyCorrectionProposal[] {
+  const object = expectObject(value, "terminology.proposals");
+  if (
+    object.automaticCorrection !== false
+    || object.approvalRequired !== true
+    || object.rawPathExposed !== false
+    || object.keyMaterialExposedToRenderer !== false
+  ) {
+    throw new ProtocolValidationError(
+      "terminology.proposals",
+      "pathless correction proposals that always require approval",
+    );
+  }
+  return expectArray(object.proposals, "terminology.proposals.proposals")
+    .map((item, index): TerminologyCorrectionProposal => {
+      const proposal = expectObject(item, `terminology.proposals.proposals[${index}]`);
+      const confidence = stringField(proposal.confidence, `terminology.proposals.proposals[${index}].confidence`);
+      const risk = stringField(proposal.risk, `terminology.proposals.proposals[${index}].risk`);
+      if (confidence !== "high" && confidence !== "medium") {
+        throw new ProtocolValidationError(`terminology.proposals.proposals[${index}].confidence`, "high or medium");
+      }
+      if (risk !== "high" && risk !== "standard") {
+        throw new ProtocolValidationError(`terminology.proposals.proposals[${index}].risk`, "high or standard");
+      }
+      if (proposal.requiresApproval !== true || proposal.autoApply !== false) {
+        throw new ProtocolValidationError(
+          `terminology.proposals.proposals[${index}]`,
+          "a proposal requiring explicit approval",
+        );
+      }
+      return {
+        proposalId: stringField(proposal.proposalId, `terminology.proposals.proposals[${index}].proposalId`),
+        dictionaryId: stringField(proposal.dictionaryId, `terminology.proposals.proposals[${index}].dictionaryId`),
+        original: stringField(proposal.original, `terminology.proposals.proposals[${index}].original`),
+        proposed: stringField(proposal.proposed, `terminology.proposals.proposals[${index}].proposed`),
+        sourceSegmentId: stringField(proposal.sourceSegmentId, `terminology.proposals.proposals[${index}].sourceSegmentId`),
+        sourceSegmentIndex: numberField(proposal.sourceSegmentIndex, `terminology.proposals.proposals[${index}].sourceSegmentIndex`),
+        startMs: numberField(proposal.startMs, `terminology.proposals.proposals[${index}].startMs`),
+        confidence,
+        risk,
+        numericMutation: booleanField(proposal.numericMutation, `terminology.proposals.proposals[${index}].numericMutation`),
+        requiresApproval: true,
+        autoApply: false,
+      };
+    });
+}
+
 const BUNDLED_ASSET_STATES = new Set<BundledAssetState>([
   "checking",
   "ready",
@@ -513,6 +801,12 @@ export function parseBundledAiStatus(value: unknown): BundledAiStatus {
 
 function parseRecapItem(value: unknown, field: string): RecapItem {
   const object = expectObject(value, field);
+  const confidence = object.confidence === undefined || object.confidence === null
+    ? undefined
+    : stringField(object.confidence, `${field}.confidence`);
+  if (confidence !== undefined && confidence !== "high" && confidence !== "medium" && confidence !== "low") {
+    throw new ProtocolValidationError(`${field}.confidence`, "high, medium, or low");
+  }
   return {
     category: stringField(object.category, `${field}.category`, "evidence"),
     text: stringField(object.text, `${field}.text`),
@@ -521,6 +815,7 @@ function parseRecapItem(value: unknown, field: string): RecapItem {
     startMs: numberField(object.startMs, `${field}.startMs`, 0),
     segmentIndex: numberField(object.segmentIndex, `${field}.segmentIndex`, 0),
     quote: stringField(object.quote, `${field}.quote`, ""),
+    ...(confidence ? { confidence } : {}),
   };
 }
 
@@ -550,8 +845,18 @@ function recapItems(object: JsonObject, key: string): RecapItem[] {
 export function parseRecap(value: unknown): LocalAiRecap {
   const object = expectObject(value, "ai.recap");
   const markdown = stringField(object.recapMarkdown, "ai.recap.recapMarkdown", "");
+  const engine = stringField(object.engine, "ai.recap.engine");
+  if (engine === "llama-cpp-local"
+      && (object.strictOutputValidated !== true
+        || object.outputSchemaVersion !== 1
+        || object.groundingMethod !== "strict-source-id-and-exact-critical-evidence-v1")) {
+    throw new ProtocolValidationError(
+      "ai.recap",
+      "strict source-linked Local AI output using schema version 1",
+    );
+  }
   return {
-    engine: stringField(object.engine, "ai.recap.engine"),
+    engine,
     summary: stringField(object.summary, "ai.recap.summary", markdown ? "" : "No local recap yet."),
     markdown,
     decisions: recapItems(object, "decisions"),
@@ -567,6 +872,15 @@ export function parseAnswer(value: unknown): LocalAiAnswer {
   const object = expectObject(value, "ai.ask");
   const answer = stringField(object.answer, "ai.ask.answer");
   const engine = stringField(object.engine, "ai.ask.engine");
+  if (engine === "llama-cpp-local"
+      && (object.strictOutputValidated !== true
+        || object.outputSchemaVersion !== 1
+        || object.groundingMethod !== "strict-source-id-and-exact-critical-evidence-v1")) {
+    throw new ProtocolValidationError(
+      "ai.ask",
+      "strict source-linked Local AI output using schema version 1",
+    );
+  }
   return {
     engine,
     question: stringField(object.question, "ai.ask.question", ""),

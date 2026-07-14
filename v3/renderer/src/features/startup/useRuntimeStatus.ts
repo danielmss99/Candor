@@ -4,10 +4,12 @@ import {
   asArray,
   asObject,
   asString,
+  parseTranscriptionQualityStatus,
   type JsonObject,
   type LocalJsonValue,
   type BundledAiStatus,
   type NetworkCapabilities,
+  type TranscriptionQualityStatus,
 } from "../../core/contracts";
 
 type CoreApi = NonNullable<Window["candor"]>;
@@ -31,6 +33,25 @@ const UNAVAILABLE_BUNDLED_AI_STATUS: BundledAiStatus = {
   state: "unavailable",
   speech: { ...EMPTY_BUNDLED_AI_STATUS.speech, state: "unavailable", failureCode: "BUNDLED_AI_STATUS_UNAVAILABLE" },
   language: { ...EMPTY_BUNDLED_AI_STATUS.language, state: "unavailable", failureCode: "BUNDLED_AI_STATUS_UNAVAILABLE" },
+};
+
+const EMPTY_TRANSCRIPTION_QUALITY_STATUS: TranscriptionQualityStatus = {
+  state: "checking",
+  tier: "fast",
+  languagePreference: "english",
+  recommendedTier: "fast",
+  benchmarkState: "checking",
+  benchmarkFailureTier: null,
+  estimatedRealTimeFactor: null,
+  estimatedMinutesPerHour: null,
+  estimatedCompletionAvailable: false,
+  fallbackApplied: false,
+  guardReason: null,
+  tiers: [
+    { id: "fast", label: "Fast", available: true, recommended: false, guardReason: null },
+    { id: "balanced", label: "Balanced", available: false, recommended: false, guardReason: null },
+    { id: "maximum", label: "Maximum accuracy", available: false, recommended: false, guardReason: null },
+  ],
 };
 
 interface DiagnosticTask {
@@ -73,6 +94,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const [schedulerStatus, setSchedulerStatus] = useState<JsonObject>({});
   const [modelStatus, setModelStatus] = useState<JsonObject>({ models: [] });
   const [transcriptionStatus, setTranscriptionStatus] = useState<JsonObject>({});
+  const [transcriptionQualityStatus, setTranscriptionQualityStatus] = useState<TranscriptionQualityStatus>(EMPTY_TRANSCRIPTION_QUALITY_STATUS);
   const [retentionStatus, setRetentionStatus] = useState<JsonObject>({});
   const [recordingStatus, setRecordingStatus] = useState<JsonObject>({});
   const [diagnosticFailures, setDiagnosticFailures] = useState<string[]>([]);
@@ -160,6 +182,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
       { label: "model scheduler", run: async () => setSchedulerStatus(await client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus())) },
       { label: "speech models", run: async () => setModelStatus({ models: await client.models() as unknown as LocalJsonValue }) },
       { label: "transcription", run: async () => setTranscriptionStatus(await client.object("transcription.status", () => api.transcript.getStatus())) },
+      { label: "transcription quality", run: async () => setTranscriptionQualityStatus(parseTranscriptionQualityStatus(await api.transcript.getQuality())) },
       { label: "retention", run: async () => setRetentionStatus(await client.object("retention.status", () => api.settings.getRetentionStatus())) },
     ];
     const result = await runBackgroundDiagnostics(tasks);
@@ -225,7 +248,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
 
   const refreshModelsAndAi = useCallback(async () => {
     if (!api || !client) return;
-    const [nextModels, nextAi, nextBundledAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription] = await Promise.all([
+    const [nextModels, nextAi, nextBundledAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription, nextQuality] = await Promise.all([
       client.models(),
       client.object("ai.status", () => api.ai.getStatus()),
       client.bundledAiStatus().catch(() => UNAVAILABLE_BUNDLED_AI_STATUS),
@@ -233,6 +256,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
       client.object("ai.instructStatus", () => api.ai.getEnhancedStatus()),
       client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus()),
       client.object("transcription.status", () => api.transcript.getStatus()),
+      api.transcript.getQuality().then(parseTranscriptionQualityStatus),
     ]);
     setModelStatus({ models: nextModels as unknown as LocalJsonValue });
     setAiStatus(nextAi);
@@ -241,6 +265,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     setInstructStatus(nextInstruct);
     setSchedulerStatus(nextScheduler);
     setTranscriptionStatus(nextTranscription);
+    setTranscriptionQualityStatus(nextQuality);
   }, [api, client]);
 
   const refreshPrivacyFacts = useCallback(async () => {
@@ -283,6 +308,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     schedulerStatus,
     modelStatus,
     transcriptionStatus,
+    transcriptionQualityStatus,
     retentionStatus,
     recordingStatus,
     diagnosticFailures,

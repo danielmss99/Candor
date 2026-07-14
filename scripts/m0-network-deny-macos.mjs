@@ -44,6 +44,8 @@ function defaultExecutableCandidates() {
   return [
     join(repoRoot, "release-v3", "mac", "Candor.app", "Contents", "MacOS", "Candor"),
     join(repoRoot, "release-v3", "mac-arm64", "Candor.app", "Contents", "MacOS", "Candor"),
+    join(repoRoot, "release-v3", "mac", "Candor Source Interface.app", "Contents", "MacOS", "Candor"),
+    join(repoRoot, "release-v3", "mac-arm64", "Candor Source Interface.app", "Contents", "MacOS", "Candor"),
   ];
 }
 

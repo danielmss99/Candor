@@ -54,6 +54,17 @@ describe("renderer core input validation", () => {
     })).toThrow("format is not supported");
   });
 
+  it("keeps transcription prompting and language selection inside the trusted core", () => {
+    expect(() => validateRendererCoreParams("transcription.runLocal", {
+      recordingId: "recording_1",
+      language: "en",
+    })).toThrow("field language is not allowed");
+    expect(() => validateRendererCoreParams("transcription.runLocal", {
+      recordingId: "recording_1",
+      initialPrompt: "Use these terms",
+    })).toThrow("field initialPrompt is not allowed");
+  });
+
   it("requires parameterless operations to remain parameterless", () => {
     expect(validateRendererCoreParams("core.status", null)).toBeNull();
     expect(() => validateRendererCoreParams("core.status", { verbose: true }))
@@ -88,15 +99,17 @@ describe("renderer core input validation", () => {
       "models.verifyLocal": {},
       "ai.status": null,
       "ai.bundledAssetsStatus": null,
-      "ai.askHeuristic": { recordingId, question: "What changed?" },
-      "ai.recapHeuristic": { recordingId },
       "ai.instructAssetsStatus": null,
       "ai.instructStatus": null,
-      "ai.askInstruct": { recordingId, question: "What changed?" },
-      "ai.recapInstruct": { recordingId },
       "ai.schedulerStatus": null,
       "transcription.status": null,
-      "transcription.runLocal": { recordingId },
+      "transcription.quality.status": null,
+      "transcription.quality.update": { tier: "balanced", languagePreference: "english" },
+      "terminology.status": {},
+      "terminology.setEnabled": { dictionaryId: "dictionary_1", enabled: true },
+      "terminology.assign": { recordingId, dictionaryId: "dictionary_1", enabled: true },
+      "terminology.proposals": { recordingId },
+      "terminology.decide": { recordingId, proposalId: "proposal_1", decision: "accepted" },
       "recording.durable.status": null,
       "recording.durable.listPage": { offset: 0, limit: 50 },
       "recording.durable.read": { recordingId },
@@ -108,7 +121,6 @@ describe("renderer core input validation", () => {
       "recording.notes.read": { recordingId },
       "recording.notes.save": { recordingId, markdown: "notes" },
       "retention.status": null,
-      "export.create": { recordingId, format: "markdown" },
     };
     const rendererMethods = rendererCoreOperations.map(({ method }) => method).sort();
 

@@ -112,8 +112,18 @@ function validateBoundaryProof(payload, failures) {
     failures,
   );
   requireField(
-    payload?.statusSummary?.recordingInput === "recordingId+optionalChannel",
-    "statusSummary.recordingInput must be recordingId+optionalChannel",
+    payload?.statusSummary?.recordingInput === "recordingId+optionalChannel+advancedModelOverride",
+    "statusSummary.recordingInput must allow only a core-vetted advanced model override",
+    failures,
+  );
+  requireField(
+    payload?.statusSummary?.userPromptInputAccepted === false,
+    "statusSummary.userPromptInputAccepted must be false",
+    failures,
+  );
+  requireField(
+    payload?.statusSummary?.terminologyContext === "automatic-local-dictionary-selection",
+    "statusSummary.terminologyContext must be automatic and local",
     failures,
   );
   requireField(

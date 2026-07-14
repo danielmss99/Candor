@@ -84,6 +84,8 @@ function packagedFiles() {
     const appRoot = firstExisting([
       join(releaseDir, "mac", "Candor.app"),
       join(releaseDir, "mac-arm64", "Candor.app"),
+      join(releaseDir, "mac", "Candor Source Interface.app"),
+      join(releaseDir, "mac-arm64", "Candor Source Interface.app"),
     ]);
     return {
       appExecutable: join(appRoot, "Contents", "MacOS", "Candor"),
@@ -186,6 +188,7 @@ const sourceFiles = [
   "package.json",
   "package-lock.json",
   "electron-builder.v3.yml",
+  "electron-builder.source-interface.yml",
   "THIRD_PARTY_NOTICES.md",
   "vite.v3.config.ts",
   ".github/workflows/v3-m0.yml",

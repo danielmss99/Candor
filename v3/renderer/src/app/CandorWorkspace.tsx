@@ -16,6 +16,7 @@ import { useOnboardingSettings } from "../features/onboarding/useOnboardingSetti
 import { useDiagnosticExport } from "../features/privacy/useDiagnosticExport";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import { useWorkspaceStartup } from "../features/startup/useWorkspaceStartup";
+import { useTerminologyWorkspace } from "../features/terminology/useTerminologyWorkspace";
 import { AppRouteOutlet } from "./AppRouteOutlet";
 import { useAppNavigation } from "./navigation";
 
@@ -49,6 +50,9 @@ export function CandorWorkspace() {
     instructAssetsStatus: runtime.instructAssetsStatus,
     instructStatus: runtime.instructStatus,
     modelStatus: runtime.modelStatus,
+    transcriptionQualityStatus: runtime.transcriptionQualityStatus,
+    jobs: runtime.jobs,
+    activeCapture,
     run: operations.run,
     acquireOperation: operations.acquire,
     localJob: operations.job,
@@ -59,6 +63,13 @@ export function CandorWorkspace() {
     refreshLibrary: meeting.refreshLibrary,
     loadRecording: meeting.loadSelectedRecording,
     refreshPrivacyReceipt: meeting.refreshPrivacyReceipt,
+  });
+  const terminology = useTerminologyWorkspace({
+    api,
+    selectedRecordingId: meeting.selectedRecordingId,
+    run: operations.run,
+    setNotice: operations.setNotice,
+    setError: operations.setError,
   });
   const meetingActions = useMeetingActions({
     api,
@@ -178,6 +189,7 @@ export function CandorWorkspace() {
       operations={operations}
       license={license}
       localAi={localAi}
+      terminology={terminology}
       meetingActions={meetingActions}
       report={report}
       onboarding={onboarding}

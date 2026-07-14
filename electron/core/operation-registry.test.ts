@@ -42,6 +42,110 @@ describe("core operation registry", () => {
       state: "completed",
       result: { format: "pdf", fileName: "report.pdf", bytes: "ten", rawPathExposed: false },
     })).toThrow("bytes");
+    expect(validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "local-ai-benchmark",
+      state: "completed",
+      result: {
+        benchmarkState: "measured",
+        tier: "balanced",
+        passed: true,
+        whisperMeasured: true,
+        localLlmMeasured: true,
+        localOnly: true,
+        cloudAi: false,
+        rawModelNamesExposed: false,
+        rawHashExposed: false,
+        rawMetricExposed: false,
+        rawPathExposed: false,
+      },
+    })).toMatchObject({ result: { benchmarkState: "measured", passed: true } });
+  });
+
+  it("keeps benchmark inputs tier-only at the private boundary", () => {
+    const operation = CORE_OPERATIONS.get("transcription.quality.benchmark.start");
+    expect(operation?.paramsSchema.parse({ tier: "balanced" })).toEqual({ tier: "balanced" });
+    expect(() => operation?.paramsSchema.parse({ tier: "fast" })).toThrow("Invalid parameters");
+    expect(() => operation?.paramsSchema.parse({
+      tier: "balanced",
+      prompt: "user supplied",
+    })).toThrow("Invalid parameters");
+  });
+
+  it("validates rounded transcription estimates without exposing raw measurements", () => {
+    const operation = CORE_OPERATIONS.get("transcription.quality.status");
+    const result = {
+      implemented: true,
+      state: "ready",
+      tier: "balanced",
+      languagePreference: "english",
+      recommendedTier: "balanced",
+      benchmarkState: "measured",
+      estimatedRealTimeFactor: null,
+      estimatedMinutesPerHour: 15,
+      estimatedCompletionAvailable: true,
+      hardware: {},
+      tiers: [],
+      localOnly: true,
+      cloudAi: false,
+      rawPathExposed: false,
+    };
+    expect(operation?.resultSchema.parse(result)).toMatchObject({ estimatedMinutesPerHour: 15 });
+    expect(() => operation?.resultSchema.parse({
+      ...result,
+      estimatedRealTimeFactor: 0.25,
+    })).toThrow("local completion estimate");
+    expect(() => operation?.resultSchema.parse({
+      ...result,
+      estimatedMinutesPerHour: null,
+    })).toThrow("local completion estimate");
+  });
+
+  it("rejects ungrounded llama.cpp job results at the Electron boundary", () => {
+    const grounded = {
+      recordingId: "recording_1",
+      engine: "llama-cpp-local",
+      summary: "Adalimumab remains at 40 mg.",
+      recapMarkdown: "Adalimumab remains at 40 mg. [s0]",
+      decisions: [{ text: "Adalimumab remains at 40 mg.", sourceIds: ["s0"] }],
+      actions: [{ text: "Priya reviews the evidence.", confidence: "high", sourceIds: ["s0"] }],
+      risks: [],
+      questions: [],
+      citations: [{
+        citationId: "s0",
+        segmentIndex: 0,
+        startMs: 10,
+        quote: "Adalimumab remains at 40 mg.",
+        rawPathExposed: false,
+      }],
+      sourceIds: ["s0"],
+      localOnly: true,
+      rawPathExposed: false,
+      outputSchemaVersion: 1,
+      strictOutputValidated: true,
+      groundingMethod: "strict-source-id-and-exact-critical-evidence-v1",
+      modelOutputGrounded: true,
+      citationsAddedByCore: false,
+      unsupportedClaimsRemoved: 0,
+    };
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "recap",
+      state: "completed",
+      result: grounded,
+    })).not.toThrow();
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "recap",
+      state: "completed",
+      result: { ...grounded, sourceIds: ["s999"] },
+    })).toThrow("sourceIds");
+    expect(() => validateCompletedJobResult({
+      jobId: "a".repeat(32),
+      type: "recap",
+      state: "completed",
+      result: { ...grounded, strictOutputValidated: false },
+    })).toThrow("strict grounding metadata");
   });
 
   it("is the complete source for renderer and private allowlists", () => {
@@ -53,6 +157,22 @@ describe("core operation registry", () => {
       expect(operation.resultSchema.name).toBe(`${operation.method}.result`);
       expect(operation.timeoutMs).toBeGreaterThan(0);
       expect(operation.requiresHandshake).toBe(operation.method !== "core.version");
+    }
+  });
+
+  it("keeps superseded direct job operations private", () => {
+    const deprecatedDirectJobs = [
+      "ai.askHeuristic",
+      "ai.recapHeuristic",
+      "ai.askInstruct",
+      "ai.recapInstruct",
+      "transcription.runLocal",
+      "export.create",
+    ];
+    for (const method of deprecatedDirectJobs) {
+      expect(rendererCoreMethods.has(method), method).toBe(false);
+      expect(privateCoreMethods.has(method), method).toBe(true);
+      expect(CORE_OPERATIONS.get(method)?.channel, method).toBeUndefined();
     }
   });
 

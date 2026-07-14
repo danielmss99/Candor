@@ -8,6 +8,7 @@ import {
   parseAnswer,
   parseModels,
   parseRecap,
+  parseTranscriptionQualityStatus,
   type AiMode,
   type BundledAiStatus,
   type InstructAssetKind,
@@ -15,6 +16,9 @@ import {
   type LocalAiAnswer,
   type LocalAiRecap,
   type RecordingSummary,
+  type TranscriptionLanguagePreference,
+  type TranscriptionQualityStatus,
+  type TranscriptionQualityTier,
 } from "../../core/contracts";
 import type { useLocalJob } from "../ai/useLocalJob";
 import type { RunOperation } from "../jobs/useOperationRunner";
@@ -32,6 +36,9 @@ interface UseLocalAiWorkspaceOptions {
   instructAssetsStatus: JsonObject;
   instructStatus: JsonObject;
   modelStatus: JsonObject;
+  transcriptionQualityStatus: TranscriptionQualityStatus;
+  jobs: JsonObject[];
+  activeCapture: boolean;
   run: RunOperation;
   acquireOperation: (scope: string) => (() => void) | null;
   localJob: LocalJob;
@@ -54,7 +61,40 @@ export function speechModelForBundledDefault(
   }
   return bundledAiStatus.speech.ready
     ? bundledAiStatus.speech.modelId ?? DEFAULT_MODEL
-    : DEFAULT_MODEL;
+    : currentModel;
+}
+
+interface AutomaticBenchmarkState {
+  bundledReady: boolean;
+  benchmarkState: TranscriptionQualityStatus["benchmarkState"];
+  activeCapture: boolean;
+  benchmarkJobActive: boolean;
+  benchmarkNeedsRetry: boolean;
+  completedJobAwaitingRefresh: boolean;
+  balancedNeedsFreshBenchmark: boolean;
+}
+
+export function shouldStartAutomaticBenchmark(state: AutomaticBenchmarkState): boolean {
+  const benchmarkNeeded = state.benchmarkState === "not-run"
+    || state.balancedNeedsFreshBenchmark;
+  return state.bundledReady
+    && benchmarkNeeded
+    && !state.activeCapture
+    && !state.benchmarkJobActive
+    && !state.benchmarkNeedsRetry
+    && !state.completedJobAwaitingRefresh;
+}
+
+export function benchmarkRetryRequired(
+  status: TranscriptionQualityStatus,
+  benchmarkJob: JsonObject | undefined,
+): boolean {
+  return status.benchmarkFailureTier !== null
+    || status.benchmarkState === "failed"
+    || (status.benchmarkState === "not-run"
+      && Boolean(benchmarkJob)
+      && asBool(benchmarkJob?.terminal)
+      && asString(benchmarkJob?.state) !== "completed");
 }
 
 export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
@@ -67,6 +107,9 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     instructAssetsStatus,
     instructStatus,
     modelStatus,
+    transcriptionQualityStatus,
+    jobs,
+    activeCapture,
     run,
     acquireOperation,
     localJob,
@@ -80,6 +123,7 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   } = options;
   const priorRecordingId = useRef(selectedRecordingId);
   const explicitModelSelection = useRef(false);
+  const automaticBenchmarkAttempt = useRef("");
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [askQuestion, setAskQuestion] = useState("What are the action items?");
   const [askAnswer, setAskAnswer] = useState<LocalAiAnswer | null>(null);
@@ -100,6 +144,20 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     : instructReady
       ? "Best local model"
       : "Fast local fallback";
+  const benchmarkJob = useMemo(
+    () => jobs.find((job) => asString(job.type) === "local-ai-benchmark"),
+    [jobs],
+  );
+  const benchmarkActive = Boolean(benchmarkJob) && !asBool(benchmarkJob?.terminal);
+  const benchmarkNeedsRetry = benchmarkRetryRequired(transcriptionQualityStatus, benchmarkJob);
+  const balancedNeedsFreshBenchmark = transcriptionQualityStatus.tiers.some(
+    (tier) => tier.id === "balanced"
+      && tier.guardReason === "balanced-requires-fresh-local-benchmark-for-current-model",
+  );
+  const completedBenchmarkAwaitingRefresh = Boolean(benchmarkJob)
+    && asBool(benchmarkJob?.terminal)
+    && asString(benchmarkJob?.state) === "completed"
+    && transcriptionQualityStatus.benchmarkState === "not-run";
 
   const resetMeetingAi = useCallback(() => {
     setRecap(null);
@@ -119,6 +177,61 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       explicitModelSelection.current,
     ));
   }, [bundledAiStatus]);
+
+  const startBenchmarkJob = useCallback(async (tier: "balanced" | "maximum") => {
+    if (!api) return;
+    const accepted = await api.transcript.startQualityBenchmark({ tier });
+    try {
+      await waitForJob(api, accepted);
+    } catch (error) {
+      const terminalJob: JsonObject = await api.app.getJob(accepted.jobId)
+        .then(asObject)
+        .catch((): JsonObject => ({}));
+      if (asBool(terminalJob.terminal)) {
+        await api.app.acknowledgeJob(accepted.jobId).catch(() => undefined);
+      }
+      throw error;
+    } finally {
+      await refreshModelsAndAi();
+    }
+  }, [api, refreshModelsAndAi]);
+
+  useEffect(() => {
+    if (!benchmarkJob || !asBool(benchmarkJob.terminal)) return;
+    if (transcriptionQualityStatus.benchmarkState !== "not-run") return;
+    void refreshModelsAndAi();
+  }, [benchmarkJob, refreshModelsAndAi, transcriptionQualityStatus.benchmarkState]);
+
+  useEffect(() => {
+    if (!api || !shouldStartAutomaticBenchmark({
+      bundledReady: bundledAiStatus.ready,
+      benchmarkState: transcriptionQualityStatus.benchmarkState,
+      activeCapture,
+      benchmarkJobActive: benchmarkActive,
+      benchmarkNeedsRetry,
+      completedJobAwaitingRefresh: completedBenchmarkAwaitingRefresh,
+      balancedNeedsFreshBenchmark,
+    })) return;
+    const attemptKey = `${bundledAiStatus.selectionStatus}:balanced`;
+    if (automaticBenchmarkAttempt.current === attemptKey) return;
+    automaticBenchmarkAttempt.current = attemptKey;
+    void startBenchmarkJob("balanced").catch(() => {
+      void refreshModelsAndAi();
+    });
+  }, [
+    activeCapture,
+    api,
+    balancedNeedsFreshBenchmark,
+    benchmarkActive,
+    benchmarkJob,
+    benchmarkNeedsRetry,
+    bundledAiStatus.ready,
+    bundledAiStatus.selectionStatus,
+    completedBenchmarkAwaitingRefresh,
+    refreshModelsAndAi,
+    startBenchmarkJob,
+    transcriptionQualityStatus.benchmarkState,
+  ]);
 
   const selectModel = useCallback((modelId: string) => {
     explicitModelSelection.current = true;
@@ -203,7 +316,6 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
         recordingId: selectedRecordingId,
         channel: selectedTrack || undefined,
         modelId: explicitModelSelection.current ? selectedModel : undefined,
-        language: "en",
       });
       await waitForJob(api, accepted);
       setNotice("Transcription updated");
@@ -214,6 +326,33 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       ]);
     }, "local-model", "transcription");
   }, [api, loadRecording, refreshLibrary, refreshModelsAndAi, run, selectedModel, selectedRecordingId, selectedTrack, setNotice]);
+
+  const updateTranscriptionQuality = useCallback(async (
+    tier: TranscriptionQualityTier,
+    languagePreference?: TranscriptionLanguagePreference,
+  ) => {
+    if (!api) return;
+    await run("transcription quality", async () => {
+      const result = parseTranscriptionQualityStatus(await api.transcript.setQuality({
+        tier,
+        ...(languagePreference ? { languagePreference } : {}),
+      }));
+      if (result.fallbackApplied && result.guardReason) {
+        setNotice(`${result.tiers.find((item) => item.id === tier)?.label ?? "That quality"} is unavailable. ${result.tiers.find((item) => item.id === result.tier)?.label ?? "A safer quality"} was selected.`);
+      } else {
+        setNotice(`${result.tiers.find((item) => item.id === result.tier)?.label ?? "Transcription quality"} saved`);
+      }
+      await refreshModelsAndAi();
+    }, "local-model");
+  }, [api, refreshModelsAndAi, run, setNotice]);
+
+  const runTranscriptionBenchmark = useCallback(async (tier: "balanced" | "maximum" = "balanced") => {
+    if (!api || benchmarkActive || activeCapture) return;
+    await run("performance check", async () => {
+      await startBenchmarkJob(tier);
+      setNotice("Local performance check completed");
+    }, "local-model", "local-ai-benchmark");
+  }, [activeCapture, api, benchmarkActive, run, setNotice, startBenchmarkJob]);
 
   const generateRecap = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
@@ -258,6 +397,9 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     instructRunnerAsset,
     instructModelAsset,
     models,
+    transcriptionQualityStatus,
+    benchmarkActive,
+    benchmarkNeedsRetry,
     aiModeStatus,
     setSelectedModel: selectModel,
     setAskQuestion,
@@ -270,6 +412,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     importModel,
     importInstructAsset,
     verifyModel,
+    updateTranscriptionQuality,
+    runTranscriptionBenchmark,
     transcribe,
     generateRecap,
     ask,

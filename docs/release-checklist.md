@@ -19,7 +19,11 @@ The provisional Windows scope and evidence policy are in
 
 ## Package
 
-- [ ] `npm run electron:v3:dist:ai-release` creates the current-OS Complete artifacts.
+- [ ] CI and developer artifacts identify as `Candor Source Interface` with the
+  separate `com.candor.v3.source-interface` application ID and are never
+  promoted as release candidates.
+- [ ] `npm run release:complete` creates only a manifest-matched Complete artifact.
+- [ ] `npm run release:complete-max` creates only a manifest-matched Complete Max artifact.
 - [ ] `npm run v3:release-artifact-smoke:strict` passes.
 - [ ] `npm run m0:packaged-smoke` passes.
 - [ ] `npm run spec3:packaged-ai-smoke` reports release-ready speech and language tools outside ASAR.

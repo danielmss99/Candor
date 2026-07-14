@@ -13,6 +13,10 @@ const proofAudit = readFileSync(resolve(repoRoot, "scripts", "m0-proof-audit.mjs
 const artifactManifest = readFileSync(resolve(repoRoot, "scripts", "m0-artifact-manifest.mjs"), "utf8");
 const coreBuildScript = readFileSync(resolve(repoRoot, "crates", "candor-core", "build.rs"), "utf8");
 const electronBuilder = readFileSync(resolve(repoRoot, "electron-builder.v3.yml"), "utf8");
+const sourceInterfaceBuilder = readFileSync(
+  resolve(repoRoot, "electron-builder.source-interface.yml"),
+  "utf8",
+);
 const v3Verify = readFileSync(resolve(repoRoot, "scripts", "v3-verify.mjs"), "utf8");
 const releaseReadinessAudit = readFileSync(resolve(repoRoot, "scripts", "v3-release-readiness-audit.mjs"), "utf8");
 const releaseSigningProof = readFileSync(resolve(repoRoot, "scripts", "v3-release-signing-proof.mjs"), "utf8");
@@ -70,6 +74,12 @@ if (packageJson.includes("@tauri-apps/") || packageJson.includes('"tauri')) {
 }
 if (!v2Importer.includes('"originalsUntouched": true') || !v2Importer.includes("fs::canonicalize")) {
   throw new Error("The path-contained, originals-untouched v2 importer must remain active.");
+}
+if (
+  !sourceInterfaceBuilder.includes("productName: Candor Source Interface") ||
+  !sourceInterfaceBuilder.includes("appId: com.candor.v3.source-interface")
+) {
+  throw new Error("Source-interface packages must retain their separate product name and application ID.");
 }
 
 function requireIncludes(pattern, label) {
@@ -135,7 +145,7 @@ const requiredPatterns = [
   ["npm run v3:verify", "staged local verifier"],
   ["npm run v3:verify-main-architecture && npm run v3:identity:verify", "remote-main architecture and product identity gate"],
   ["npm run v3:verify-main-architecture -- --release-commit \"${GITHUB_SHA}\"", "main release commit reachability gate"],
-  ["npm run electron:v3:dist", "release artifact build"],
+  ["npm run package:source-interface", "source-interface artifact build"],
   ["Configure Linux Chromium sandbox for runtime proof", "Linux sandbox preparation"],
   ["sudo chown root:root release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox root ownership"],
   ["sudo chmod 4755 release-v3/linux-unpacked/chrome-sandbox", "Linux sandbox setuid mode"],
@@ -407,11 +417,11 @@ requireOrder(
 );
 requireOrder(
   "run: npm run v3:verify\n",
-  "npm run electron:v3:dist",
+  "npm run package:source-interface",
   "verify before packaging",
 );
 requireOrder(
-  "npm run electron:v3:dist",
+  "npm run package:source-interface",
   "npm run v3:release-artifact-smoke",
   "package before release artifact smoke",
 );

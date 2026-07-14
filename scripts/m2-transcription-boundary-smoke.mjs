@@ -386,7 +386,9 @@ try {
     status?.localOnly !== true ||
     status?.cloudAi !== false ||
     status?.modelPathAcceptedFromRenderer !== false ||
-    status?.recordingInput !== "recordingId+optionalChannel" ||
+    status?.recordingInput !== "recordingId+optionalChannel+advancedModelOverride" ||
+    status?.userPromptInputAccepted !== false ||
+    status?.terminologyContext !== "automatic-local-dictionary-selection" ||
     status?.scheduler?.whisperLlmConcurrent !== false
   ) {
     throw new Error("transcription status did not report the local-only contract");
@@ -399,6 +401,8 @@ try {
     modelIds: Array.isArray(status?.modelIds) ? status.modelIds : [],
     modelPathAcceptedFromRenderer: status?.modelPathAcceptedFromRenderer === true,
     recordingInput: status?.recordingInput ?? null,
+    userPromptInputAccepted: status?.userPromptInputAccepted === true,
+    terminologyContext: status?.terminologyContext ?? null,
     schedulerWhisperLlmConcurrent: status?.scheduler?.whisperLlmConcurrent === true,
   };
 
@@ -506,7 +510,6 @@ try {
     recordingId: appendRecordingId,
     channel: "mic",
     modelId: "base.en",
-    language: "en",
   };
 
   if (realLocalRequested) {
@@ -535,12 +538,16 @@ try {
     }
     await call("recording.durable.finish", { recordingId: realRecordingId });
 
+    await call("transcription.quality.update", {
+      tier: "fast",
+      languagePreference: /^(en|eng|english)$/i.test(realLanguage) ? "english" : "multilingual",
+    });
+
     proofReceipt.realLocalWhisper.attempted = true;
     const localResult = await call("transcription.runLocal", {
       recordingId: realRecordingId,
       channel: "mic",
       modelId: realModelId,
-      language: realLanguage,
     });
     assertCustody(localResult, "real local transcription");
     if (
