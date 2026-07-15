@@ -8,6 +8,13 @@ interface JobAccepted {
   rawPathExposed: false;
 }
 
+interface CancelAllJobsResult {
+  cancelRequestedCount: number;
+  requestedCount: number;
+  skippedCount: number;
+  rawPathExposed: false;
+}
+
 type BackgroundTaskKind =
   | "transcription"
   | "recap"
@@ -24,10 +31,14 @@ type BackgroundTaskState = "queued" | "running" | "paused" | "cancelling" | "com
 type BackgroundProgressUnit = "percent" | "seconds" | "chunks" | "bytes";
 type AiExecutionMode = "local-llm" | "heuristic-fallback";
 type AiFallbackPolicy = "allow-disclosed" | "require-local-llm";
+type AiFallbackPreference = "ask-first" | "automatic" | "never";
+type AiJobIntent = "default" | "strict-retry" | "explicit-heuristic";
 
 interface AiProvenance {
   engine: "local-llm" | "heuristic";
-  modelId?: string | null;
+  modelId: string | null;
+  modelSha256: string | null;
+  runtimeSha256: string | null;
   fallbackUsed: boolean;
   fallbackReason?: "llm-unavailable" | "runtime-failed" | "model-corrupt" | "resource-policy" | "user-requested" | null;
   promptVersion: string;
@@ -91,7 +102,7 @@ interface CandorApiV3 {
     getActiveJobs(): Promise<BackgroundTaskList>;
     getJob(jobId: string): Promise<BackgroundTask>;
     cancelJob(jobId: string): Promise<JsonValue>;
-    cancelAllJobs(): Promise<JsonValue>;
+    cancelAllJobs(): Promise<CancelAllJobsResult>;
     retryJob(jobId: string): Promise<JobAccepted>;
     acknowledgeJob(jobId: string): Promise<JsonValue>;
     prepareDiagnostics(): Promise<JsonValue>;
@@ -153,13 +164,15 @@ interface CandorApiV3 {
     getBundledAssetsStatus(): Promise<JsonValue>;
     getEnhancedAssetsStatus(): Promise<JsonValue>;
     getEnhancedStatus(): Promise<JsonValue>;
+    getFallbackPreference(): Promise<JsonValue>;
+    setFallbackPreference(preference: AiFallbackPreference): Promise<JsonValue>;
     getWorkloadStatus(): Promise<JsonValue>;
     listSpeechModels(): Promise<JsonValue>;
     verifySpeechModel(modelId?: string): Promise<JobAccepted>;
     chooseSpeechModel(modelId: string): Promise<JobAccepted | JsonValue>;
     chooseEnhancedComponent(input: { component: "engine" | "model"; expectedSha256: string }): Promise<JobAccepted | JsonValue>;
-    generateRecap(input: { recordingId: string; mode: AiExecutionMode; fallbackPolicy: AiFallbackPolicy }): Promise<JobAccepted>;
-    ask(input: { recordingId: string; question: string; mode: AiExecutionMode; fallbackPolicy: AiFallbackPolicy }): Promise<JobAccepted>;
+    generateRecap(input: { recordingId: string; intent?: AiJobIntent }): Promise<JobAccepted>;
+    ask(input: { recordingId: string; question: string; intent?: AiJobIntent }): Promise<JobAccepted>;
     cancel(jobId: string): Promise<JsonValue>;
   };
   exports: {

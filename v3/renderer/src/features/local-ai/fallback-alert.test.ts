@@ -14,6 +14,8 @@ const fallbackRecap: LocalAiRecap = {
   provenance: {
     engine: "heuristic",
     modelId: null,
+    modelSha256: null,
+    runtimeSha256: null,
     fallbackUsed: true,
     fallbackReason: "llm-unavailable",
     promptVersion: "recap-v3",

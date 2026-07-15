@@ -1,6 +1,11 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
-import { BackgroundActivity, terminalTaskAnnouncement } from "./BackgroundActivity";
+import {
+  BackgroundActivity,
+  CANCELLABLE_TASK_STATES,
+  terminalTaskAnnouncement,
+  terminalTasksAnnouncement,
+} from "./BackgroundActivity";
 
 describe("BackgroundActivity", () => {
   it("shows pathless progress, an estimate, and meeting controls for active work", () => {
@@ -130,7 +135,8 @@ describe("BackgroundActivity", () => {
     );
 
     expect(markup).toContain("Background tasks");
-    expect(markup).toContain("1 running / 1 queued / 1 paused / 1 cancelling");
+    expect(markup).toContain("1 task needs attention / 1 running / 1 queued / 1 paused / 1 cancelling");
+    expect(markup.indexOf("Needs attention")).toBeLessThan(markup.indexOf("In progress"));
     expect(markup).toContain("Waiting to start");
     expect(markup).toContain("2 of 4 chunks");
     expect(markup).toContain("Paused");
@@ -160,5 +166,30 @@ describe("BackgroundActivity", () => {
 
     expect(terminalTaskAnnouncement(cancelled)).toBe("Creating recap cancelled.");
     expect(terminalTaskAnnouncement(cancelled)).not.toContain("needs attention");
+  });
+
+  it("aggregates simultaneous terminal announcements without user content", () => {
+    const base = {
+      createdAt: "2026-07-14T05:00:00Z",
+      updatedAt: "2026-07-14T05:00:01Z",
+      terminal: true,
+      retryable: false,
+      cancelRequested: false,
+      retryCount: 0,
+      sourceDataPreserved: true as const,
+      rawPathExposed: false as const,
+      keyMaterialExposedToRenderer: false as const,
+    };
+    const jobs: BackgroundTask[] = [
+      { ...base, jobId: "d".repeat(32), type: "recap", state: "completed" },
+      { ...base, jobId: "e".repeat(32), type: "ask", state: "completed" },
+      { ...base, jobId: "f".repeat(32), type: "export", state: "cancelled", cancelRequested: true },
+    ];
+    expect(terminalTasksAnnouncement(jobs))
+      .toBe("2 background tasks completed. 1 background task was cancelled.");
+  });
+
+  it("aligns bulk cancellation with queued, running, and paused states", () => {
+    expect([...CANCELLABLE_TASK_STATES]).toEqual(["queued", "running", "paused"]);
   });
 });

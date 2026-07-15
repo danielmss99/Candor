@@ -1,6 +1,43 @@
 {
   "schemaVersion": 1,
   "updatedOn": "2026-07-13",
+  "notices": [
+    {
+      "id": "whisper-runtime-license",
+      "filename": "whisper.cpp-LICENSE.txt",
+      "bytes": 1078,
+      "sha256": "e562a2ddfaf8280537795ac5ecd34e3012b6582a147ef69ba6a6a5c08c84757d",
+      "sourceUrl": "https://raw.githubusercontent.com/ggml-org/whisper.cpp/2eeeba56e9edd762b4b38467bab96c2517163158/LICENSE"
+    },
+    {
+      "id": "whisper-model-card",
+      "filename": "whisper.cpp-model-card.md",
+      "bytes": 3196,
+      "sha256": "21fd967098804f33fc84e803fb0e5ab7666d71801f4027cf28a65e7af09c1758",
+      "sourceUrl": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/README.md"
+    },
+    {
+      "id": "llama-runtime-license",
+      "filename": "llama.cpp-LICENSE.txt",
+      "bytes": 1078,
+      "sha256": "94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d",
+      "sourceUrl": "https://raw.githubusercontent.com/ggml-org/llama.cpp/aedb2a5e9ca3d4064148bbb919e0ddc0c1b70ab3/LICENSE"
+    },
+    {
+      "id": "qwen-model-license",
+      "filename": "qwen3-LICENSE.txt",
+      "bytes": 11544,
+      "sha256": "5de36594c10839788a8c589443a8ef9d8b8d17c65a1b5807206ae037fc36c6bd",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/LICENSE"
+    },
+    {
+      "id": "qwen-model-card",
+      "filename": "qwen3-model-card.md",
+      "bytes": 7576,
+      "sha256": "f7b7cbdbeab2a25b55e92cf160c035287374253b13af7ea2d5178847f6f8537e",
+      "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/bc640142c66e1fdd12af0bd68f40445458f3869b/README.md"
+    }
+  ],
   "runtimes": [
     {
       "id": "speech-runtime",
@@ -35,11 +72,22 @@
       "id": "language-runtime",
       "engine": "llama.cpp",
       "integration": "fixed-path-child-process",
+      "frontend": "llama-completion",
       "selectionStatus": "candidate-not-packaged",
       "compatibilityStatus": "pending",
       "redistributionReview": "pending",
       "tag": "b9637",
       "commit": "aedb2a5e9ca3d4064148bbb919e0ddc0c1b70ab3",
+      "artifacts": [
+        {
+          "platform": "win32",
+          "arch": "x64",
+          "filename": "llama-b9637-bin-win-cpu-x64.zip",
+          "bytes": 16906751,
+          "sha256": "f7783c2b8c007f95e710ac40f26a24861a80b603b0b739fc54d7c926a4716c1e",
+          "sourceUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9637/llama-b9637-bin-win-cpu-x64.zip"
+        }
+      ],
       "licenseExpression": "MIT",
       "source": "https://github.com/ggml-org/llama.cpp"
     }

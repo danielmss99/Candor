@@ -98,6 +98,10 @@ impl JobState {
     fn terminal(self) -> bool {
         matches!(self, Self::Completed | Self::Failed | Self::Cancelled)
     }
+
+    fn cancellable(self) -> bool {
+        matches!(self, Self::Queued | Self::Running | Self::Paused)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -118,8 +122,8 @@ pub enum AiExecutionMode {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum AiFallbackPolicy {
-    #[default]
     AllowDisclosed,
+    #[default]
     RequireLocalLlm,
 }
 
@@ -930,8 +934,12 @@ impl JobManager {
             let mut jobs = self.inner.jobs.lock().map_err(|_| {
                 JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
             })?;
+            let skipped_count = jobs
+                .values()
+                .filter(|entry| entry.state == JobState::Cancelling)
+                .count();
             let mut ids = Vec::new();
-            for entry in jobs.values_mut().filter(|entry| !entry.state.terminal()) {
+            for entry in jobs.values_mut().filter(|entry| entry.state.cancellable()) {
                 entry.cancel_requested = true;
                 entry.preempt_requested = false;
                 entry.shutdown_pause_requested = false;
@@ -947,16 +955,18 @@ impl JobManager {
                 entry.updated_at_ms = now_ms();
                 ids.push(entry.job_id.clone());
             }
-            ids
+            (ids, skipped_count)
         };
         drop(active_workers);
         self.persist()?;
         self.inner.priority_changed.notify_all();
-        for job_id in &ids {
+        for job_id in &ids.0 {
             self.emit(job_id);
         }
         Ok(json!({
-            "cancelRequestedCount": ids.len(),
+            "cancelRequestedCount": ids.0.len(),
+            "requestedCount": ids.0.len(),
+            "skippedCount": ids.1,
             "rawPathExposed": false
         }))
     }
@@ -2640,6 +2650,28 @@ mod tests {
         assert_eq!(restored["state"], "cancelled");
         assert_eq!(restored["cancelRequested"], true);
         assert_eq!(restored["terminal"], true);
+    }
+
+    #[test]
+    fn persisted_ai_descriptors_without_a_policy_default_to_ask_first() {
+        let mut serialized = serde_json::to_value(JobDescriptor::Recap {
+            recording_id: "recording-migrated".to_string(),
+            mode: AiExecutionMode::LocalLlm,
+            fallback_policy: AiFallbackPolicy::RequireLocalLlm,
+            legacy_quality: None,
+        })
+        .expect("serialize descriptor");
+        let object = serialized.as_object_mut().expect("descriptor object");
+        assert!(object.remove("fallback_policy").is_some());
+
+        let restored = serde_json::from_value::<JobDescriptor>(serialized)
+            .expect("deserialize descriptor without policy");
+        match restored {
+            JobDescriptor::Recap {
+                fallback_policy, ..
+            } => assert_eq!(fallback_policy, AiFallbackPolicy::RequireLocalLlm),
+            _ => panic!("expected recap descriptor"),
+        }
     }
 
     #[test]

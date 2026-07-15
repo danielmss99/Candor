@@ -31,7 +31,7 @@ impl BundledAssetError {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedBundledAsset {
     pub path: PathBuf,
     pub sha256: String,
@@ -40,10 +40,17 @@ pub struct VerifiedBundledAsset {
     pub context_tokens: Option<u32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BundledLanguageConfig {
     pub runtime: VerifiedBundledAsset,
     pub model: VerifiedBundledAsset,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedLanguageIdentity {
+    pub model_id: String,
+    pub model_sha256: String,
+    pub runtime_sha256: String,
 }
 
 #[derive(Clone, Debug)]
@@ -273,6 +280,32 @@ impl BundledAiAssets {
         }
     }
 
+    pub fn required_language_identity(
+        &self,
+    ) -> Result<VerifiedLanguageIdentity, BundledAssetError> {
+        let config = self.language_config()?.ok_or_else(|| {
+            BundledAssetError::new(
+                "BUNDLED_AI_LANGUAGE_IDENTITY_MISSING",
+                "the packaged language model identity is unavailable; reinstall Candor to restore local summaries",
+            )
+        })?;
+        let model_id = config
+            .model
+            .model_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                BundledAssetError::new(
+                    "BUNDLED_AI_MODEL_ID_MISSING",
+                    "the packaged language model has no verified identifier; reinstall Candor to restore local summaries",
+                )
+            })?;
+        Ok(VerifiedLanguageIdentity {
+            model_id,
+            model_sha256: config.model.sha256,
+            runtime_sha256: config.runtime.sha256,
+        })
+    }
+
     pub fn general_dictionary(&self) -> Result<Option<VerifiedBundledAsset>, BundledAssetError> {
         self.verified_asset("terminology", "data", None)
     }
@@ -388,6 +421,8 @@ impl BundledAiAssets {
                     record.kind,
                     record.model_id.as_deref().unwrap_or_default()
                 )
+            } else if record.kind == "library" {
+                format!("{}:{}:{}", record.capability, record.kind, record.id)
             } else {
                 format!("{}:{}", record.capability, record.kind)
             };
@@ -701,7 +736,9 @@ fn sha256_file(path: &Path) -> Result<String, BundledAssetError> {
         )
     })?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Keep the verification buffer off the Windows main-thread stack. The
+    // default executable stack can be smaller than this buffer.
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer).map_err(|_| {
             BundledAssetError::new(
@@ -852,6 +889,48 @@ mod tests {
             .expect("speech result")
             .is_some());
         assert!(bundle.language_config().expect("language result").is_some());
+        let identity = bundle
+            .required_language_identity()
+            .expect("verified language identity");
+        assert_eq!(identity.model_id, "fixture-llm");
+        assert_eq!(identity.model_sha256.len(), 64);
+        assert_eq!(identity.runtime_sha256.len(), 64);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn verified_bundle_accepts_multiple_pinned_runtime_libraries() {
+        let root = temp_root("runtime-libraries");
+        let assets = vec![
+            asset(&root, "speech-model", "speech", "model", Some("base.en")),
+            asset(&root, "language-runtime", "language", "runtime", None),
+            asset(&root, "language-library-core", "language", "library", None),
+            asset(&root, "language-library-cpu", "language", "library", None),
+            asset(
+                &root,
+                "language-model",
+                "language",
+                "model",
+                Some("fixture-llm"),
+            ),
+        ];
+        write_manifest(
+            &root,
+            json!({
+                "manifestVersion": 1,
+                "bundleVersion": "runtime-libraries-1",
+                "releaseReady": false,
+                "fixture": true,
+                "selectionStatus": "fixture-selected",
+                "repairPolicy": "signed-installer-only",
+                "assets": assets
+            }),
+        );
+
+        let status = BundledAiAssets::with_root(root.clone()).status();
+        assert_eq!(status["state"], "ready");
+        assert_eq!(status["language"]["ready"], true);
+        assert_eq!(status["language"]["verifiedAssets"], 4);
         let _ = fs::remove_dir_all(root);
     }
 

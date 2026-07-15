@@ -1,4 +1,5 @@
 import { _electron as electron, type ElectronApplication, type Page } from "@playwright/test";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -52,6 +53,21 @@ function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+async function waitForChildExit(child: ReturnType<ElectronApplication["process"]>, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  let exited = false;
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      child.once("exit", () => {
+        exited = true;
+        resolve();
+      });
+    }),
+    delay(timeoutMs),
+  ]);
+  return exited || child.exitCode !== null || child.signalCode !== null;
+}
+
 async function closeElectronApplication(app: ElectronApplication): Promise<void> {
   const child = app.process();
   if (process.platform === "darwin") {
@@ -66,7 +82,14 @@ async function closeElectronApplication(app: ElectronApplication): Promise<void>
     .then(() => { closed = true; });
   await Promise.race([closeAttempt, delay(5_000)]);
   if (!closed && child.exitCode === null) child.kill();
-  await Promise.race([closeAttempt, delay(2_000)]);
+  if (!(await waitForChildExit(child, 5_000)) && child.exitCode === null) {
+    if (process.platform === "win32" && child.pid) {
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      child.kill("SIGKILL");
+    }
+    await waitForChildExit(child, 2_000);
+  }
 }
 
 async function seedLocalMeeting(dataDir: string): Promise<string> {
@@ -146,7 +169,7 @@ export async function launchCandor(options: LaunchCandorOptions = {}): Promise<C
     recordingId,
     async close() {
       await closeElectronApplication(app);
-      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(dataDir, { recursive: true, force: true, maxRetries: 12, retryDelay: 250 });
     },
   };
 }

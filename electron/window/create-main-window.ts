@@ -51,13 +51,13 @@ export function createMainWindow(options: CreateMainWindowOptions): BrowserWindo
     }
   });
 
-  if (options.navigation.useDevRenderer) {
-    void window.loadURL(options.navigation.rendererDevUrl);
-  } else {
-    void window.loadFile(options.navigation.rendererFilePath);
-  }
-  window.once("ready-to-show", () => {
-    if (!options.smoke) window.show();
-  });
+  const reveal = () => {
+    if (!options.smoke && !window.isDestroyed()) window.show();
+  };
+  window.once("ready-to-show", reveal);
+  const load = options.navigation.useDevRenderer
+    ? window.loadURL(options.navigation.rendererDevUrl)
+    : window.loadFile(options.navigation.rendererFilePath);
+  void load.then(reveal);
   return window;
 }

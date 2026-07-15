@@ -165,7 +165,12 @@ function validateBoundaryProof(payload, failures) {
     "modelCustody.modelPathAcceptedFromRenderer must be false",
     failures,
   );
-  requireField(payload?.modelCustody?.manualInstallOnly === true, "modelCustody.manualInstallOnly must be true", failures);
+  const bundledSpeechReady = payload?.modelCustody?.bundledSpeechReady === true;
+  requireField(
+    payload?.modelCustody?.manualInstallOnly === !bundledSpeechReady,
+    "modelCustody.manualInstallOnly must match bundled speech readiness",
+    failures,
+  );
   requireField(
     payload?.modelCustody?.backgroundDownloads === false,
     "modelCustody.backgroundDownloads must be false",

@@ -1,5 +1,5 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
 import {
@@ -118,8 +118,8 @@ function verifyRendererSurface() {
   requireSource(rendererSource, 'aria-pressed={aiMode === "heuristic-fallback"}', "renderer explicit fallback mode");
   rendererSurface.qualityModeImplemented = true;
 
-  requireSource(rendererSource, "Local AI with disclosed fallback", "renderer fallback status");
-  requireSource(rendererSource, 'fallbackPolicy: "require-local-llm"', "renderer strict retry policy");
+  requireSource(rendererSource, "Local AI, asks before fallback", "renderer fallback status");
+  requireSource(rendererSource, 'intent: "strict-retry"', "renderer strict retry intent");
   requireSource(rendererSource, "Retry with Local AI", "renderer fallback retry action");
   rendererSurface.fallbackImplemented = true;
 
@@ -133,41 +133,94 @@ function writeFixture() {
   fixtureModel = path.join(fixtureDir, "fixture.gguf");
   writeFileSync(fixtureModel, modelBytes);
 
-  if (process.platform === "win32") {
-    fixtureBinary = path.join(fixtureDir, "fake-llama.cmd");
-    writeFileSync(
-      fixtureBinary,
-      [
-        "@echo off",
-        "findstr /C:\"Question:\" \"%4\" >nul",
-        "if %errorlevel%==0 (",
-        "echo {\"schemaVersion\":1,\"summary\":[],\"decisions\":[],\"actions\":[],\"risks\":[],\"questions\":[],\"answer\":{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"sourceIds\":[\"s1\"]}}",
-        ") else (",
-        "echo {\"schemaVersion\":1,\"summary\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"decisions\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"actions\":[{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"owner\":\"Priya\",\"dueDate\":null,\"confidence\":\"high\",\"sourceIds\":[\"s1\"]}],\"risks\":[],\"questions\":[],\"answer\":null}",
-        ")",
-      ].join("\r\n"),
-      "utf8",
-    );
-  } else {
-    fixtureBinary = path.join(fixtureDir, "fake-llama.sh");
-    writeFileSync(
-      fixtureBinary,
-      [
-        "#!/usr/bin/env sh",
-        "if grep -q 'Question:' \"$4\"; then",
-        "  printf '%s\\n' '{\"schemaVersion\":1,\"summary\":[],\"decisions\":[],\"actions\":[],\"risks\":[],\"questions\":[],\"answer\":{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"sourceIds\":[\"s1\"]}}'",
-        "else",
-        "  printf '%s\\n' '{\"schemaVersion\":1,\"summary\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"decisions\":[{\"text\":\"Candor keeps all AI processing on the local machine.\",\"sourceIds\":[\"s0\"]}],\"actions\":[{\"text\":\"Priya validates the cited Ask output before the release gate.\",\"owner\":\"Priya\",\"dueDate\":null,\"confidence\":\"high\",\"sourceIds\":[\"s1\"]}],\"risks\":[],\"questions\":[],\"answer\":null}'",
-        "fi",
-      ].join("\n"),
-      "utf8",
-    );
-    chmodSync(fixtureBinary, 0o755);
+  const fixtureSource = path.join(fixtureDir, "llama-completion-fixture.rs");
+  fixtureBinary = path.join(
+    fixtureDir,
+    process.platform === "win32" ? "llama-completion.exe" : "llama-completion",
+  );
+  writeFileSync(
+    fixtureSource,
+    String.raw`use std::{env, fs};
+
+fn main() {
+    let args = env::args().collect::<Vec<_>>();
+    let prompt_path = args.windows(2).find(|pair| pair[0] == "-f").map(|pair| pair[1].clone()).unwrap_or_default();
+    let prompt = fs::read_to_string(prompt_path).unwrap_or_default();
+    if prompt.contains("Question:") {
+        println!("{}", r#"{"schemaVersion":1,"summary":[],"decisions":[],"actions":[],"risks":[],"questions":[],"answer":{"text":"Priya validates the cited Ask output before the release gate.","sourceIds":["s1"]}}"#);
+    } else {
+        println!("{}", r#"{"schemaVersion":1,"summary":[{"text":"Candor keeps all AI processing on the local machine.","sourceIds":["s0"]}],"decisions":[{"text":"Candor keeps all AI processing on the local machine.","sourceIds":["s0"]}],"actions":[{"text":"Priya validates the cited Ask output before the release gate.","owner":"Priya","dueDate":null,"confidence":"high","sourceIds":["s1"]}],"risks":[],"questions":[],"answer":null}"#);
+    }
+}
+`,
+    "utf8",
+  );
+  const compiled = spawnSync("rustc", [fixtureSource, "--edition", "2021", "-C", "opt-level=0", "-o", fixtureBinary], {
+    cwd: fixtureDir,
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (compiled.status !== 0) {
+    throw new Error(`could not compile the local inference fixture: ${compiled.stderr || compiled.stdout}`);
   }
+  if (process.platform !== "win32") chmodSync(fixtureBinary, 0o755);
+
+  const licenseRelative = "notices/fixture-LICENSE.txt";
+  const modelCardRelative = "notices/fixture-model-card.md";
+  mkdirSync(path.join(fixtureDir, "notices"), { recursive: true });
+  writeFileSync(path.join(fixtureDir, licenseRelative), "Fixture only. Not for distribution.\n", "utf8");
+  writeFileSync(path.join(fixtureDir, modelCardRelative), "# Candor local inference fixture\n", "utf8");
+
+  const binaryBytes = readFileSync(fixtureBinary);
+  const manifest = {
+    manifestVersion: 1,
+    bundleVersion: "m4-fixture-v1",
+    releaseReady: false,
+    fixture: true,
+    selectionStatus: "fixture-selected",
+    packageProfile: "test-fixture",
+    repairPolicy: "signed-installer-only",
+    assets: [
+      {
+        id: "language-runtime-llama-completion-fixture",
+        capability: "language",
+        kind: "runtime",
+        engine: "llama.cpp",
+        relativePath: path.basename(fixtureBinary),
+        sha256: sha256(binaryBytes),
+        bytes: binaryBytes.byteLength,
+        licenseFile: licenseRelative,
+        licenseExpression: "LicenseRef-Candor-Test-Fixture",
+        sourceUrl: "https://example.invalid/candor/llama-completion-fixture",
+        revision: "m4-fixture-v1",
+        redistributionApproved: true,
+        required: true,
+      },
+      {
+        id: "language-model-qwen-fixture",
+        capability: "language",
+        kind: "model",
+        engine: "llama.cpp",
+        relativePath: path.basename(fixtureModel),
+        sha256: sha256(modelBytes),
+        bytes: modelBytes.byteLength,
+        licenseFile: licenseRelative,
+        licenseExpression: "LicenseRef-Candor-Test-Fixture",
+        sourceUrl: "https://example.invalid/candor/qwen-fixture",
+        revision: "m4-fixture-v1",
+        redistributionApproved: true,
+        required: true,
+        modelId: "qwen-fixture",
+        modelCard: modelCardRelative,
+        contextTokens: 2048,
+      },
+    ],
+  };
+  writeFileSync(path.join(fixtureDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
 
   return {
     binary: fixtureBinary,
-    binarySha256: sha256(readFileSync(fixtureBinary)),
+    binarySha256: sha256(binaryBytes),
     model: fixtureModel,
     modelSha256: sha256(modelBytes),
   };
@@ -367,11 +420,12 @@ try {
   observations.push("typed renderer bridge and quality fallback surface are implemented");
   const fixture = writeFixture();
   const core = spawnCore({
-    CANDOR_LOCAL_LLM_BINARY: fixture.binary,
-    CANDOR_LOCAL_LLM_BINARY_SHA256: fixture.binarySha256,
-    CANDOR_LOCAL_LLM_MODEL: fixture.model,
-    CANDOR_LOCAL_LLM_MODEL_SHA256: fixture.modelSha256,
-    CANDOR_LOCAL_LLM_CONTEXT_TOKENS: "2048",
+    CANDOR_AI_BUNDLE_ROOT: fixtureDir,
+    CANDOR_LOCAL_LLM_BINARY: "",
+    CANDOR_LOCAL_LLM_BINARY_SHA256: "",
+    CANDOR_LOCAL_LLM_MODEL: "",
+    CANDOR_LOCAL_LLM_MODEL_SHA256: "",
+    CANDOR_LOCAL_LLM_CONTEXT_TOKENS: "",
   });
   const call = makeRpc(core);
 

@@ -729,10 +729,24 @@ function validateGuiStateMatrix(payload) {
     if (!viewportIds.includes(viewport)) failures.push(`GUI state matrix is missing viewport ${viewport}`);
   }
   const expectedCount = expectedScenarios.length * expectedViewports.length;
-  if (payload?.screenshotCount !== expectedCount || payload?.evidence?.length !== expectedCount) failures.push(`GUI state matrix must contain ${expectedCount} screenshots`);
-  for (const entry of Array.isArray(payload?.evidence) ? payload.evidence : []) {
+  const evidence = Array.isArray(payload?.evidence) ? payload.evidence : [];
+  if (payload?.screenshotCount !== evidence.length || evidence.length < expectedCount) {
+    failures.push(`GUI state matrix must contain at least ${expectedCount} screenshots and report the exact evidence count`);
+  }
+  const evidenceKeys = new Set();
+  for (const entry of evidence) {
     if (!/^[a-f0-9]{64}$/i.test(entry?.sha256 ?? "") || !(entry?.bytes > 10_000)) failures.push("GUI state matrix contains invalid screenshot evidence");
     if (typeof entry?.file !== "string" || !entry.file.startsWith("release-v3/proofs/gui-state-matrix/") || entry.file.includes("..")) failures.push("GUI state matrix contains an unsafe screenshot reference");
+    const key = `${entry?.scenario ?? ""}\u0000${entry?.viewport ?? ""}`;
+    if (evidenceKeys.has(key)) failures.push("GUI state matrix contains duplicate scenario and viewport evidence");
+    evidenceKeys.add(key);
+  }
+  for (const scenario of expectedScenarios) {
+    for (const viewport of expectedViewports) {
+      if (!evidenceKeys.has(`${scenario}\u0000${viewport}`)) {
+        failures.push(`GUI state matrix is missing ${scenario} at ${viewport}`);
+      }
+    }
   }
   if (payload?.localOnly !== true || payload?.cloudAi !== false || payload?.networkAttempted !== false) failures.push("GUI state evidence must be generated locally without cloud AI or network access");
   return [...new Set(failures)];

@@ -14,6 +14,12 @@ dist-ssr
 release-v3*/
 build/core-bin/
 build/ai-bundle/
+build/ai-bundle-local/
+build/ai-bundle-cache/
+build/ai-bundle.installing-*/
+build/ai-bundle.backup-*/
+build/ai-bundle-local.installing-*/
+build/ai-bundle-local.backup-*/
 third_party/private-keys/
 *.gguf
 *.safetensors

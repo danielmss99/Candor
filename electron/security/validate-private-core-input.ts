@@ -165,8 +165,8 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
       method,
       value,
       method === "ai.ask.start"
-        ? ["recordingId", "question", "mode", "fallbackPolicy"]
-        : ["recordingId", "mode", "fallbackPolicy"],
+        ? ["recordingId", "question", "intent"]
+        : ["recordingId", "intent"],
     );
     const result: Record<string, JsonValue> = {
       recordingId: requiredRecordingId(method, value.recordingId),
@@ -174,19 +174,11 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
     if (method === "ai.ask.start") {
       result.question = requiredString(method, value.question, "question", INPUT_LIMITS.question);
     }
-    const mode = value.mode ?? "local-llm";
-    if (mode !== "local-llm" && mode !== "heuristic-fallback") {
-      fail(method, "mode must be local-llm or heuristic-fallback");
+    const intent = value.intent ?? "default";
+    if (intent !== "default" && intent !== "strict-retry" && intent !== "explicit-heuristic") {
+      fail(method, "intent must be default, strict-retry, or explicit-heuristic");
     }
-    const fallbackPolicy = value.fallbackPolicy ?? "allow-disclosed";
-    if (fallbackPolicy !== "allow-disclosed" && fallbackPolicy !== "require-local-llm") {
-      fail(method, "fallbackPolicy must be allow-disclosed or require-local-llm");
-    }
-    if (mode === "heuristic-fallback" && fallbackPolicy === "require-local-llm") {
-      fail(method, "heuristic-fallback cannot require the local LLM");
-    }
-    result.mode = mode;
-    result.fallbackPolicy = fallbackPolicy;
+    result.intent = intent;
     return result;
   }
   if (method === "models.importStart") {

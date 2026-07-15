@@ -230,18 +230,19 @@ describe("core operation registry", () => {
     });
   });
 
-  it("rejects contradictory fallback policy combinations", () => {
+  it("accepts only core-resolved AI job intents", () => {
     const operation = CORE_OPERATIONS.get("ai.recap.start");
     expect(() => operation?.paramsSchema.parse({
       recordingId: "recording-1",
-      mode: "heuristic-fallback",
-      fallbackPolicy: "require-local-llm",
+      intent: "untrusted-mode",
     })).toThrow("Invalid parameters");
     expect(operation?.paramsSchema.parse({
       recordingId: "recording-1",
-      mode: "heuristic-fallback",
-      fallbackPolicy: "allow-disclosed",
-    })).toMatchObject({ mode: "heuristic-fallback", fallbackPolicy: "allow-disclosed" });
+      intent: "explicit-heuristic",
+    })).toMatchObject({ intent: "explicit-heuristic" });
+    expect(operation?.paramsSchema.parse({
+      recordingId: "recording-1",
+    })).toMatchObject({ intent: "default" });
   });
 
   it("keeps benchmark inputs tier-only at the private boundary", () => {
@@ -314,6 +315,8 @@ describe("core operation registry", () => {
       provenance: {
         engine: "local-llm",
         modelId: "qwen3-4b-official-q4_k_m",
+        modelSha256: "a".repeat(64),
+        runtimeSha256: "b".repeat(64),
         fallbackUsed: false,
         fallbackReason: null,
         promptVersion: "candor-grounded-v1",
@@ -355,6 +358,8 @@ describe("core operation registry", () => {
         provenance: {
           engine: "local-llm",
           modelId: "qwen3-4b-official-q4_k_m",
+          modelSha256: "a".repeat(64),
+          runtimeSha256: "b".repeat(64),
           fallbackUsed: false,
           fallbackReason: null,
           generatedAt: "2026-07-14T12:00:01Z",
@@ -371,6 +376,8 @@ describe("core operation registry", () => {
           ...grounded.provenance,
           engine: "heuristic",
           modelId: null,
+          modelSha256: null,
+          runtimeSha256: null,
           fallbackUsed: true,
           fallbackReason: "user-requested",
         },

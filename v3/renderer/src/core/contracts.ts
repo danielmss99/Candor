@@ -234,6 +234,8 @@ export interface LocalAiAnswer {
 export interface AiProvenance {
   engine: "local-llm" | "heuristic";
   modelId: string | null;
+  modelSha256: string | null;
+  runtimeSha256: string | null;
   fallbackUsed: boolean;
   fallbackReason: "llm-unavailable" | "runtime-failed" | "model-corrupt" | "resource-policy" | "user-requested" | null;
   promptVersion: string;
@@ -910,6 +912,8 @@ function parseAiProvenance(value: unknown, field: string): AiProvenance {
     throw new ProtocolValidationError(`${field}.engine`, "local-llm or heuristic");
   }
   const modelId = nullableStringField(object.modelId, `${field}.modelId`);
+  const modelSha256 = nullableStringField(object.modelSha256, `${field}.modelSha256`);
+  const runtimeSha256 = nullableStringField(object.runtimeSha256, `${field}.runtimeSha256`);
   const fallbackUsed = booleanField(object.fallbackUsed, `${field}.fallbackUsed`);
   const rawReason = nullableStringField(object.fallbackReason, `${field}.fallbackReason`);
   const reasons = ["llm-unavailable", "runtime-failed", "model-corrupt", "resource-policy", "user-requested"] as const;
@@ -922,6 +926,15 @@ function parseAiProvenance(value: unknown, field: string): AiProvenance {
   if (engine === "local-llm" && !modelId) {
     throw new ProtocolValidationError(`${field}.modelId`, "a local model identifier");
   }
+  if (engine === "local-llm" && (!modelSha256 || !/^[a-f0-9]{64}$/.test(modelSha256))) {
+    throw new ProtocolValidationError(`${field}.modelSha256`, "a verified model digest");
+  }
+  if (engine === "local-llm" && (!runtimeSha256 || !/^[a-f0-9]{64}$/.test(runtimeSha256))) {
+    throw new ProtocolValidationError(`${field}.runtimeSha256`, "a verified runtime digest");
+  }
+  if (engine === "heuristic" && (modelId || modelSha256 || runtimeSha256)) {
+    throw new ProtocolValidationError(field, "null model identity for heuristic output");
+  }
   const generatedAt = stringField(object.generatedAt, `${field}.generatedAt`);
   if (Number.isNaN(Date.parse(generatedAt))) {
     throw new ProtocolValidationError(`${field}.generatedAt`, "an RFC 3339 timestamp");
@@ -929,6 +942,8 @@ function parseAiProvenance(value: unknown, field: string): AiProvenance {
   return {
     engine,
     modelId,
+    modelSha256,
+    runtimeSha256,
     fallbackUsed,
     fallbackReason: rawReason as AiProvenance["fallbackReason"],
     promptVersion: stringField(object.promptVersion, `${field}.promptVersion`),

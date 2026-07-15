@@ -14,16 +14,20 @@ import {
   type TranscriptionQualityStatus,
 } from "../../v3/renderer/src/core/contracts";
 import { MeetingDetailView } from "../../v3/renderer/src/features/detail/MeetingDetailView";
+import { useAppearance } from "../../v3/renderer/src/features/appearance/useAppearance";
 import { ExportView, type ExportSectionState } from "../../v3/renderer/src/features/export/ExportView";
 import { HomeView } from "../../v3/renderer/src/features/home/HomeView";
 import { LibraryView } from "../../v3/renderer/src/features/library/LibraryView";
 import { LiveMeetingView } from "../../v3/renderer/src/features/meeting/LiveMeetingView";
+import { ActivationGate, OnboardingSetup } from "../../v3/renderer/src/features/onboarding/ActivationFlow";
 import { ReviewView } from "../../v3/renderer/src/features/review/ReviewView";
 import { SettingsView } from "../../v3/renderer/src/features/settings/SettingsView";
 import { StartupRecovery } from "../../v3/renderer/src/features/startup/StartupState";
 import { AnimatedTranscript, type MotionTranscriptSegment } from "../../v3/renderer/src/meeting-motion";
 
 export const VISUAL_SCENARIOS = [
+  "activation",
+  "onboarding-yours",
   "home-empty",
   "home-populated",
   "background-activity",
@@ -257,6 +261,7 @@ function Shell({ view, children, activeCapture = false, alerts = [], error = "",
       error={error}
       persistentAlerts={alerts}
       jobs={jobs}
+      custodyStatus="verified"
       onHome={noop}
       onStartRecording={noop}
       onNavigate={noop}
@@ -383,7 +388,7 @@ function Live({ active, busy = false, consentReady = true, label, jobLabel }: Li
       notesDirty={false}
       notesSaved
       recapSuggestions={[...decisions, ...actions]}
-      aiMode="local"
+      aiMode="local-llm"
       aiModeStatus="Local AI ready"
       transcriptionQualityLabel="Balanced"
       localAiReadyLabel="Ready"
@@ -537,7 +542,7 @@ function Settings({ advanced, repair = false, checking = false, localAi = false 
       models={baselineUnavailable ? [] : [{ modelId: "base.en", language: "English", installed: true, verified: true, bytes: 148_000_000, failureCode: "" }]}
       selectedModel="base.en"
       defaultModel="base.en"
-      aiMode={baselineUnavailable ? "quick" : "local"}
+      aiMode={baselineUnavailable ? "heuristic-fallback" : "local-llm"}
       aiModeStatus={baselineUnavailable ? "Quick fallback available" : "Local AI ready"}
       instructSetupOpen={false}
       instructReady={!baselineUnavailable}
@@ -607,6 +612,12 @@ function Library({ total = 1_000 }: { total?: number }) {
 }
 
 function renderScenario(scenario: VisualScenario): ReactNode {
+  if (scenario === "activation") {
+    return <ActivationGate licenseKey="" licenseEmail="" licenseKeyInvalid={false} licenseBusy={false} licenseStatus={{ secureStorageAvailable: true }} onLicenseKeyChange={noop} onLicenseEmailChange={noop} onLicenseKeyBlur={noop} onActivate={noop} onStartTrial={noop} onContinueLocal={noop} />;
+  }
+  if (scenario === "onboarding-yours") {
+    return <OnboardingSetup step="yours" licenseState="trial" licenseStatus={{ trialDaysRemaining: 14, planName: "Candor Professional", licenseId: "Local trial", productionVerification: "pending" }} captureStatus={{ sources: { system: { implemented: true } } }} consentStatus={{ readyForMicRecording: false, readyForSystemAudioRecording: false }} vaultStatus={{ encrypted: true }} modelStatus={{ verifiedModelCount: 1 }} bundledAiStatus={bundledAiReady} aiModeStatus="Local AI ready" instructReady busy="" onStepChange={noop} onCompleteMic={noop} onCompleteSystemAudio={noop} onCompleteStorage={noop} onImportSpeechModel={noop} onFinish={noop} />;
+  }
   if (scenario === "core-unavailable") return <StartupRecovery message="The local processing service did not start." retrying={false} onRetry={noop} />;
   if (scenario === "core-incompatible") return <StartupRecovery message="Protocol version mismatch. This local core is incompatible." retrying={false} onRetry={noop} />;
   if (scenario === "home-empty") return <Shell view="home" recordings={[]}><Home populated={false} /></Shell>;
@@ -635,6 +646,7 @@ function renderScenario(scenario: VisualScenario): ReactNode {
 }
 
 export function VisualEvidenceApp() {
+  useAppearance();
   const [scenario, setScenario] = useState<VisualScenario>(scenarioFromHash);
 
   useEffect(() => {

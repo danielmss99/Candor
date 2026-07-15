@@ -33,6 +33,8 @@ const receipt: MeetingPrivacyReceipt = {
     aiProvenance: {
       engine: "heuristic",
       modelId: null,
+      modelSha256: null,
+      runtimeSha256: null,
       fallbackUsed: true,
       fallbackReason: "llm-unavailable",
       promptVersion: "candor-heuristic-v1",
@@ -128,10 +130,11 @@ describe("simplified product surface", () => {
       updatedAtMs: index,
     }));
     const markup = renderToStaticMarkup(
-      <DesktopShell view="meeting" recordings={recordings} openMeetingIds={["rec-0", "rec-1", "rec-2"]} selectedRecordingId="rec-0" activeCapture={false} combinedCaptureAvailable={false} busy={false} notice="" error="" onHome={vi.fn()} onStartRecording={vi.fn()} onNavigate={vi.fn()} onOpenRecording={vi.fn()} onCloseMeeting={vi.fn()} onDismissNotice={vi.fn()} onDismissError={vi.fn()}><div /></DesktopShell>,
+      <DesktopShell view="meeting" recordings={recordings} openMeetingIds={["rec-0", "rec-1", "rec-2", "rec-3", "rec-4"]} selectedRecordingId="rec-0" activeCapture={false} combinedCaptureAvailable={false} busy={false} notice="" error="" onHome={vi.fn()} onStartRecording={vi.fn()} onNavigate={vi.fn()} onOpenRecording={vi.fn()} onCloseMeeting={vi.fn()} onDismissNotice={vi.fn()} onDismissError={vi.fn()}><div /></DesktopShell>,
     );
-    expect((markup.match(/class="session-tab"/g) ?? []).length).toBe(3);
-    expect(markup).toContain("+2");
+    expect((markup.match(/class="open-meeting-row"/g) ?? []).length).toBe(3);
+    expect(markup).toContain("More meetings");
+    expect(markup).toContain("Meeting 4");
   });
 
   it("keeps recovery conditions visible and blocks only new recording starts", () => {
@@ -184,6 +187,7 @@ describe("simplified product surface", () => {
       defaultModel: "tiny.en",
       aiMode: "heuristic-fallback" as const,
       aiModeStatus: "Quick local fallback",
+      aiFallbackPreference: "ask-first" as const,
       instructSetupOpen: false,
       instructReady: false,
       instructRunnerAsset: {},
@@ -200,7 +204,7 @@ describe("simplified product surface", () => {
       diagnosticPreview: null,
       transcriptionBenchmarkActive: false,
       transcriptionBenchmarkNeedsRetry: false,
-      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onTranscriptionQualityChange: vi.fn(), onRunTranscriptionBenchmark: vi.fn(), onImportDictionary: vi.fn(), onSetDictionaryEnabled: vi.fn(), onAssignDictionary: vi.fn(), onReviewTerminology: vi.fn(), onDecideTerminology: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
+      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onAiFallbackPreferenceChange: vi.fn(), onTranscriptionQualityChange: vi.fn(), onRunTranscriptionBenchmark: vi.fn(), onImportDictionary: vi.fn(), onSetDictionaryEnabled: vi.fn(), onAssignDictionary: vi.fn(), onReviewTerminology: vi.fn(), onDecideTerminology: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);
@@ -227,7 +231,7 @@ describe("simplified product surface", () => {
     expect(repairMarkup).toContain("Reinstall the signed Candor app");
     expect(repairMarkup).not.toContain("Repair now");
     expect(repairMarkup).not.toContain("Download model");
-    expect(repairMarkup).not.toContain("http");
+    expect(repairMarkup).not.toMatch(/\b(?:href|src)="https?:\/\//i);
     const checkingMarkup = renderToStaticMarkup(
       <SettingsView
         {...baseProps}
@@ -326,7 +330,7 @@ describe("simplified product surface", () => {
     expect(markup).toContain("Review meeting");
     expect(markup).toContain("Speech recognition");
     expect(markup).toContain("Balanced");
-    expect(markup).toContain("Local AI");
+    expect(markup).toContain("Meeting assistance");
 
     const activeMarkup = renderToStaticMarkup(
       <LiveMeetingView title="Meeting" selectedRecording={undefined} selectedRecordingId="rec-1" activeRecordingId="rec-1" activeCapture consentReady durationMs={5_000} audioUrl="" markers={[]} compactPane="transcript" notesPanelMode="notes" notesMarkdown="" notesDirty={false} notesSaved={false} recapSuggestions={[]} aiMode="heuristic-fallback" aiModeStatus="Quick local fallback" transcriptionQualityLabel="Balanced" localAiReadyLabel="Ready" captureStatusLabel="Recording" jobStatusLabel="Processing stays local" busy={false} transcriptContent={<div>Transcript content</div>} onReview={vi.fn()} onReviewConsent={vi.fn()} onLoadAudio={vi.fn()} onMarkMoment={vi.fn()} onCompactPaneChange={vi.fn()} onNotesPanelModeChange={vi.fn()} onTranscribe={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onAiModeChange={vi.fn()} onStartStop={vi.fn()} />,
@@ -334,7 +338,7 @@ describe("simplified product surface", () => {
     expect(activeMarkup).not.toContain("Review meeting");
     expect(activeMarkup).not.toContain("Load audio");
     expect(activeMarkup).not.toContain("Transcribe locally");
-    expect(activeMarkup).toContain(">Stop<");
+    expect(activeMarkup).toContain("Stop and save");
   });
 
   it("offers permanent deletion only for a finished local meeting", () => {

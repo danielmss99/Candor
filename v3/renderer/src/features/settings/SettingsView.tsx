@@ -31,6 +31,7 @@ interface SettingsViewProps {
   defaultModel: string;
   aiMode: AiMode;
   aiModeStatus: string;
+  aiFallbackPreference: "ask-first" | "automatic" | "never";
   instructSetupOpen: boolean;
   instructReady: boolean;
   instructRunnerAsset: JsonObject;
@@ -51,6 +52,7 @@ interface SettingsViewProps {
   onImportModel: () => void;
   onSelectedModelChange: (modelId: string) => void;
   onAiModeChange: (mode: AiMode) => void;
+  onAiFallbackPreferenceChange: (preference: "ask-first" | "automatic" | "never") => void;
   onTranscriptionQualityChange: (tier: TranscriptionQualityTier, languagePreference?: TranscriptionLanguagePreference) => void;
   onRunTranscriptionBenchmark: (tier: "balanced" | "maximum") => void;
   onImportDictionary: () => void;
@@ -208,10 +210,38 @@ export function SettingsView(props: SettingsViewProps) {
         />
         <section className="settings-group">
           <div className="settings-row-title">
+            <div>
+              <strong>When Local AI cannot finish</strong>
+              <span>Choose whether Candor may create a simpler local result.</span>
+            </div>
+          </div>
+          <div className="quality-choice-list" role="radiogroup" aria-label="Local AI fallback behavior">
+            {([
+              ["ask-first", "Ask first", "Offer a quick fallback only after Local AI fails"],
+              ["automatic", "Automatic", "Create a disclosed quick fallback for approved failures"],
+              ["never", "Never", "Keep the task failed until Local AI can be retried"],
+            ] as const).map(([value, label, description]) => (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={props.aiFallbackPreference === value}
+                className={props.aiFallbackPreference === value ? "quality-choice selected" : "quality-choice"}
+                disabled={Boolean(props.busy)}
+                key={value}
+                onClick={() => props.onAiFallbackPreferenceChange(value)}
+              >
+                <span className="quality-choice-radio" aria-hidden="true" />
+                <span><strong>{label}{value === "ask-first" ? " · Recommended" : ""}</strong><small>{description}</small></span>
+              </button>
+            ))}
+          </div>
+        </section>
+        <section className="settings-group">
+          <div className="settings-row-title">
             <div><strong>Generation mode</strong><span id="local-ai-mode-status-settings">{props.aiModeStatus}</span></div>
             <div className="segmented-control" role="group" aria-label="Settings local AI mode">
               <button type="button" aria-pressed={props.aiMode === "local-llm"} onClick={() => props.onAiModeChange("local-llm")}>Local AI</button>
-              <button type="button" aria-pressed={props.aiMode === "heuristic-fallback"} onClick={() => props.onAiModeChange("heuristic-fallback")}>Quick fallback</button>
+              <button type="button" aria-pressed={props.aiMode === "heuristic-fallback"} disabled={props.aiFallbackPreference === "never"} onClick={() => props.onAiModeChange("heuristic-fallback")}>Quick fallback</button>
             </div>
           </div>
         </section>
@@ -268,7 +298,7 @@ export function SettingsView(props: SettingsViewProps) {
   };
   const basicSections: Array<[SettingsSection, string]> = [["general", "General"], ["recording", "Recording"], ["models", "AI & Transcription"], ["export", "Export"], ["license", "License"]];
   const advancedSections: Array<[SettingsSection, string]> = [["storage", "Storage and retention"], ["privacy", "Privacy and network"], ["diagnostics", "Diagnostics"]];
-  return <section className="page-view" data-view="settings"><header className="screen-heading"><h1>Settings</h1><p>Local controls for Candor on this computer</p></header><div className="settings-layout"><nav aria-label="Settings sections"><span>BASIC</span>{basicSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}<button type="button" className="advanced-settings-toggle" aria-expanded={props.advancedOpen} onClick={props.onToggleAdvanced}>{props.advancedOpen ? "Hide advanced settings" : "Show advanced settings"}</button>{props.advancedOpen ? <><span>ADVANCED</span>{advancedSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}</> : null}</nav><section className="settings-panel">{renderPanel()}</section></div></section>;
+  return <section className="page-view" data-view="settings"><header className="screen-heading"><h1>Settings</h1><p>Local controls for Candor on this computer</p></header><div className="settings-layout"><nav aria-label="Settings sections"><span>Basic</span>{basicSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}<button type="button" className="advanced-settings-toggle" aria-expanded={props.advancedOpen} onClick={props.onToggleAdvanced}>{props.advancedOpen ? "Hide advanced settings" : "Show advanced settings"}</button>{props.advancedOpen ? <><span>Advanced</span>{advancedSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}</> : null}</nav><section className="settings-panel">{renderPanel()}</section></div></section>;
 }
 
 function qualityGuardCopy(reason: string | null): string {

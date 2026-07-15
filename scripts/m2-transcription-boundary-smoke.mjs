@@ -25,14 +25,9 @@ const rpcTimeoutMs = realLocalRequested ? 180000 : 5000;
 const coreArg = argValue("--core", firstPositional());
 const corePath = coreArg
   ? path.resolve(coreArg)
-  : path.join(
-      repoRoot,
-      "crates",
-      "candor-core",
-      "target",
-      realLocalRequested ? "release" : "debug",
-      exe,
-    );
+  : realLocalRequested
+    ? path.join(repoRoot, "build", "core-bin", exe)
+    : path.join(repoRoot, "crates", "candor-core", "target", "debug", exe);
 const outputPath = path.resolve(
   repoRoot,
   argValue(
@@ -408,24 +403,27 @@ try {
 
   const modelStatus = await call("models.status");
   assertCustody(modelStatus, "model status");
+  const bundledSpeechReady = modelStatus?.bundledAssets?.speech?.ready === true;
   if (
     modelStatus?.localOnly !== true ||
     modelStatus?.cloudAi !== false ||
     modelStatus?.modelPathAcceptedFromRenderer !== false ||
-    modelStatus?.manualInstallOnly !== true ||
+    modelStatus?.manualInstallOnly !== !bundledSpeechReady ||
     modelStatus?.backgroundDownloads !== false
   ) {
     throw new Error("model status did not report the local model custody contract");
   }
   proofReceipt.modelCustody.statusChecked = true;
   proofReceipt.modelCustody.manualInstallOnly = modelStatus?.manualInstallOnly === true;
+  proofReceipt.modelCustody.bundledSpeechReady = bundledSpeechReady;
   proofReceipt.modelCustody.backgroundDownloads = modelStatus?.backgroundDownloads === true;
   proofReceipt.modelCustody.supportedModelCount = modelStatus?.supportedModelCount ?? null;
 
-  const missingModel = await call("models.verifyLocal", { modelId: realModelId });
+  const missingModelId = bundledSpeechReady ? "tiny.en" : realModelId;
+  const missingModel = await call("models.verifyLocal", { modelId: missingModelId });
   assertCustody(missingModel, "missing model verification");
   if (
-    missingModel?.modelId !== realModelId ||
+    missingModel?.modelId !== missingModelId ||
     missingModel?.installed !== false ||
     missingModel?.verified !== false ||
     missingModel?.failureCode !== "MODEL_NOT_INSTALLED"

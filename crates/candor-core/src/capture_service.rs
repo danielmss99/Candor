@@ -93,6 +93,58 @@ pub struct CaptureManager {
     active: Option<CaptureSession>,
 }
 
+fn active_session_status(session: &CaptureSession) -> Value {
+    let runtimes = session_runtimes_json(&session.runtimes);
+    let primary = session.runtimes.first();
+    const MAX_SAFE_JSON_INTEGER: u128 = 9_007_199_254_740_991;
+    let duration_ms = now_ms()
+        .saturating_sub(session.started_at_ms)
+        .min(MAX_SAFE_JSON_INTEGER) as u64;
+    let source = if session.runtimes.len() > 1 {
+        "mic+system"
+    } else {
+        primary.map(|runtime| runtime.source).unwrap_or("unknown")
+    };
+    let device_label = if session.runtimes.len() > 1 {
+        session
+            .runtimes
+            .iter()
+            .map(|runtime| format!("{}: {}", runtime.source, runtime.device_label))
+            .collect::<Vec<_>>()
+            .join(", ")
+    } else {
+        primary
+            .map(|runtime| runtime.device_label.clone())
+            .unwrap_or_else(|| "Unknown capture device".to_string())
+    };
+    let last_error = session
+        .last_error
+        .lock()
+        .ok()
+        .and_then(|error| error.clone());
+    let integrity_status = if last_error.is_some() {
+        "failed"
+    } else {
+        "recording"
+    };
+    json!({
+        "recordingId": session.recording_id,
+        "source": source,
+        "mode": if session.runtimes.len() > 1 { "separated" } else { "single-source" },
+        "deviceLabel": device_label,
+        "sampleRateHz": primary.map(|runtime| runtime.sample_rate_hz),
+        "channelCount": primary.map(|runtime| runtime.channel_count),
+        "chunkMs": primary.map(|runtime| runtime.chunk_ms),
+        "tracks": session.runtimes.iter().map(|runtime| runtime.source).collect::<Vec<_>>(),
+        "sources": runtimes,
+        "startedAtMs": session.started_at_ms,
+        "durationMs": duration_ms,
+        "lastError": last_error,
+        "integrityStatus": integrity_status,
+        "rawPathExposed": false
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CaptureSource {
     Mic,
@@ -178,52 +230,7 @@ impl CaptureManager {
     }
 
     pub fn status(&mut self) -> Value {
-        let active = self.active.as_ref().map(|session| {
-            let runtimes = session_runtimes_json(&session.runtimes);
-            let primary = session.runtimes.first();
-            let source = if session.runtimes.len() > 1 {
-                "mic+system"
-            } else {
-                primary.map(|runtime| runtime.source).unwrap_or("unknown")
-            };
-            let device_label = if session.runtimes.len() > 1 {
-                session
-                    .runtimes
-                    .iter()
-                    .map(|runtime| format!("{}: {}", runtime.source, runtime.device_label))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            } else {
-                primary
-                    .map(|runtime| runtime.device_label.clone())
-                    .unwrap_or_else(|| "Unknown capture device".to_string())
-            };
-            let last_error = session
-                .last_error
-                .lock()
-                .ok()
-                .and_then(|error| error.clone());
-            let integrity_status = if last_error.is_some() {
-                "failed"
-            } else {
-                "recording"
-            };
-            json!({
-                "recordingId": session.recording_id,
-                "source": source,
-                "mode": if session.runtimes.len() > 1 { "separated" } else { "single-source" },
-                "deviceLabel": device_label,
-                "sampleRateHz": primary.map(|runtime| runtime.sample_rate_hz),
-                "channelCount": primary.map(|runtime| runtime.channel_count),
-                "chunkMs": primary.map(|runtime| runtime.chunk_ms),
-                "tracks": session.runtimes.iter().map(|runtime| runtime.source).collect::<Vec<_>>(),
-                "sources": runtimes,
-                "startedAtMs": session.started_at_ms,
-                "lastError": last_error,
-                "integrityStatus": integrity_status,
-                "rawPathExposed": false
-            })
-        });
+        let active = self.active.as_ref().map(active_session_status);
         json!({
             "implemented": true,
             "active": self.active.is_some(),
@@ -1814,6 +1821,34 @@ mod tests {
             last_error.lock().expect("last error lock").as_deref(),
             Some("first")
         );
+    }
+
+    #[test]
+    fn active_session_status_reports_monotonic_elapsed_duration() {
+        let manager = CaptureManager {
+            active: Some(CaptureSession {
+                recording_id: "timer-regression".to_string(),
+                stop: Arc::new(AtomicBool::new(false)),
+                joins: Vec::new(),
+                writer_join: None,
+                runtimes: Vec::new(),
+                last_error: Arc::new(Mutex::new(None)),
+                started_at_ms: now_ms().saturating_sub(1_000),
+            }),
+        };
+
+        let first = active_session_status(manager.active.as_ref().expect("active session"))
+            ["durationMs"]
+            .as_u64()
+            .expect("active capture duration");
+        thread::sleep(Duration::from_millis(2));
+        let second = active_session_status(manager.active.as_ref().expect("active session"))
+            ["durationMs"]
+            .as_u64()
+            .expect("updated active capture duration");
+
+        assert!(first >= 1_000);
+        assert!(second >= first);
     }
 
     #[test]

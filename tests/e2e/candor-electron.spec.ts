@@ -9,7 +9,7 @@ const expectedPreloadSurface = {
   meetings: ["delete", "get", "getImportStatus", "getNotes", "getPrivacyReceipt", "getReplayManifest", "getStorageStatus", "getTranscript", "importLegacy", "list", "readAudioChunk", "search", "updateNotes"],
   transcript: ["cancel", "getQuality", "getStatus", "setQuality", "start", "startQualityBenchmark"],
   terminology: ["assignToMeeting", "decideCorrection", "getCorrectionProposals", "getStatus", "importDictionary", "setEnabled"],
-  ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getBundledAssetsStatus", "getEnhancedAssetsStatus", "getEnhancedStatus", "getStatus", "getWorkloadStatus", "listSpeechModels", "verifySpeechModel"],
+  ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getBundledAssetsStatus", "getEnhancedAssetsStatus", "getEnhancedStatus", "getFallbackPreference", "getStatus", "getWorkloadStatus", "listSpeechModels", "setFallbackPreference", "verifySpeechModel"],
   exports: ["cancel", "create", "saveCompleted"],
   settings: ["getNetworkPolicy", "getPrivacyAudit", "getRetentionStatus", "getStorageStatus", "getUpdateStatus", "openLocalStorage"],
   licensing: ["activate", "deactivate", "getPortalInfo", "getStatus", "startTrial"],
@@ -60,6 +60,7 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
   const session = await launchCandor();
   try {
     await expect(session.page.locator('[data-view="activation"]')).toBeVisible();
+    await expect.poll(() => session.app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0]?.isVisible())).toBe(true);
     const preferences = await session.app.evaluate(({ BrowserWindow }) => {
       const window = BrowserWindow.getAllWindows()[0];
       const values = window?.webContents.getLastWebPreferences();
@@ -120,6 +121,15 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
     await expectNoAxeViolations(session.page);
     await session.page.getByRole("button", { name: "Open local workspace" }).click();
     await expect(session.page.locator('[data-view="home"]')).toBeVisible();
+    const darkModeButton = session.page.getByRole("button", { name: "Switch to dark mode" });
+    await expect(darkModeButton).toBeVisible();
+    await darkModeButton.click();
+    await expect(session.page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(session.page.getByRole("button", { name: "Switch to light mode" })).toBeVisible();
+    expect(await session.page.evaluate(() => window.localStorage.getItem("candor.appearance"))).toBe("dark");
+    await expectNoAxeViolations(session.page);
+    await session.page.getByRole("button", { name: "Switch to light mode" }).click();
+    await expect(session.page.locator("html")).toHaveAttribute("data-theme", "light");
     await session.page.keyboard.press("Tab");
     const focused = await session.page.evaluate(() => document.activeElement !== document.body);
     expect(focused).toBe(true);
@@ -175,9 +185,29 @@ test("Record, Review, and Export workflow is keyboard-accessible and axe-clean",
     await expect(session.page.locator('[data-view="review"]')).toBeVisible();
     await expectNoAxeViolations(session.page);
 
+    await session.page.getByRole("button", { name: "Preview", exact: true }).click();
+    await expect(session.page.locator(".review-preview")).toBeVisible();
+    await expect(session.page.getByRole("heading", { name: "Report preview", exact: true })).toBeVisible();
+    await session.page.getByRole("button", { name: "Close preview" }).click();
+    await expect(session.page.locator(".review-preview")).toHaveCount(0);
+
+    await session.page.getByRole("button", { name: "Decisions", exact: true }).click();
+    await expect(session.page.getByRole("heading", { name: "Decisions", exact: true })).toBeVisible();
+    await session.page.getByRole("button", { name: "Overview", exact: true }).click();
+
     await session.page.getByRole("button", { name: "Export report" }).click();
     await expect(session.page.locator('[data-view="export"]')).toBeVisible();
     await expect(session.page.getByRole("button", { name: "Save Word" })).toBeVisible();
+
+    await session.page.getByRole("button", { name: /PDF/ }).click();
+    await expect(session.page.getByRole("button", { name: "Save PDF" })).toBeVisible();
+    await session.page.getByText("Customize report", { exact: true }).click();
+    await session.page.getByRole("button", { name: "A4", exact: true }).click();
+    await expect(session.page.getByRole("button", { name: "A4", exact: true })).toHaveAttribute("aria-pressed", "true");
+    const notesCheckbox = session.page.getByRole("checkbox", { name: "Manual notes" });
+    const notesWereIncluded = await notesCheckbox.isChecked();
+    await notesCheckbox.click();
+    await expect(notesCheckbox).toBeChecked({ checked: !notesWereIncluded });
     await expectNoAxeViolations(session.page);
 
     await primaryNavigation.getByRole("button", { name: "Settings", exact: true }).click();

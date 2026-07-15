@@ -1,0 +1,87 @@
+import AxeBuilder from "@axe-core/playwright";
+import { _electron as electron, expect, test } from "@playwright/test";
+import { mkdirSync, statSync } from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
+import type { VisualScenario } from "../visual/VisualEvidenceApp";
+import { findClippedText } from "./text-layout";
+
+const require = createRequire(import.meta.url);
+const repoRoot = path.resolve(import.meta.dirname, "..", "..");
+const electronExecutable = require("electron") as string;
+const evidenceRoot = path.join(repoRoot, "release-v3", "proofs", "gui-dark-theme");
+
+const scenarios: VisualScenario[] = [
+  "activation",
+  "onboarding-yours",
+  "home-populated",
+  "live-recording",
+  "meetings-1000",
+  "meeting-fallback-notice",
+  "review-desktop",
+  "export-default",
+  "settings-local-ai-ready",
+  "core-unavailable",
+];
+
+const viewports = [
+  { id: "1440x900", width: 1440, height: 900 },
+  { id: "960x600", width: 960, height: 600 },
+] as const;
+
+test("dark theme covers every major route at desktop and compact sizes", async () => {
+  test.setTimeout(180_000);
+
+  for (const viewport of viewports) {
+    const app = await electron.launch({
+      executablePath: electronExecutable,
+      args: [path.join(repoRoot, "tests", "e2e", "visual-evidence-main.mjs")],
+      cwd: repoRoot,
+      env: {
+        ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
+        CANDOR_VISUAL_WIDTH: String(viewport.width),
+        CANDOR_VISUAL_HEIGHT: String(viewport.height),
+        CANDOR_VISUAL_SCALE_FACTOR: "1",
+      },
+    });
+
+    try {
+      const page = await app.firstWindow({ timeout: 30_000 });
+      await expect(page.locator("html")).toHaveAttribute("data-theme", /^(light|dark)$/);
+      if ((await page.locator("html").getAttribute("data-theme")) !== "dark") {
+        await page.getByRole("button", { name: "Switch to dark mode" }).click();
+      }
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+
+      for (const scenario of scenarios) {
+        await page.evaluate((nextScenario) => { window.location.hash = `scenario=${nextScenario}`; }, scenario);
+        await expect(page.locator(`[data-visual-scenario="${scenario}"]`)).toBeVisible();
+        await page.waitForTimeout(120);
+
+        const layout = await page.evaluate(() => ({
+          viewportWidth: window.innerWidth,
+          documentWidth: document.documentElement.scrollWidth,
+        }));
+        expect(layout.documentWidth, `${scenario} has dark-theme horizontal overflow`).toBeLessThanOrEqual(layout.viewportWidth + 1);
+        expect(await findClippedText(page), `${scenario} has clipped dark-theme text at ${viewport.id}`).toEqual([]);
+
+        const directory = path.join(evidenceRoot, viewport.id);
+        mkdirSync(directory, { recursive: true });
+        const screenshot = path.join(directory, `${scenario}.png`);
+        await page.screenshot({ path: screenshot, animations: "disabled", caret: "hide" });
+        expect(statSync(screenshot).size).toBeGreaterThan(10_000);
+
+        const results = await new AxeBuilder({ page })
+          .setLegacyMode()
+          .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+          .analyze();
+        expect(
+          results.violations,
+          results.violations.map((violation) => `${scenario}: ${violation.id} (${violation.nodes.length})`).join(", "),
+        ).toEqual([]);
+      }
+    } finally {
+      await app.close().catch(() => undefined);
+    }
+  }
+});

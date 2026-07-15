@@ -114,7 +114,9 @@ requireSource(rendererSource, "api.capture.acknowledgeConsent", "M3 renderer");
 requireSource(rendererSource, 'aria-label="Local AI mode"', "M3 renderer");
 requireSource(rendererSource, 'aria-pressed={aiMode === "local-llm"}', "M3 renderer");
 requireSource(rendererSource, 'aria-pressed={aiMode === "heuristic-fallback"}', "M3 renderer");
-requireSource(rendererSource, "Local AI with disclosed fallback", "M3 renderer");
+requireSource(rendererSource, "Local AI, asks before fallback", "M3 renderer");
+requireSource(rendererSource, '"Ask first"', "M3 renderer");
+requireSource(rendererSource, "Offer a quick fallback only after Local AI fails", "M3 renderer");
 requireSource(rendererSource, "Retry with Local AI", "M3 renderer");
 requireSource(rendererSource, "document-preview", "M3 renderer");
 requireSource(rendererSource, "saveLocalReport", "M3 renderer");
@@ -135,9 +137,14 @@ requireSource(rendererSource, 'data-view="settings"', "M3 renderer");
 requireSource(rendererSource, 'data-view="export"', "M3 renderer");
 requireSource(rendererSource, 'data-view="activation"', "M3 renderer");
 requireSource(rendererSource, 'data-view="onboarding"', "M3 renderer");
-requireSource(rendererSource, "session-tabs", "M3 renderer");
+requireSource(rendererSource, "open-meetings", "M3 renderer");
+requireSource(rendererSource, "open-meeting-overflow", "M3 renderer");
+requireSource(rendererSource, 'aria-label="Open meetings"', "M3 renderer");
 requireSource(rendererSource, "sidebar-record-action", "M3 renderer");
 requireSource(rendererSource, "function RecordAction", "M3 renderer");
+requireSource(rendererSource, "candor.appearance", "M3 renderer");
+requireSource(rendererSource, 'aria-label={`Switch to', "M3 renderer");
+requireSource(rendererSource, 'document.documentElement.dataset.theme', "M3 renderer");
 requireSource(rendererSource, "CandorClient", "M3 renderer");
 requireSource(rendererSource, "useCaptureSession", "M3 renderer");
 requireSource(rendererSource, "useLocalJob", "M3 renderer");
@@ -194,11 +201,11 @@ requireSource(licenseServiceSource, "safeStorage", "M3 license service");
 requireSource(licenseServiceSource, "persistentAccountRequired: false", "M3 license service");
 requireSource(licenseServiceSource, "CANDOR_ENABLE_MOCK_LICENSE", "M3 license service");
 requireSource(styleSource, "@media (max-width: 1280px)", "M3 styles");
-requireSource(styleSource, "@media (max-width: 1080px)", "M3 styles");
+requireSource(styleSource, "@media (max-width: 1040px)", "M3 styles");
 requireSource(styleSource, "@media (max-width: 1180px)", "M3 styles");
 requireSource(
   styleSource,
-  /@media \(max-width: 1080px\)[\s\S]*?\.review-mode\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?grid-template-columns:\s*140px minmax\(300px, 1fr\) minmax\(230px, 250px\);/,
+  /@media \(max-width: 1040px\)[\s\S]*?\.review-workspace,[\s\S]*?\.review-workspace\[data-preview-open="true"\]\s*\{[\s\S]*?grid-template-columns:\s*145px minmax\(0, 1fr\);/,
   "M3 compact Review Mode styles",
 );
 requireSource(styleSource, ".activation-shell", "M3 styles");
@@ -262,7 +269,15 @@ for (const [label, foreground, background] of contrastPairs) {
     throw new Error(`M3 color contrast failed for ${label}: ${ratio.toFixed(2)}:1`);
   }
 }
-rejectSource(rendererSource, /\blocalStorage\b/, "M3 renderer");
+for (const rendererPath of rendererPaths) {
+  if (rendererPath.endsWith(path.join("features", "appearance", "useAppearance.ts"))) continue;
+  rejectSource(readFileSync(rendererPath, "utf8"), /\blocalStorage\b/, `M3 renderer ${path.relative(repoRoot, rendererPath)}`);
+}
+requireSource(
+  readFileSync(path.join(repoRoot, "v3", "renderer", "src", "features", "appearance", "useAppearance.ts"), "utf8"),
+  'const STORAGE_KEY = "candor.appearance"',
+  "M3 appearance preference",
+);
 rejectSource(rendererSource, /\bsessionStorage\b/, "M3 renderer");
 rejectSource(rendererSource, /figma\.com\/api\/mcp\/asset/, "M3 renderer");
 rejectSource(rendererSource, /VERIFY_GLYPHS|verificationFrame|window\.setInterval/, "M3 renderer");

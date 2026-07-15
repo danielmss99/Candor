@@ -340,9 +340,12 @@ export class CoreClient {
     if (!child || child.killed) return;
     this.supervisor.state = "stopping";
     void this.call("core.shutdown").catch(() => undefined);
-    await this.waitForExit(child, 5000).catch(() => {
+    try {
+      await this.waitForExit(child, 5000);
+    } catch {
       child.kill("SIGKILL");
-    });
+      await this.waitForExit(child, 2000).catch(() => undefined);
+    }
   }
 
   async finalizeCaptureForClose(timeoutMs = 20_000): Promise<void> {

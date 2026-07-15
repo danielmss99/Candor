@@ -1,3 +1,4 @@
+import { FileUp } from "lucide-react";
 import type {
   TerminologyCorrectionProposal,
   TerminologyDictionaryRow,
@@ -28,7 +29,8 @@ export function TerminologySettings(props: TerminologySettingsProps) {
           <p>{props.status.entryCount.toLocaleString()} preferred terms stored locally</p>
         </div>
         <button type="button" onClick={props.onImport} disabled={props.busy}>
-          Import dictionary
+          <FileUp aria-hidden="true" size={16} />
+          <span>Import dictionary</span>
         </button>
       </div>
       {props.status.state === "corrupt" ? (

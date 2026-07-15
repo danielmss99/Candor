@@ -22,6 +22,7 @@ const noParameterMethods = new Set([
   "ai.bundledAssetsStatus",
   "ai.instructAssetsStatus",
   "ai.instructStatus",
+  "ai.fallbackPreference.status",
   "ai.schedulerStatus",
   "transcription.status",
   "transcription.quality.status",
@@ -271,6 +272,18 @@ export function validateRendererCoreParams(method: string, input: unknown): Json
       tier: value.tier,
       ...(value.languagePreference === undefined ? {} : { languagePreference: value.languagePreference }),
     };
+  }
+  if (method === "ai.fallbackPreference.update") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["preference"]);
+    if (
+      value.preference !== "ask-first"
+      && value.preference !== "automatic"
+      && value.preference !== "never"
+    ) {
+      return fail(method, "preference must be ask-first, automatic, or never");
+    }
+    return { preference: value.preference };
   }
   if (method === "terminology.status") {
     const value = objectInput(method, input);

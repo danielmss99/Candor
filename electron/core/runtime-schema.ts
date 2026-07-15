@@ -17,6 +17,7 @@ export type FieldRule =
   | "number"
   | "object"
   | "string"
+  | "string-or-null"
   | "string-array";
 
 function isJsonValue(value: unknown, depth = 0): value is JsonValue {
@@ -39,7 +40,10 @@ function fieldMatches(value: JsonValue, rule: FieldRule): boolean {
         typeof value === "object" &&
         !Array.isArray(value) &&
         typeof value.recordingId === "string" &&
-        value.recordingId.length > 0
+        value.recordingId.length > 0 &&
+        typeof value.durationMs === "number" &&
+        Number.isSafeInteger(value.durationMs) &&
+        value.durationMs >= 0
       );
     case "integer":
       return typeof value === "number" && Number.isSafeInteger(value);
@@ -51,6 +55,8 @@ function fieldMatches(value: JsonValue, rule: FieldRule): boolean {
       return value !== null && typeof value === "object" && !Array.isArray(value);
     case "string":
       return typeof value === "string";
+    case "string-or-null":
+      return value === null || typeof value === "string";
     case "string-array":
       return Array.isArray(value) && value.every((item) => typeof item === "string");
   }
