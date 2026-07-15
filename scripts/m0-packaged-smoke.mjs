@@ -546,8 +546,8 @@ function assertSmokePayload(payload) {
   if (
     payload.rendererVisualState?.bodyTextCharacters < 200 ||
     payload.rendererVisualState?.aiModeVisible !== true ||
-    payload.rendererVisualState?.selectedMode !== "Quality" ||
-    payload.rendererVisualState?.statusText !== "Fast local fallback" ||
+    payload.rendererVisualState?.selectedMode !== "Local AI" ||
+    payload.rendererVisualState?.statusText !== "Local AI with disclosed fallback" ||
     payload.rendererVisualState?.aiSuggestionsTabActivated !== true ||
     payload.rendererVisualState?.notesTabRestored !== true ||
     payload.rendererVisualState?.currentView !== "meeting" ||

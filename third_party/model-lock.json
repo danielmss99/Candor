@@ -17,7 +17,8 @@
         "licenseExpression": "MIT",
         "provenanceStatus": "official-source-pinned",
         "benchmarkStatus": "pending",
-        "packageProfiles": ["complete", "complete-max"]
+        "redistributionReview": "pending",
+        "packageProfiles": []
       },
       {
         "id": "small",
@@ -30,6 +31,7 @@
         "licenseExpression": "MIT",
         "provenanceStatus": "official-source-pinned",
         "benchmarkStatus": "pending",
+        "redistributionReview": "pending",
         "packageProfiles": ["complete", "complete-max"]
       },
       {
@@ -43,6 +45,7 @@
         "licenseExpression": "MIT",
         "provenanceStatus": "official-source-pinned",
         "benchmarkStatus": "pending",
+        "redistributionReview": "pending",
         "packageProfiles": ["complete", "complete-max"]
       },
       {
@@ -56,6 +59,7 @@
         "licenseExpression": "MIT",
         "provenanceStatus": "official-source-pinned",
         "benchmarkStatus": "pending",
+        "redistributionReview": "pending",
         "packageProfiles": ["complete-max"]
       }
     ]
@@ -66,7 +70,7 @@
     "candidates": [
       {
         "id": "qwen3-4b-instruct-2507-q4_k_m",
-        "role": "primary",
+        "role": "research-conversion",
         "sourceModel": "Qwen3-4B-Instruct-2507",
         "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
         "revision": "cdbee75f17c01a7cc42f958dc650907174af0554",
@@ -83,7 +87,7 @@
       },
       {
         "id": "qwen3-4b-official-q4_k_m",
-        "role": "fallback",
+        "role": "primary",
         "sourceModel": "Qwen3-4B-GGUF",
         "sourceUrl": "https://huggingface.co/Qwen/Qwen3-4B-GGUF",
         "revision": "bc640142c66e1fdd12af0bd68f40445458f3869b",
@@ -103,16 +107,20 @@
   },
   "packageProfiles": {
     "complete": {
-      "speechModelIds": ["small.en", "small", "large-v3-turbo"],
+      "productLabel": "Standard",
+      "speechModelIds": ["small", "large-v3-turbo"],
       "includesMaximumAccuracy": false,
       "requiresSelectedLanguageModel": true,
-      "requiresGeneralDictionary": true
+      "requiresGeneralDictionary": true,
+      "requiresDictionaryPublisherKey": true
     },
     "complete-max": {
-      "speechModelIds": ["small.en", "small", "large-v3-turbo", "large-v3"],
+      "productLabel": "Maximum Accuracy",
+      "speechModelIds": ["small", "large-v3-turbo", "large-v3"],
       "includesMaximumAccuracy": true,
       "requiresSelectedLanguageModel": true,
-      "requiresGeneralDictionary": true
+      "requiresGeneralDictionary": true,
+      "requiresDictionaryPublisherKey": true
     }
   }
 }

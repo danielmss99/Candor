@@ -7,7 +7,7 @@ type JobEventName = "jobs.changed";
 const invoke = (channel: string, params?: unknown) => ipcRenderer.invoke(channel, params) as Promise<JsonValue>;
 
 const api = Object.freeze({
-  version: 2 as const,
+  version: 3 as const,
   app: Object.freeze({
     getStatus: () => invoke("candor-app:getStatus"),
     getConnectionStatus: () => invoke("candor-shell:supervisorStatus"),
@@ -81,8 +81,6 @@ const api = Object.freeze({
     getStatus: (recordingId?: string) =>
       invoke("candor-core:terminology-status", recordingId ? { recordingId } : {}),
     importDictionary: () => invoke("candor-terminology:importFromFile"),
-    importDictionaryPackage: (sourceFileName: string, archiveBytes: Uint8Array) =>
-      invoke("candor-terminology:importPackageBytes", { sourceFileName, archiveBytes }),
     setEnabled: (dictionaryId: string, enabled: boolean) =>
       invoke("candor-core:terminology-set-enabled", { dictionaryId, enabled }),
     assignToMeeting: (recordingId: string, dictionaryId: string, enabled: boolean) =>
@@ -110,10 +108,17 @@ const api = Object.freeze({
         expectedSha256: input.expectedSha256,
         replace: true,
       }),
-    generateRecap: (recordingId: string, quality: "fast" | "best") =>
-      invoke("candor-ai:recap", { recordingId, quality }),
-    ask: (recordingId: string, question: string, quality: "fast" | "best") =>
-      invoke("candor-ai:ask", { recordingId, question, quality }),
+    generateRecap: (input: {
+      recordingId: string;
+      mode: "local-llm" | "heuristic-fallback";
+      fallbackPolicy: "allow-disclosed" | "require-local-llm";
+    }) => invoke("candor-ai:recap", input),
+    ask: (input: {
+      recordingId: string;
+      question: string;
+      mode: "local-llm" | "heuristic-fallback";
+      fallbackPolicy: "allow-disclosed" | "require-local-llm";
+    }) => invoke("candor-ai:ask", input),
     cancel: (jobId: string) => invoke("candor-jobs:cancel", { jobId }),
   }),
   exports: Object.freeze({

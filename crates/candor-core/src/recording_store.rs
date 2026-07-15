@@ -255,7 +255,20 @@ struct PrivacyEvent {
     sha256: Option<String>,
     format: Option<String>,
     bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ai_provenance: Option<AiPrivacyProvenance>,
     created_at_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AiPrivacyProvenance {
+    engine: String,
+    model_id: Option<String>,
+    fallback_used: bool,
+    fallback_reason: Option<String>,
+    prompt_version: String,
+    generated_at: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -1278,6 +1291,122 @@ impl RecordingStore {
                 sha256: sha256.map(|value| value.to_ascii_lowercase()),
                 format: None,
                 bytes: None,
+                ai_provenance: None,
+                created_at_ms: now_ms(),
+            },
+        )
+    }
+
+    pub fn record_ai_processing_fact(
+        &self,
+        recording_id: &str,
+        event_type: &str,
+        provenance: &Value,
+    ) -> Result<(), RecordingStoreError> {
+        if !matches!(event_type, "local-ai-recap" | "local-ai-ask") {
+            return Err(RecordingStoreError::new(
+                "PRIVACY_EVENT_TYPE_INVALID",
+                "AI privacy event type was not allowed",
+            ));
+        }
+        let object = provenance.as_object().ok_or_else(|| {
+            RecordingStoreError::new(
+                "PRIVACY_AI_PROVENANCE_INVALID",
+                "AI provenance was not a structured object",
+            )
+        })?;
+        let engine = object
+            .get("engine")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !matches!(engine, "local-llm" | "heuristic") {
+            return Err(RecordingStoreError::new(
+                "PRIVACY_AI_PROVENANCE_INVALID",
+                "AI provenance engine was invalid",
+            ));
+        }
+        let model_id = object.get("modelId").and_then(Value::as_str);
+        if engine == "local-llm" && model_id.is_none() {
+            return Err(RecordingStoreError::new(
+                "PRIVACY_AI_PROVENANCE_INVALID",
+                "local AI provenance did not identify its model",
+            ));
+        }
+        if model_id.is_some_and(|value| value.is_empty() || value.len() > 200) {
+            return Err(RecordingStoreError::new(
+                "PRIVACY_AI_PROVENANCE_INVALID",
+                "AI provenance model identifier was invalid",
+            ));
+        }
+        let fallback_used = object
+            .get("fallbackUsed")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "PRIVACY_AI_PROVENANCE_INVALID",
+                    "AI provenance omitted fallback status",
+                )
+            })?;
+        let fallback_reason = object.get("fallbackReason").and_then(Value::as_str);
+        if fallback_used != fallback_reason.is_some()
+            || fallback_reason.is_some_and(|value| {
+                !matches!(
+                    value,
+                    "llm-unavailable"
+                        | "runtime-failed"
+                        | "model-corrupt"
+                        | "resource-policy"
+                        | "user-requested"
+                )
+            })
+        {
+            return Err(RecordingStoreError::new(
+                "PRIVACY_AI_PROVENANCE_INVALID",
+                "AI provenance fallback reason was invalid",
+            ));
+        }
+        let prompt_version = object
+            .get("promptVersion")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 100)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "PRIVACY_AI_PROVENANCE_INVALID",
+                    "AI provenance prompt version was invalid",
+                )
+            })?;
+        let generated_at = object
+            .get("generatedAt")
+            .and_then(Value::as_str)
+            .filter(|value| {
+                value.len() <= 64
+                    && value.is_ascii()
+                    && value.contains('T')
+                    && (value.ends_with('Z') || value.contains('+'))
+            })
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "PRIVACY_AI_PROVENANCE_INVALID",
+                    "AI provenance generation time was invalid",
+                )
+            })?;
+        self.append_privacy_event(
+            recording_id,
+            PrivacyEvent {
+                event_type: event_type.to_string(),
+                engine: Some(engine.to_string()),
+                model_id: model_id.map(str::to_string),
+                sha256: None,
+                format: None,
+                bytes: None,
+                ai_provenance: Some(AiPrivacyProvenance {
+                    engine: engine.to_string(),
+                    model_id: model_id.map(str::to_string),
+                    fallback_used,
+                    fallback_reason: fallback_reason.map(str::to_string),
+                    prompt_version: prompt_version.to_string(),
+                    generated_at: generated_at.to_string(),
+                }),
                 created_at_ms: now_ms(),
             },
         )
@@ -1555,6 +1684,7 @@ impl RecordingStore {
                 sha256: None,
                 format: Some(format),
                 bytes,
+                ai_provenance: None,
                 created_at_ms: now_ms(),
             },
         )?;
@@ -4276,6 +4406,61 @@ mod tests {
         assert_eq!(receipt["exports"].as_array().expect("exports").len(), 1);
         assert_eq!(receipt["rawPathExposed"], false);
         assert_eq!(receipt["keyMaterialExposedToRenderer"], false);
+    }
+
+    #[test]
+    fn ai_privacy_provenance_is_typed_and_discards_source_content() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("AI provenance".to_string()),
+            })
+            .expect("start provenance recording");
+        let recording_id = recording_id(&started);
+        store
+            .record_ai_processing_fact(
+                &recording_id,
+                "local-ai-recap",
+                &json!({
+                    "engine": "local-llm",
+                    "modelId": "qwen3-4b-q4-k-m",
+                    "fallbackUsed": false,
+                    "fallbackReason": null,
+                    "promptVersion": "candor-grounded-v1",
+                    "generatedAt": "2026-07-14T12:00:00Z",
+                    "prompt": "sensitive prompt must not persist",
+                    "transcript": "sensitive transcript must not persist"
+                }),
+            )
+            .expect("record typed AI provenance");
+
+        let receipt = store
+            .privacy_receipt(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("privacy receipt");
+        let provenance = &receipt["processing"][0]["aiProvenance"];
+        assert_eq!(provenance["engine"], "local-llm");
+        assert_eq!(provenance["modelId"], "qwen3-4b-q4-k-m");
+        assert_eq!(provenance["fallbackUsed"], false);
+        assert_eq!(provenance["promptVersion"], "candor-grounded-v1");
+        let serialized = serde_json::to_string(&receipt).expect("serialize receipt");
+        assert!(!serialized.contains("sensitive prompt"));
+        assert!(!serialized.contains("sensitive transcript"));
+
+        let error = store
+            .record_ai_processing_fact(
+                &recording_id,
+                "local-ai-ask",
+                &json!({
+                    "engine": "local-llm",
+                    "fallbackUsed": false,
+                    "promptVersion": "candor-grounded-v1",
+                    "generatedAt": "2026-07-14T12:00:00Z"
+                }),
+            )
+            .expect_err("local LLM provenance requires a model id");
+        assert_eq!(error.code, "PRIVACY_AI_PROVENANCE_INVALID");
     }
 
     #[test]

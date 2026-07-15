@@ -84,10 +84,13 @@ describe("core protocol", () => {
         createdAt: "2026-07-14T05:00:00Z",
         updatedAt: "2026-07-14T05:00:01Z",
         stage: "rendering",
-        progress: { completed: 1, total: 2, unit: "stage" },
+        progress: { completed: 50, total: 100, unit: "percent" },
         error: null,
         cancelRequested: false,
+        retryCount: 0,
+        retryable: false,
         terminal: false,
+        sourceDataPreserved: true,
         rawPathExposed: false,
         keyMaterialExposedToRenderer: false,
       },
@@ -96,7 +99,7 @@ describe("core protocol", () => {
       protocolVersion: CORE_PROTOCOL_VERSION,
       event: "jobs.changed",
       payload: { jobId: "not-safe" },
-    }))).toThrow("invalid job event payload");
+    }))).toThrow("invalid background task");
     const validPayload = {
       jobId: "b".repeat(32),
       type: "transcription",
@@ -104,10 +107,13 @@ describe("core protocol", () => {
       createdAt: "2026-07-14T05:00:00Z",
       updatedAt: "2026-07-14T05:00:01Z",
       stage: "transcribing",
-      progress: { completed: 1, total: 3, unit: "stage" },
+      progress: { completed: 33, total: 100, unit: "percent" },
       error: null,
       cancelRequested: false,
+      retryCount: 0,
+      retryable: false,
       terminal: false,
+      sourceDataPreserved: true,
       rawPathExposed: false,
       keyMaterialExposedToRenderer: false,
     };
@@ -115,13 +121,13 @@ describe("core protocol", () => {
       { type: "almost-a-job" },
       { state: "almost-finished" },
       { state: "completed", terminal: false },
-      { progress: { completed: 4, total: 3, unit: "stage" } },
+      { progress: { completed: 4, total: 3, unit: "percent" } },
     ]) {
       expect(() => parseCoreEventLine(JSON.stringify({
         protocolVersion: CORE_PROTOCOL_VERSION,
         event: "jobs.changed",
         payload: { ...validPayload, ...mutation },
-      }))).toThrow("invalid job event payload");
+      }))).toThrow("invalid background task");
     }
   });
 

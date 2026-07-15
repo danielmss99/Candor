@@ -54,7 +54,6 @@ interface SettingsViewProps {
   onTranscriptionQualityChange: (tier: TranscriptionQualityTier, languagePreference?: TranscriptionLanguagePreference) => void;
   onRunTranscriptionBenchmark: (tier: "balanced" | "maximum") => void;
   onImportDictionary: () => void;
-  onImportDictionaryFile?: (file: File) => void;
   onSetDictionaryEnabled: (dictionaryId: string, enabled: boolean) => void;
   onAssignDictionary: (dictionaryId: string, enabled: boolean) => void;
   onReviewTerminology: () => void;
@@ -84,7 +83,7 @@ export function SettingsView(props: SettingsViewProps) {
     const checking = props.bundledAiStatus.state === "checking";
     const statusUnavailable = props.bundledAiStatus.state === "unavailable";
     const transcriptionLabel = checking && !speechReady ? "Checking..." : speechReady ? "Ready on this device" : "Not set up";
-    const summaryLabel = checking && !languageReady ? "Checking..." : languageReady ? "Enhanced local mode ready" : "Fast local mode available";
+    const summaryLabel = checking && !languageReady ? "Checking..." : languageReady ? "Ready on this device" : "Local fallback available";
     const benchmarkLabel = props.transcriptionBenchmarkActive
       ? "Checking this computer..."
       : props.transcriptionBenchmarkNeedsRetry
@@ -202,7 +201,6 @@ export function SettingsView(props: SettingsViewProps) {
           selectedRecordingId={props.selectedRecordingId}
           busy={Boolean(props.busy)}
           onImport={props.onImportDictionary}
-          onImportFile={props.onImportDictionaryFile ?? (() => undefined)}
           onSetEnabled={props.onSetDictionaryEnabled}
           onAssignToMeeting={props.onAssignDictionary}
           onReview={props.onReviewTerminology}
@@ -212,8 +210,8 @@ export function SettingsView(props: SettingsViewProps) {
           <div className="settings-row-title">
             <div><strong>Generation mode</strong><span id="local-ai-mode-status-settings">{props.aiModeStatus}</span></div>
             <div className="segmented-control" role="group" aria-label="Settings local AI mode">
-              <button type="button" aria-pressed={props.aiMode === "quality"} onClick={() => props.onAiModeChange("quality")}>Quality</button>
-              <button type="button" aria-pressed={props.aiMode === "fast"} onClick={() => props.onAiModeChange("fast")}>Fast</button>
+              <button type="button" aria-pressed={props.aiMode === "local-llm"} onClick={() => props.onAiModeChange("local-llm")}>Local AI</button>
+              <button type="button" aria-pressed={props.aiMode === "heuristic-fallback"} onClick={() => props.onAiModeChange("heuristic-fallback")}>Quick fallback</button>
             </div>
           </div>
         </section>

@@ -36,6 +36,7 @@ pub struct VerifiedBundledAsset {
     pub path: PathBuf,
     pub sha256: String,
     pub bytes: u64,
+    pub model_id: Option<String>,
     pub context_tokens: Option<u32>,
 }
 
@@ -175,7 +176,11 @@ impl BundledAiAssets {
         let snapshot = self.inspect();
         let speech = capability_status(&snapshot, "speech");
         let language = capability_status(&snapshot, "language");
-        let ready = speech["ready"] == true && language["ready"] == true;
+        let terminology = capability_status(&snapshot, "terminology");
+        let terminology_required = snapshot.release_ready;
+        let ready = speech["ready"] == true
+            && language["ready"] == true
+            && (!terminology_required || terminology["ready"] == true);
         let aggregate_state = if ready {
             "ready"
         } else if snapshot.state == "ready" {
@@ -183,6 +188,12 @@ impl BundledAiAssets {
                 .as_str()
                 .filter(|state| *state != "ready")
                 .or_else(|| language["state"].as_str().filter(|state| *state != "ready"))
+                .or_else(|| {
+                    terminology_required
+                        .then(|| terminology["state"].as_str())
+                        .flatten()
+                        .filter(|state| *state != "ready")
+                })
                 .unwrap_or("missing")
         } else {
             snapshot.state
@@ -205,6 +216,13 @@ impl BundledAiAssets {
                     .get("failureCode")
                     .filter(|value| !value.is_null())
                     .cloned()
+            })
+            .or_else(|| {
+                terminology_required
+                    .then(|| terminology.get("failureCode"))
+                    .flatten()
+                    .filter(|value| !value.is_null())
+                    .cloned()
             });
 
         json!({
@@ -225,6 +243,7 @@ impl BundledAiAssets {
             "failureCode": failure_code,
             "speech": speech,
             "language": language,
+            "terminology": terminology,
             "requiredDownload": false,
             "backgroundDownloads": false,
             "runtimePathAcceptedFromRenderer": false,
@@ -256,6 +275,12 @@ impl BundledAiAssets {
 
     pub fn general_dictionary(&self) -> Result<Option<VerifiedBundledAsset>, BundledAssetError> {
         self.verified_asset("terminology", "data", None)
+    }
+
+    pub fn dictionary_publisher_key(
+        &self,
+    ) -> Result<Option<VerifiedBundledAsset>, BundledAssetError> {
+        self.verified_asset("terminology", "public-key", None)
     }
 
     fn verified_asset(
@@ -444,6 +469,7 @@ impl BundledAiAssets {
             path,
             sha256: digest,
             bytes: record.bytes,
+            model_id: record.model_id.clone(),
             context_tokens: record.context_tokens,
         };
         InspectedAsset {
@@ -572,7 +598,7 @@ fn record_is_valid(record: &BundledAssetRecord) -> bool {
         )
         && matches!(
             record.kind.as_str(),
-            "runtime" | "library" | "model" | "data"
+            "runtime" | "library" | "model" | "data" | "public-key"
         )
         && !record.engine.trim().is_empty()
         && valid_relative_path(&record.relative_path)
@@ -811,7 +837,7 @@ mod tests {
                 "fixture": true,
                 "selectionStatus": "fixture-selected",
                 "repairPolicy": "signed-installer-only",
-                "assets": assets
+                "assets": assets.clone()
             }),
         );
         let bundle = BundledAiAssets::with_root(root.clone());
@@ -826,6 +852,77 @@ mod tests {
             .expect("speech result")
             .is_some());
         assert!(bundle.language_config().expect("language result").is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn release_bundle_requires_general_dictionary_and_publisher_key() {
+        let root = temp_root("release-terminology");
+        let mut assets = vec![
+            asset(
+                &root,
+                "speech-model",
+                "speech",
+                "model",
+                Some("large-v3-turbo"),
+            ),
+            asset(&root, "language-runtime", "language", "runtime", None),
+            asset(
+                &root,
+                "language-model",
+                "language",
+                "model",
+                Some("qwen3-4b-q4-k-m"),
+            ),
+        ];
+        write_manifest(
+            &root,
+            json!({
+                "manifestVersion": 1,
+                "bundleVersion": "release-1",
+                "releaseReady": true,
+                "fixture": false,
+                "selectionStatus": "release-selected",
+                "repairPolicy": "signed-installer-only",
+                "assets": assets.clone()
+            }),
+        );
+        let bundle = BundledAiAssets::with_root(root.clone());
+        let incomplete = bundle.status();
+        assert_eq!(incomplete["ready"], false);
+        assert_eq!(incomplete["state"], "missing");
+        assert_eq!(incomplete["terminology"]["ready"], false);
+
+        assets.push(asset(
+            &root,
+            "general-dictionary",
+            "terminology",
+            "data",
+            None,
+        ));
+        assets.push(asset(
+            &root,
+            "dictionary-publisher-key",
+            "terminology",
+            "public-key",
+            None,
+        ));
+        write_manifest(
+            &root,
+            json!({
+                "manifestVersion": 1,
+                "bundleVersion": "release-1",
+                "releaseReady": true,
+                "fixture": false,
+                "selectionStatus": "release-selected",
+                "repairPolicy": "signed-installer-only",
+                "assets": assets
+            }),
+        );
+        let complete = bundle.status();
+        assert_eq!(complete["ready"], true);
+        assert_eq!(complete["state"], "ready");
+        assert_eq!(complete["terminology"]["ready"], true);
         let _ = fs::remove_dir_all(root);
     }
 

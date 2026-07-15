@@ -1284,6 +1284,7 @@ mod tests {
             path: PathBuf::from("unused"),
             sha256: spec.expected_sha256.to_lowercase(),
             bytes: 1,
+            model_id: Some(spec.id.to_string()),
             context_tokens: None,
         };
         let mut mismatched = trusted.clone();

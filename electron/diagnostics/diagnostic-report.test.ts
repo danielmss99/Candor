@@ -31,6 +31,22 @@ describe("safe diagnostic report", () => {
       captureStatus: { active: false, implementation: "cpal", participantName: "Private Person" },
       privacyAudit: { externalCallsAttempted: 0, notes: "private notes" },
       updateStatus: { policy: "manual-check-only", backgroundChecks: false, attemptedChecks: 0 },
+      backgroundJobs: {
+        activeCount: 0,
+        jobs: [{
+          type: "recap",
+          state: "completed",
+          provenance: {
+            engine: "heuristic",
+            modelId: null,
+            fallbackUsed: true,
+            fallbackReason: "llm-unavailable",
+            promptVersion: "candor-heuristic-v1",
+            generatedAt: "2026-07-14T05:00:00Z",
+          },
+          result: { summary: "private summary" },
+        }],
+      },
     });
     const text = diagnosticReportBytes(report).toString("utf8");
 
@@ -39,8 +55,45 @@ describe("safe diagnostic report", () => {
     expect(text).not.toContain("private transcript");
     expect(text).not.toContain("private notes");
     expect(text).not.toContain("Private Person");
+    expect(text).not.toContain("private summary");
+    expect(text).toContain("llm-unavailable");
     expect(text).not.toContain("C:\\\\Users");
     expect(text).not.toContain('"pid"');
     expect(diagnosticReportSha256(Buffer.from(text))).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("drops malformed provenance timestamps from metadata-only diagnostics", () => {
+    const report = buildDiagnosticReport({
+      appVersion: "0.4.0",
+      platform: "win32",
+      arch: "x64",
+      packaged: true,
+      supervisor: {},
+      coreStatus: {},
+      coreVersion: {},
+      vaultStatus: {},
+      recordingStatus: {},
+      captureStatus: {},
+      privacyAudit: {},
+      updateStatus: {},
+      backgroundJobs: {
+        activeCount: 0,
+        jobs: [{
+          type: "recap",
+          state: "completed",
+          provenance: {
+            engine: "local-llm",
+            modelId: "qwen3-4b",
+            fallbackUsed: false,
+            fallbackReason: null,
+            promptVersion: "candor-grounded-v1",
+            generatedAt: `${"2".repeat(100)}-01-01T00:00:00Z`,
+          },
+        }],
+      },
+    }) as Record<string, unknown>;
+
+    const tasks = report.backgroundTasks as { recent: Array<{ generatedAt: string | null }> };
+    expect(tasks.recent[0]?.generatedAt).toBeNull();
   });
 });

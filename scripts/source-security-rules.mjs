@@ -3,12 +3,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 
 export const requiredSourcePaths = [
+  ".gitignore",
   "electron/main.ts",
   "electron/preload.cts",
   "electron/core/json.ts",
   "electron/core/core-client.ts",
   "electron/core/core-errors.ts",
   "electron/core/capture-recovery-store.ts",
+  "electron/core/background-task.ts",
   "electron/core/operation-registry.ts",
   "electron/core/protocol.ts",
   "electron/core/renderer-boundary.ts",
@@ -24,6 +26,7 @@ export const requiredSourcePaths = [
   "electron/ipc/licensing-ipc.ts",
   "electron/ipc/models-ipc.ts",
   "electron/ipc/register-ipc.ts",
+  "electron/ipc/terminology-ipc.ts",
   "electron/security/input-limits.ts",
   "electron/security/validate-core-input.ts",
   "electron/security/validate-private-core-input.ts",
@@ -41,7 +44,13 @@ export const requiredSourcePaths = [
   "v3/renderer/src/candor-api.d.ts",
   "crates/candor-core/Cargo.toml",
   "crates/candor-core/src/main.rs",
+  "crates/candor-core/src/dictionary_staging.rs",
+  "crates/candor-core/src/job_manager.rs",
   "crates/candor-core/src/v2_importer.rs",
+  "scripts/spec3-verify-ai-bundle.mjs",
+  "scripts/spec6-acquire-release-model.mjs",
+  "scripts/spec6-release-publication-gate.mjs",
+  "third_party/model-lock.json",
   "electron-builder.v3.yml",
   "electron-builder.source-interface.yml",
   "package.json",
@@ -228,6 +237,12 @@ export function evaluateSourceSecurity(input) {
     "job IPC validates the sender before calling the core",
   );
   includes(
+    "electron-main:jobs-event-validation",
+    "electron/ipc/jobs-ipc.ts",
+    "parseBackgroundTask(coreEvent.payload)",
+    "background-task events are validated before renderer delivery",
+  );
+  includes(
     "proof-clients:versioned-core-envelope",
     "scripts/core-rpc-envelope.mjs",
     "createVersionedCoreRequest",
@@ -255,7 +270,7 @@ export function evaluateSourceSecurity(input) {
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [
     ["context-bridge", 'contextBridge.exposeInMainWorld("candor"'],
-    ["api-version", "version: 2 as const"],
+    ["api-version", "version: 3 as const"],
     ["app-frozen", "app: Object.freeze("],
     ["capture-frozen", "capture: Object.freeze("],
     ["meetings-frozen", "meetings: Object.freeze("],
@@ -280,6 +295,12 @@ export function evaluateSourceSecurity(input) {
     "preload exposes no generic IPC, filesystem, process, or path operation",
   );
   excludes("preload:no-selected-path", preload, /selectedPath|destinationPath/, "renderer never receives selected paths");
+  excludes(
+    "preload:no-dictionary-archive-bytes",
+    preload,
+    /importDictionaryPackage|importPackageBytes|archiveBytes/,
+    "dictionary package bytes never enter the renderer preload surface",
+  );
   excludes("preload:no-generic-core-channel", preload, /candor-core:call|\bcallCore\b|\ballowedMethods\b/, "preload uses fixed product channels only");
   excludes("preload:no-infrastructure-groups", preload, /\b(?:core|shell|license):\s*Object\.freeze/, "preload exposes product domains instead of infrastructure groups");
   add(
@@ -309,9 +330,9 @@ export function evaluateSourceSecurity(input) {
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";
   includes(
-    "renderer-api:v2",
+    "renderer-api:v3",
     rendererDeclaration,
-    "interface CandorApiV2",
+    "interface CandorApiV3",
     "renderer declaration matches the domain preload API version",
   );
   includes(
@@ -325,6 +346,20 @@ export function evaluateSourceSecurity(input) {
     rendererDeclaration,
     /\b(?:invoke|readFile|writeFile|runProcess|openPath)\s*\(/,
     "renderer declaration exposes no generic capabilities",
+  );
+  excludes(
+    "renderer-api:no-dictionary-archive-bytes",
+    rendererDeclaration,
+    /importDictionaryPackage|archiveBytes/,
+    "renderer declarations cannot accept dictionary archive bytes",
+  );
+
+  const terminologyIpc = "electron/ipc/terminology-ipc.ts";
+  includes(
+    "dictionary:native-file-picker",
+    terminologyIpc,
+    'ipcMain.handle("candor-terminology:importFromFile"',
+    "dictionary packages enter through a sender-validated native file picker",
   );
 
   const rendererHtml = "v3/renderer/index.html";
@@ -358,11 +393,19 @@ export function evaluateSourceSecurity(input) {
     "spec3-verify-ai-bundle.mjs --require-ready --profile complete",
     "Complete packaging is gated by the exact ready manifest profile",
   );
+  includes(
+    "package:publication-self-test",
+    packageJson,
+    "release:publication-policy:self-test",
+    "ordinary builds exercise the release publication policy self-test",
+  );
 
   const builder = "electron-builder.v3.yml";
   includes("builder:asar", builder, "asar: true", "application source is archived");
   includes("builder:publish-disabled", builder, "publish: null", "automatic publishing is disabled");
   includes("builder:core-resource", builder, "build/core-bin", "staged Rust core is packaged as a resource");
+  includes("builder:offline-nsis", builder, "- nsis", "Windows releases use the offline NSIS target");
+  excludes("builder:no-web-installer", builder, /nsis-web/i, "web installers remain prohibited");
 
   const sourceInterfaceBuilder = "electron-builder.source-interface.yml";
   includes(
@@ -392,6 +435,99 @@ export function evaluateSourceSecurity(input) {
     coreCargo,
     /^\s*(?:reqwest|hyper|ureq|curl|isahc|surf)\s*=/m,
     "Rust core has no HTTP client dependency",
+  );
+
+  const backgroundTask = "electron/core/background-task.ts";
+  includes(
+    "tasks:typed-states",
+    backgroundTask,
+    '"paused",',
+    "background tasks include the complete typed lifecycle",
+  );
+  includes(
+    "tasks:canonical-boundary",
+    backgroundTask,
+    "parseBackgroundTaskCollection",
+    "background task collections are canonicalized before renderer use",
+  );
+
+  const dictionaryStaging = "crates/candor-core/src/dictionary_staging.rs";
+  includes(
+    "dictionary:encrypted-staging",
+    dictionaryStaging,
+    "ChaCha20Poly1305",
+    "dictionary archives use a separate authenticated encrypted staging area",
+  );
+  includes(
+    "dictionary:staging-containment",
+    dictionaryStaging,
+    "canonical_path.starts_with(&canonical_root)",
+    "staged dictionary packages are rechecked for path containment",
+  );
+  includes(
+    "dictionary:staging-symlink-rejection",
+    dictionaryStaging,
+    "metadata.file_type().is_symlink()",
+    "staged dictionary packages reject symbolic links",
+  );
+  const jobManager = "crates/candor-core/src/job_manager.rs";
+  includes(
+    "dictionary:persist-token-not-archive",
+    jobManager,
+    "staging_token: String",
+    "new dictionary job descriptors persist a random staging token",
+  );
+  excludes(
+    "dictionary:no-new-base64-descriptor",
+    jobManager,
+    /\barchive_base64\s*:\s*String\b/,
+    "new job descriptors never persist a full Base64 dictionary archive",
+  );
+
+  const bundleVerifier = "scripts/spec3-verify-ai-bundle.mjs";
+  includes(
+    "bundle:publisher-key-required",
+    bundleVerifier,
+    '["terminology", "public-key"]',
+    "strict AI release verification requires the Candor dictionary publisher key",
+  );
+  includes(
+    "bundle:publisher-key-rotation-generation",
+    bundleVerifier,
+    "rotationGeneration",
+    "dictionary publisher trust anchors carry an enforced rotation generation",
+  );
+  const modelLock = "third_party/model-lock.json";
+  includes(
+    "bundle:profile-key-policy",
+    modelLock,
+    '"requiresDictionaryPublisherKey": true',
+    "every shipping model profile requires the dictionary publisher key",
+  );
+  const publicationGate = "scripts/spec6-release-publication-gate.mjs";
+  includes(
+    "release:github-asset-limit",
+    publicationGate,
+    "2 * 1024 * 1024 * 1024",
+    "release publication blocks assets above GitHub's 2 GiB limit",
+  );
+  includes(
+    "release:model-weights-ignored",
+    ".gitignore",
+    "build/ai-bundle/",
+    "acquired model weights remain outside Git",
+  );
+  includes(
+    "release:publisher-private-keys-ignored",
+    ".gitignore",
+    "third_party/private-keys/",
+    "publisher private-key material remains outside Git",
+  );
+  includes(
+    "release:no-web-installer-policy",
+    publicationGate,
+    'windowsTargets.includes("nsis-web")',
+    "release publication explicitly rejects NSIS web installers",
   );
 
   const importer = "crates/candor-core/src/v2_importer.rs";
@@ -452,8 +588,11 @@ export function runSourceSecuritySelfTest(input) {
   const networkPolicy = sourceText(input, "electron/security/network-policy.ts");
   const preload = sourceText(input, "electron/preload.cts");
   const coreIpc = sourceText(input, "electron/ipc/core-ipc.ts");
+  const jobsIpc = sourceText(input, "electron/ipc/jobs-ipc.ts");
   const importer = sourceText(input, "crates/candor-core/src/v2_importer.rs");
   const proofScript = sourceText(input, "scripts/m0-packaged-smoke.mjs");
+  const dictionaryStaging = sourceText(input, "crates/candor-core/src/dictionary_staging.rs");
+  const publicationGate = sourceText(input, "scripts/spec6-release-publication-gate.mjs");
   const testSecretName = ["api", "Key"].join("");
   const testSecret = ["sk", "prod", "1234567890abcdefgh"].join("-");
   const cases = [
@@ -486,6 +625,15 @@ export function runSourceSecuritySelfTest(input) {
       expectedFailure: "preload:no-generic-capabilities",
     },
     {
+      name: "renderer-dictionary-archive-bytes",
+      input: withSource(
+        input,
+        "electron/preload.cts",
+        `${preload}\nconst unsafeDictionary = { importDictionaryPackage: (_archiveBytes) => null };\n`,
+      ),
+      expectedFailure: "preload:no-dictionary-archive-bytes",
+    },
+    {
       name: "generic-core-channel",
       input: withSource(
         input,
@@ -493,6 +641,15 @@ export function runSourceSecuritySelfTest(input) {
         `${coreIpc}\nipcMain.handle("candor-core:call", () => null);\n`,
       ),
       expectedFailure: "electron-main:no-generic-core-channel",
+    },
+    {
+      name: "unvalidated-background-task-event",
+      input: withSource(
+        input,
+        "electron/ipc/jobs-ipc.ts",
+        jobsIpc.replace("parseBackgroundTask(coreEvent.payload)", "coreEvent.payload"),
+      ),
+      expectedFailure: "electron-main:jobs-event-validation",
     },
     {
       name: "hardcoded-secret",
@@ -511,6 +668,24 @@ export function runSourceSecuritySelfTest(input) {
         importer.replaceAll('"originalsUntouched": true', '"originalsUntouched": false'),
       ),
       expectedFailure: "importer:originals-untouched",
+    },
+    {
+      name: "dictionary-staging-loses-encryption",
+      input: withSource(
+        input,
+        "crates/candor-core/src/dictionary_staging.rs",
+        dictionaryStaging.replaceAll("ChaCha20Poly1305", "PlaintextDictionaryArchive"),
+      ),
+      expectedFailure: "dictionary:encrypted-staging",
+    },
+    {
+      name: "release-size-limit-removed",
+      input: withSource(
+        input,
+        "scripts/spec6-release-publication-gate.mjs",
+        publicationGate.replace("2 * 1024 * 1024 * 1024", "Number.MAX_SAFE_INTEGER"),
+      ),
+      expectedFailure: "release:github-asset-limit",
     },
   ];
 

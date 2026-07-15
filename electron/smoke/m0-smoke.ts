@@ -726,7 +726,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
     const rendererBridge = (await windowRef.webContents.executeJavaScript(
       `
         (async () => {
-          if (window.candor?.version !== 2) {
+          if (window.candor?.version !== 3) {
             throw new Error("Candor preload bridge is not present.");
           }
           const [status, capabilities, auditSnapshot, updateStatus, importStatus, consentStatus, aiStatus, instructAssetsStatus, instructStatus, schedulerStatus, transcriptionStatus, vaultStatusBeforeOpen, licenseStatus, licensePortalInfo, diagnosticPreview] = await Promise.all([

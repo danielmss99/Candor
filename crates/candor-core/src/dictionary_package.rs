@@ -100,6 +100,68 @@ pub struct VerifiedDictionaryPackage {
     pub entries: Vec<DictionaryPackageTerm>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DictionaryTrustAnchor {
+    pub key_id: String,
+    pub public_key: [u8; 32],
+    pub rotation_generation: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DictionaryTrustAnchorDocument {
+    schema_version: u32,
+    key_id: String,
+    public_key_base64: String,
+    rotation_generation: u32,
+}
+
+impl DictionaryTrustAnchor {
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, DictionaryPackageError> {
+        if bytes.is_empty() || bytes.len() > MAX_SIGNATURE_BYTES as usize {
+            return Err(DictionaryPackageError::new(
+                "DICTIONARY_TRUST_ANCHOR_INVALID",
+                "the bundled dictionary publisher key is invalid",
+            ));
+        }
+        let document: DictionaryTrustAnchorDocument =
+            parse_json(bytes, "DICTIONARY_TRUST_ANCHOR_INVALID")?;
+        if document.schema_version != 2
+            || !safe_identifier(&document.key_id, 128)
+            || document.rotation_generation == 0
+        {
+            return Err(DictionaryPackageError::new(
+                "DICTIONARY_TRUST_ANCHOR_INVALID",
+                "the bundled dictionary publisher key is invalid",
+            ));
+        }
+        let public_key = STANDARD.decode(&document.public_key_base64).map_err(|_| {
+            DictionaryPackageError::new(
+                "DICTIONARY_TRUST_ANCHOR_INVALID",
+                "the bundled dictionary publisher key is invalid",
+            )
+        })?;
+        let public_key: [u8; 32] = public_key.try_into().map_err(|_| {
+            DictionaryPackageError::new(
+                "DICTIONARY_TRUST_ANCHOR_INVALID",
+                "the bundled dictionary publisher key is invalid",
+            )
+        })?;
+        VerifyingKey::from_bytes(&public_key).map_err(|_| {
+            DictionaryPackageError::new(
+                "DICTIONARY_TRUST_ANCHOR_INVALID",
+                "the bundled dictionary publisher key is invalid",
+            )
+        })?;
+        Ok(Self {
+            key_id: document.key_id,
+            public_key,
+            rotation_generation: document.rotation_generation,
+        })
+    }
+}
+
+#[cfg(test)]
 pub fn verify_candordict_base64(
     archive_base64: &str,
 ) -> Result<VerifiedDictionaryPackage, DictionaryPackageError> {
@@ -122,7 +184,21 @@ pub fn verify_candordict_base64(
         ));
     }
 
-    let files = read_archive(&bytes)?;
+    verify_candordict_bytes_with_trust(&bytes, None)
+}
+
+pub fn verify_candordict_bytes_with_trust(
+    bytes: &[u8],
+    trust_anchor: Option<&DictionaryTrustAnchor>,
+) -> Result<VerifiedDictionaryPackage, DictionaryPackageError> {
+    if bytes.is_empty() || bytes.len() > MAX_ARCHIVE_BYTES {
+        return Err(DictionaryPackageError::new(
+            "DICTIONARY_ARCHIVE_TOO_LARGE",
+            "the dictionary package exceeds the compressed size limit",
+        ));
+    }
+
+    let files = read_archive(bytes)?;
     let manifest_bytes = required_file(&files, "manifest.json")?;
     let terms_bytes = required_file(&files, "terms.jsonl")?;
     let license_bytes = required_file(&files, "LICENSE.txt")?;
@@ -146,7 +222,8 @@ pub fn verify_candordict_base64(
 
     let signature: DictionarySignature =
         parse_json(signature_bytes, "DICTIONARY_SIGNATURE_INVALID")?;
-    verify_signature(&signature, manifest_bytes, terms_bytes, license_bytes)?;
+    let signing_public_key =
+        verify_signature(&signature, manifest_bytes, terms_bytes, license_bytes)?;
     let entries = parse_terms(terms_bytes)?;
     if entries.len() != manifest.term_count {
         return Err(DictionaryPackageError::new(
@@ -155,6 +232,9 @@ pub fn verify_candordict_base64(
         ));
     }
 
+    let candor_trusted = trust_anchor.is_some_and(|anchor| {
+        anchor.key_id == signature.key_id && anchor.public_key == signing_public_key
+    });
     Ok(VerifiedDictionaryPackage {
         package_id: manifest.id,
         name: manifest.name,
@@ -163,7 +243,11 @@ pub fn verify_candordict_base64(
         language: manifest.language,
         minimum_candor_version: manifest.minimum_candor_version,
         key_id: signature.key_id,
-        trust_label: "community-unverified".to_string(),
+        trust_label: if candor_trusted {
+            "verified-candor".to_string()
+        } else {
+            "community-unverified".to_string()
+        },
         entries,
     })
 }
@@ -315,6 +399,12 @@ fn validate_manifest(manifest: &DictionaryManifest) -> Result<(), DictionaryPack
             "the dictionary package manifest is not supported",
         ));
     }
+    Version::parse(&manifest.version).map_err(|_| {
+        DictionaryPackageError::new(
+            "DICTIONARY_MANIFEST_INVALID",
+            "the dictionary package version is invalid",
+        )
+    })?;
     let minimum = Version::parse(&manifest.minimum_candor_version).map_err(|_| {
         DictionaryPackageError::new(
             "DICTIONARY_MANIFEST_INVALID",
@@ -336,7 +426,7 @@ fn verify_signature(
     manifest: &[u8],
     terms: &[u8],
     license: &[u8],
-) -> Result<(), DictionaryPackageError> {
+) -> Result<[u8; 32], DictionaryPackageError> {
     if signature.schema_version != 1 || !safe_identifier(&signature.key_id, 128) {
         return Err(DictionaryPackageError::new(
             "DICTIONARY_SIGNATURE_INVALID",
@@ -387,7 +477,8 @@ fn verify_signature(
                 "DICTIONARY_SIGNATURE_REJECTED",
                 "the dictionary package signature could not be verified",
             )
-        })
+        })?;
+    Ok(public_key)
 }
 
 fn parse_terms(bytes: &[u8]) -> Result<Vec<DictionaryPackageTerm>, DictionaryPackageError> {
@@ -526,6 +617,50 @@ mod tests {
         assert_eq!(verified.entries.len(), 1);
         assert_eq!(verified.entries[0].canonical_term, "adalimumab");
         assert_eq!(verified.trust_label, "community-unverified");
+    }
+
+    #[test]
+    fn grants_candor_trust_only_for_the_exact_bundled_key() {
+        let terms = br#"{"canonicalTerm":"adalimumab"}
+"#;
+        let encoded = package_with(terms, None, CompressionMethod::Stored, "0.4.0");
+        let bytes = STANDARD.decode(encoded).expect("decode package");
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let anchor = DictionaryTrustAnchor {
+            key_id: "test-key-1".to_string(),
+            public_key: *signing_key.verifying_key().as_bytes(),
+            rotation_generation: 1,
+        };
+        let verified = verify_candordict_bytes_with_trust(&bytes, Some(&anchor))
+            .expect("trusted package verifies");
+        assert_eq!(verified.trust_label, "verified-candor");
+
+        let unknown_anchor = DictionaryTrustAnchor {
+            key_id: anchor.key_id.clone(),
+            public_key: *SigningKey::from_bytes(&[8_u8; 32])
+                .verifying_key()
+                .as_bytes(),
+            rotation_generation: 1,
+        };
+        let community = verify_candordict_bytes_with_trust(&bytes, Some(&unknown_anchor))
+            .expect("community package still verifies cryptographically");
+        assert_eq!(community.trust_label, "community-unverified");
+    }
+
+    #[test]
+    fn parses_a_data_only_publisher_key_document() {
+        let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
+        let bytes = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "keyId": "candor-dictionaries-2026",
+            "publicKeyBase64": STANDARD.encode(signing_key.verifying_key().as_bytes()),
+            "rotationGeneration": 1
+        }))
+        .expect("publisher key document");
+        let anchor = DictionaryTrustAnchor::from_json_bytes(&bytes).expect("valid anchor");
+        assert_eq!(anchor.key_id, "candor-dictionaries-2026");
+        assert_eq!(anchor.public_key, *signing_key.verifying_key().as_bytes());
+        assert_eq!(anchor.rotation_generation, 1);
     }
 
     #[test]

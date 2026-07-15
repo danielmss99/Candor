@@ -11,7 +11,7 @@ async function resultValue(dependencies: IpcDependencies, method: string) {
 }
 
 async function createReport(dependencies: IpcDependencies) {
-  const [coreStatus, coreVersion, vaultStatus, recordingStatus, captureStatus, privacyAudit, updateStatus] = await Promise.all([
+  const [coreStatus, coreVersion, vaultStatus, recordingStatus, captureStatus, privacyAudit, updateStatus, backgroundJobs] = await Promise.all([
     resultValue(dependencies, "core.status"),
     resultValue(dependencies, "core.version"),
     resultValue(dependencies, "vault.status"),
@@ -19,6 +19,7 @@ async function createReport(dependencies: IpcDependencies) {
     resultValue(dependencies, "capture.status"),
     resultValue(dependencies, "privacy.auditSnapshot"),
     resultValue(dependencies, "updates.status"),
+    resultValue(dependencies, "jobs.list"),
   ]);
   return buildDiagnosticReport({
     appVersion: app.getVersion(),
@@ -33,6 +34,7 @@ async function createReport(dependencies: IpcDependencies) {
     captureStatus,
     privacyAudit,
     updateStatus,
+    backgroundJobs,
   });
 }
 

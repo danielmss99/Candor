@@ -1,6 +1,6 @@
-import { useState, type DragEvent } from "react";
 import type {
   TerminologyCorrectionProposal,
+  TerminologyDictionaryRow,
   TerminologyStatus,
 } from "../../core/contracts";
 
@@ -10,7 +10,6 @@ interface TerminologySettingsProps {
   selectedRecordingId: string;
   busy: boolean;
   onImport: () => void;
-  onImportFile: (file: File) => void;
   onSetEnabled: (dictionaryId: string, enabled: boolean) => void;
   onAssignToMeeting: (dictionaryId: string, enabled: boolean) => void;
   onReview: () => void;
@@ -18,26 +17,10 @@ interface TerminologySettingsProps {
 }
 
 export function TerminologySettings(props: TerminologySettingsProps) {
-  const [dragging, setDragging] = useState(false);
-
-  const handleDrop = (event: DragEvent<HTMLElement>) => {
-    event.preventDefault();
-    setDragging(false);
-    const file = event.dataTransfer.files.item(0);
-    if (file) props.onImportFile(file);
-  };
-
   return (
     <section
       className="settings-group terminology-settings"
       aria-labelledby="terminology-heading"
-      data-dragging={dragging || undefined}
-      onDragEnter={(event) => { event.preventDefault(); setDragging(true); }}
-      onDragOver={(event) => event.preventDefault()}
-      onDragLeave={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false);
-      }}
-      onDrop={handleDrop}
     >
       <div className="settings-group-heading">
         <div>
@@ -47,10 +30,6 @@ export function TerminologySettings(props: TerminologySettingsProps) {
         <button type="button" onClick={props.onImport} disabled={props.busy}>
           Import dictionary
         </button>
-      </div>
-      <div className="dictionary-drop-zone" aria-label="Drop a signed Candor dictionary package">
-        <strong>Signed dictionary packages</strong>
-        <span>Drop a .candordict file here</span>
       </div>
       {props.status.state === "corrupt" ? (
         <div className="inline-alert" role="alert">
@@ -67,7 +46,9 @@ export function TerminologySettings(props: TerminologySettingsProps) {
             <article key={dictionary.dictionaryId}>
               <div>
                 <strong>{dictionary.name}</strong>
-                <small>{dictionary.entryCount.toLocaleString()} terms · {dictionaryTrustLabel(dictionary.trustLabel)}</small>
+                <small>
+                  {dictionary.entryCount.toLocaleString()} terms · {dictionaryScopeLabel(dictionary.scope)} · {dictionaryTrustLabel(dictionary.trustLabel)}
+                </small>
               </div>
               <label>
                 <input
@@ -128,8 +109,16 @@ export function TerminologySettings(props: TerminologySettingsProps) {
 }
 
 function dictionaryTrustLabel(trustLabel: string | null): string {
-  if (trustLabel === "verified-candor-bundle") return "Verified by Candor";
-  if (trustLabel === "verified-organization") return "Verified organization pack";
-  if (trustLabel === "community-unverified") return "Community pack - unverified";
-  return "Local dictionary";
+  if (trustLabel === "verified-candor") return "Verified by Candor";
+  if (trustLabel === null) return "Local dictionary";
+  return "Community pack - unverified";
+}
+
+function dictionaryScopeLabel(scope: TerminologyDictionaryRow["scope"]): string {
+  if (scope === "meeting") return "Meeting";
+  if (scope === "organization") return "Organization";
+  if (scope === "specialist") return "Specialist";
+  if (scope === "general") return "General";
+  if (scope === "project") return "Project";
+  return "Personal";
 }

@@ -161,16 +161,32 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
   if (method === "export.start") return validateRendererCoreParamsAlias("export.create", input);
   if (method === "ai.recap.start" || method === "ai.ask.start") {
     const value = objectInput(method, input);
-    exactFields(method, value, method === "ai.ask.start" ? ["recordingId", "question", "quality"] : ["recordingId", "quality"]);
+    exactFields(
+      method,
+      value,
+      method === "ai.ask.start"
+        ? ["recordingId", "question", "mode", "fallbackPolicy"]
+        : ["recordingId", "mode", "fallbackPolicy"],
+    );
     const result: Record<string, JsonValue> = {
       recordingId: requiredRecordingId(method, value.recordingId),
     };
     if (method === "ai.ask.start") {
       result.question = requiredString(method, value.question, "question", INPUT_LIMITS.question);
     }
-    const quality = value.quality ?? "fast";
-    if (quality !== "fast" && quality !== "best") fail(method, "quality must be fast or best");
-    result.quality = quality;
+    const mode = value.mode ?? "local-llm";
+    if (mode !== "local-llm" && mode !== "heuristic-fallback") {
+      fail(method, "mode must be local-llm or heuristic-fallback");
+    }
+    const fallbackPolicy = value.fallbackPolicy ?? "allow-disclosed";
+    if (fallbackPolicy !== "allow-disclosed" && fallbackPolicy !== "require-local-llm") {
+      fail(method, "fallbackPolicy must be allow-disclosed or require-local-llm");
+    }
+    if (mode === "heuristic-fallback" && fallbackPolicy === "require-local-llm") {
+      fail(method, "heuristic-fallback cannot require the local LLM");
+    }
+    result.mode = mode;
+    result.fallbackPolicy = fallbackPolicy;
     return result;
   }
   if (method === "models.importStart") {

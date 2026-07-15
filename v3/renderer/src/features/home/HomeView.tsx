@@ -71,7 +71,7 @@ export function HomeView({
         <h2>Storage and privacy</h2>
         <div className="status-grid">
           <div className={`status-panel ${storageLevel === "ok" ? "verified" : storageLevel}`}><strong>Encrypted local storage</strong><p>{recordings.length} meetings stored</p><span>Protected on this device | {availableLabel}</span></div>
-          <div className={`status-panel ${instructReady ? "verified" : ""}`}><VerificationText value={instructReady ? "Local AI ready" : "Fast local analysis ready"} /><p>{metric(verifiedModelCount, "0")} verified speech models</p><span>{aiModeStatus}</span></div>
+          <div className={`status-panel ${instructReady ? "verified" : ""}`}><VerificationText value={instructReady ? "Local AI ready" : "Local fallback available"} /><p>{metric(verifiedModelCount, "0")} verified speech models</p><span>{aiModeStatus}</span></div>
         </div>
       </section>
     </section>

@@ -13,6 +13,12 @@ dist-v3
 dist-ssr
 release-v3*/
 build/core-bin/
+build/ai-bundle/
+third_party/private-keys/
+*.gguf
+*.safetensors
+ggml-*.bin
+*dictionary-publisher-private-key*
 *.local
 .env
 crates/*/target

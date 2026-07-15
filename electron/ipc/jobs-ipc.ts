@@ -1,5 +1,6 @@
 import { ipcMain } from "electron";
 import { CoreClientError } from "../core/core-errors.js";
+import { parseBackgroundTask, parseBackgroundTaskCollection } from "../core/background-task.js";
 import { objectValue, type JsonValue } from "../core/json.js";
 import { rendererSafeCoreError, sanitizeCoreResultForRenderer } from "../core/renderer-boundary.js";
 import { validateIpcSender } from "../security/validate-sender.js";
@@ -9,7 +10,12 @@ async function callCore(dependencies: IpcDependencies, method: string, params: J
   try {
     const response = await dependencies.core.call(method, params);
     if (!response.ok) throw rendererSafeCoreError(response.error?.code);
-    return sanitizeCoreResultForRenderer(method, response.result ?? null);
+    const result = sanitizeCoreResultForRenderer(method, response.result ?? null);
+    if (method === "jobs.get") return parseBackgroundTask(result) as unknown as JsonValue;
+    if (method === "jobs.list" || method === "jobs.activeSummary") {
+      return parseBackgroundTaskCollection(result);
+    }
+    return result;
   } catch (error) {
     if (error instanceof CoreClientError) throw rendererSafeCoreError(error.code);
     if (error instanceof Error && error.message.startsWith("CANDOR_CORE_ERROR:")) throw error;
@@ -61,6 +67,11 @@ export function registerJobsIpc(dependencies: IpcDependencies): void {
   dependencies.core.subscribe((coreEvent) => {
     const window = dependencies.getMainWindow();
     if (!window || window.isDestroyed()) return;
-    window.webContents.send("candor-events:jobs-changed", coreEvent.payload);
+    try {
+      const task = parseBackgroundTask(coreEvent.payload);
+      window.webContents.send("candor-events:jobs-changed", task);
+    } catch {
+      // A malformed core event is rejected before it can become trusted renderer state.
+    }
   });
 }

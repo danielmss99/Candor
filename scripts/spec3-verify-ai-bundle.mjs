@@ -36,7 +36,7 @@ const MAX_ASSETS = 64;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const SAFE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/i;
 const CAPABILITIES = new Set(["speech", "language", "terminology"]);
-const KINDS = new Set(["runtime", "library", "model", "data"]);
+const KINDS = new Set(["runtime", "library", "model", "data", "public-key"]);
 const MANIFEST_FIELDS = new Set([
   "manifestVersion",
   "bundleVersion",
@@ -105,6 +105,42 @@ function rejectUnknownFields(value, allowed, label, failures) {
   }
 }
 
+function verifyPublisherKeyFile(target, label, failures) {
+  let document;
+  try {
+    document = JSON.parse(readFileSync(target, "utf8"));
+  } catch {
+    failures.push(`${label} is not a valid publisher-key document`);
+    return;
+  }
+  if (!document || typeof document !== "object" || Array.isArray(document)) {
+    failures.push(`${label} must be a publisher-key object`);
+    return;
+  }
+  rejectUnknownFields(
+    document,
+    new Set(["schemaVersion", "keyId", "publicKeyBase64", "rotationGeneration"]),
+    label,
+    failures,
+  );
+  if (
+    document.schemaVersion !== 2
+    || !SAFE_ID_PATTERN.test(document.keyId ?? "")
+    || !Number.isSafeInteger(document.rotationGeneration)
+    || document.rotationGeneration < 1
+  ) {
+    failures.push(`${label} publisher-key metadata is invalid`);
+  }
+  if (typeof document.publicKeyBase64 !== "string" || !/^[A-Za-z0-9+/]+={0,2}$/.test(document.publicKeyBase64)) {
+    failures.push(`${label}.publicKeyBase64 is invalid`);
+    return;
+  }
+  const publicKey = Buffer.from(document.publicKeyBase64, "base64");
+  if (publicKey.length !== 32 || publicKey.toString("base64") !== document.publicKeyBase64) {
+    failures.push(`${label}.publicKeyBase64 must encode exactly one 32-byte Ed25519 public key`);
+  }
+}
+
 function relevantToHost(asset, platform, arch) {
   const platformAliases = platform === "win32"
     ? new Set(["win32", "windows"])
@@ -144,6 +180,12 @@ function verifySelectedAssetBindings(manifest, modelLock, runtimeLock, platform,
     if (speechCandidate && String(speechAsset.sha256).toLowerCase() !== speechCandidate.expectedSha256.toLowerCase()) {
       failures.push(`selected speech model ${selectedSpeechId} does not match its trusted digest`);
     }
+    if (speechCandidate && speechAsset.bytes !== speechCandidate.bytes) {
+      failures.push(`selected speech model ${selectedSpeechId} does not match its trusted byte count`);
+    }
+    if (speechCandidate && speechAsset.licenseExpression !== speechCandidate.licenseExpression) {
+      failures.push(`selected speech model ${selectedSpeechId} does not match its trusted license`);
+    }
   }
 
   const selectedLanguageId = modelLock?.language?.selectedModel;
@@ -165,6 +207,12 @@ function verifySelectedAssetBindings(manifest, modelLock, runtimeLock, platform,
     }
     if (languageCandidate && String(languageAsset.sha256).toLowerCase() !== languageCandidate.expectedSha256.toLowerCase()) {
       failures.push(`selected language model ${selectedLanguageId} does not match its trusted digest`);
+    }
+    if (languageCandidate && languageAsset.bytes !== languageCandidate.bytes) {
+      failures.push(`selected language model ${selectedLanguageId} does not match its trusted byte count`);
+    }
+    if (languageCandidate && languageAsset.licenseExpression !== languageCandidate.licenseExpression) {
+      failures.push(`selected language model ${selectedLanguageId} does not match its trusted license`);
     }
   }
 
@@ -319,6 +367,13 @@ export function verifyBundle(root, options = {}) {
     } else if (asset.modelCard !== undefined || asset.modelId !== undefined) {
       failures.push(`${label} can declare modelId and modelCard only for model assets`);
     }
+    if (asset.kind === "public-key" && (
+      asset.capability !== "terminology"
+      || asset.engine !== "ed25519"
+      || asset.bytes > 64 * 1024
+    )) {
+      failures.push(`${label} publisher key must be a bounded terminology Ed25519 public key`);
+    }
     if (relevantToHost(asset, platform, arch)) {
       const selector = asset.kind === "model"
         ? `${asset.capability}:${asset.kind}:${asset.modelId ?? ""}`
@@ -360,6 +415,9 @@ export function verifyBundle(root, options = {}) {
     if (!digest.toLowerCase().match(SHA256_PATTERN) || digest.toLowerCase() !== String(asset.sha256).toLowerCase()) {
       failures.push(`${label} SHA-256 does not match`);
     }
+    if (asset.kind === "public-key") {
+      verifyPublisherKeyFile(target, label, failures);
+    }
 
     for (const [field, relativePath] of [["licenseFile", asset.licenseFile], ["modelCard", asset.modelCard]]) {
       if (!relativePath) continue;
@@ -398,6 +456,7 @@ export function verifyBundle(root, options = {}) {
       ["language", "runtime"],
       ["language", "model"],
       ["terminology", "data"],
+      ["terminology", "public-key"],
     ];
     for (const [capability, kind] of requiredPairs) {
       if (!hostAssets.some((asset) => asset.capability === capability && asset.kind === kind && asset.required === true)) {
@@ -504,6 +563,7 @@ function verifyDecisionLocks(manifest, requireReady) {
     if (languageRuntime?.selectionStatus !== "release-selected") {
       failures.push("release bundle requires a tested language runtime in runtime-lock.json");
     }
+    failures.push(...verifyReleaseCandidateEvidence(modelLock, runtimeLock, manifest?.packageProfile));
     const profile = modelLock.packageProfiles?.[manifest?.packageProfile];
     if (!profile || !Array.isArray(profile.speechModelIds)) {
       failures.push("release bundle package profile is absent from model-lock.json");
@@ -521,6 +581,12 @@ function verifyDecisionLocks(manifest, requireReady) {
       if (!hostAssets.some((asset) => asset.capability === "terminology" && asset.kind === "data" && asset.required === true)) {
         failures.push(`release profile ${manifest.packageProfile} requires a signed general dictionary`);
       }
+      if (profile.requiresDictionaryPublisherKey !== true) {
+        failures.push(`release profile ${manifest.packageProfile} must require the Candor dictionary publisher key`);
+      }
+      if (!hostAssets.some((asset) => asset.capability === "terminology" && asset.kind === "public-key" && asset.required === true)) {
+        failures.push(`release profile ${manifest.packageProfile} requires the Candor dictionary publisher key`);
+      }
     }
     const selectedLanguageCandidate = modelLock.language?.candidates?.find(
       (candidate) => candidate.id === modelLock.language?.selectedModel,
@@ -535,6 +601,67 @@ function verifyDecisionLocks(manifest, requireReady) {
       process.platform,
       process.arch,
     ));
+  }
+  return failures;
+}
+
+function verifyReleaseCandidateEvidence(modelLock, runtimeLock, packageProfile) {
+  const failures = [];
+  const profile = modelLock.packageProfiles?.[packageProfile];
+  const speechCandidates = modelLock.speech?.candidates ?? [];
+
+  for (const modelId of profile?.speechModelIds ?? []) {
+    const candidate = speechCandidates.find((entry) => entry.id === modelId);
+    if (!candidate) {
+      failures.push(`release profile ${packageProfile} has no locked speech candidate ${modelId}`);
+      continue;
+    }
+    if (candidate.benchmarkStatus !== "passed") {
+      failures.push(`speech model ${modelId} has not passed Candor benchmarks`);
+    }
+    if (candidate.redistributionReview !== "approved") {
+      failures.push(`speech model ${modelId} lacks approved redistribution review`);
+    }
+    if (candidate.provenanceStatus !== "official-source-pinned") {
+      failures.push(`speech model ${modelId} lacks pinned official provenance`);
+    }
+    if (!Number.isSafeInteger(candidate.bytes) || candidate.bytes <= 0) {
+      failures.push(`speech model ${modelId} lacks an exact positive byte count`);
+    }
+    if (!candidate.expectedSha256?.match(SHA256_PATTERN)) {
+      failures.push(`speech model ${modelId} lacks an exact artifact digest`);
+    }
+    if (typeof candidate.licenseExpression !== "string" || !candidate.licenseExpression.trim()) {
+      failures.push(`speech model ${modelId} lacks a pinned license expression`);
+    }
+  }
+
+  const selectedLanguageId = modelLock.language?.selectedModel;
+  const languageCandidate = modelLock.language?.candidates?.find((entry) => entry.id === selectedLanguageId);
+  if (languageCandidate) {
+    if (languageCandidate.benchmarkStatus !== "passed") {
+      failures.push(`language model ${selectedLanguageId} has not passed Candor benchmarks`);
+    }
+    if (languageCandidate.redistributionReview !== "approved") {
+      failures.push(`language model ${selectedLanguageId} lacks approved redistribution review`);
+    }
+    if (!new Set(["official-artifact-pinned", "reproducible-conversion-verified"]).has(languageCandidate.artifactStatus)) {
+      failures.push(`language model ${selectedLanguageId} lacks approved artifact provenance`);
+    }
+    if (!Number.isSafeInteger(languageCandidate.bytes) || languageCandidate.bytes <= 0) {
+      failures.push(`language model ${selectedLanguageId} lacks an exact positive byte count`);
+    }
+    if (typeof languageCandidate.licenseExpression !== "string" || !languageCandidate.licenseExpression.trim()) {
+      failures.push(`language model ${selectedLanguageId} lacks a pinned license expression`);
+    }
+  }
+
+  const languageRuntime = runtimeLock.runtimes?.find((entry) => entry.id === "language-runtime");
+  if (languageRuntime?.compatibilityStatus !== "passed") {
+    failures.push("language runtime has not passed Candor compatibility checks");
+  }
+  if (languageRuntime?.redistributionReview !== "approved") {
+    failures.push("language runtime lacks approved redistribution review");
   }
   return failures;
 }
@@ -564,9 +691,17 @@ function makeFixture(root) {
     ["language-runtime", "language", "runtime", `assets/language-runtime.${process.platform === "win32" ? "exe" : "bin"}`, null],
     ["language-model", "language", "model", "assets/language-model.gguf", "language-default"],
     ["general-dictionary", "terminology", "data", "assets/general.candordict", null],
+    ["dictionary-publisher-key", "terminology", "public-key", "assets/dictionary-publisher-key.json", null],
   ];
   const assets = definitions.map(([id, capability, kind, relativePath, modelId]) => {
-    const content = Buffer.from(`fixture:${id}`);
+    const content = kind === "public-key"
+      ? Buffer.from(JSON.stringify({
+        schemaVersion: 2,
+        keyId: "fixture-dictionary-key",
+        publicKeyBase64: Buffer.alloc(32, 7).toString("base64"),
+        rotationGeneration: 1,
+      }))
+      : Buffer.from(`fixture:${id}`);
     writeFileSync(path.join(root, relativePath), content);
     if (kind === "runtime" && process.platform !== "win32") {
       chmodSync(path.join(root, relativePath), 0o755);
@@ -579,7 +714,9 @@ function makeFixture(root) {
         ? "whisper.cpp"
         : capability === "language"
           ? "llama.cpp"
-          : "candor-dictionary-v1",
+          : kind === "public-key"
+            ? "ed25519"
+            : "candor-dictionary-v1",
       relativePath,
       sha256: createHash("sha256").update(content).digest("hex"),
       bytes: content.length,
@@ -618,15 +755,38 @@ function runSelfTest() {
     const fixtureModelLock = {
       speech: {
         selectedModel: "speech-default",
-        candidates: [{ id: "speech-default", expectedSha256: manifest.assets[0].sha256 }],
+        candidates: [{
+          id: "speech-default",
+          expectedSha256: manifest.assets[0].sha256,
+          bytes: manifest.assets[0].bytes,
+          licenseExpression: "MIT",
+          benchmarkStatus: "passed",
+          redistributionReview: "approved",
+          provenanceStatus: "official-source-pinned",
+        }],
       },
       language: {
         selectedModel: "language-default",
-        candidates: [{ id: "language-default", expectedSha256: manifest.assets[2].sha256 }],
+        candidates: [{
+          id: "language-default",
+          expectedSha256: manifest.assets[2].sha256,
+          bytes: manifest.assets[2].bytes,
+          licenseExpression: "MIT",
+          artifactStatus: "official-artifact-pinned",
+          benchmarkStatus: "passed",
+          redistributionReview: "approved",
+        }],
       },
+      packageProfiles: { complete: { speechModelIds: ["speech-default"] } },
     };
     const fixtureRuntimeLock = {
-      runtimes: [{ id: "language-runtime", commit: "fixture", licenseExpression: "MIT" }],
+      runtimes: [{
+        id: "language-runtime",
+        commit: "fixture",
+        licenseExpression: "MIT",
+        compatibilityStatus: "passed",
+        redistributionReview: "approved",
+      }],
     };
     const bound = verifySelectedAssetBindings(
       manifest,
@@ -647,6 +807,17 @@ function runSelfTest() {
       throw new Error("selected model digest mismatch was accepted");
     }
     fixtureModelLock.speech.candidates[0].expectedSha256 = manifest.assets[0].sha256;
+
+    const evidenceFailures = verifyReleaseCandidateEvidence(fixtureModelLock, fixtureRuntimeLock, "complete");
+    if (evidenceFailures.length > 0) {
+      throw new Error(`valid release candidate evidence failed: ${evidenceFailures.join(", ")}`);
+    }
+    fixtureModelLock.language.candidates[0].benchmarkStatus = "pending";
+    if (!verifyReleaseCandidateEvidence(fixtureModelLock, fixtureRuntimeLock, "complete")
+      .some((failure) => failure.includes("has not passed Candor benchmarks"))) {
+      throw new Error("an unbenchmarked language model was accepted");
+    }
+    fixtureModelLock.language.candidates[0].benchmarkStatus = "passed";
 
     const profileFailures = verifySpeechProfileMembership(
       { packageProfile: "complete" },

@@ -3,12 +3,10 @@ import { lstat, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { objectValue } from "../core/json.js";
 import { INPUT_LIMITS } from "../security/input-limits.js";
-import {
-  MAX_DICTIONARY_PACKAGE_BYTES,
-  validateDictionaryPackageInput,
-} from "../security/validate-dictionary-package-input.js";
 import { validateIpcSender } from "../security/validate-sender.js";
 import type { IpcDependencies } from "./ipc-types.js";
+
+const MAX_DICTIONARY_PACKAGE_BYTES = 2_500_000;
 
 const SUPPORTED_FORMATS = new Map([
   [".txt", "txt"],
@@ -38,16 +36,6 @@ async function queueDictionaryPackage(
 }
 
 export function registerTerminologyIpc(dependencies: IpcDependencies): void {
-  ipcMain.handle("candor-terminology:importPackageBytes", async (event, input: unknown) => {
-    validateIpcSender(event, dependencies.getMainWindow);
-    const validated = validateDictionaryPackageInput(input);
-    return queueDictionaryPackage(
-      dependencies,
-      validated.sourceFileName,
-      validated.bytes,
-    );
-  });
-
   ipcMain.handle("candor-terminology:importFromFile", async (event) => {
     validateIpcSender(event, dependencies.getMainWindow);
     const options: Electron.OpenDialogOptions = {

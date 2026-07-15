@@ -16,7 +16,7 @@ export function RecordGlyph({ active = false }: { active?: boolean }) {
 
 export function RecordAction({ active, captureLabel, disabled, variant, onClick }: RecordActionProps) {
   const title = active ? "Stop recording" : "Start recording";
-  const detail = active ? "Flush and save local chunks" : captureLabel;
+  const detail = active ? "Save local audio" : captureLabel;
   const variantClassName = variant === "sidebar" ? "sidebar-record-action" : "dashboard-record-action";
 
   return (

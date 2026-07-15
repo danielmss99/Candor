@@ -3,6 +3,7 @@ mod bundled_ai_assets;
 mod capture_service;
 mod consent_store;
 mod dictionary_package;
+mod dictionary_staging;
 mod grounded_output;
 mod job_manager;
 mod local_ai_service;
@@ -36,7 +37,8 @@ use capture_service::{
     CaptureError, CaptureManager, CaptureStartMicAndSystemParams, CaptureStartParams,
 };
 use consent_store::{ConsentAcknowledgeParams, ConsentError, ConsentStore};
-use job_manager::{JobFailure, JobManager, JobManagerError};
+use dictionary_staging::DictionaryStaging;
+use job_manager::{AiExecutionMode, AiFallbackPolicy, JobFailure, JobManager, JobManagerError};
 use local_ai_service::{
     LocalAiError, LocalAiProofParams, LocalAiService, LocalAskParams, LocalRecapParams,
 };
@@ -124,20 +126,14 @@ struct JobIdParams {
     job_id: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum AiJobQuality {
-    #[default]
-    Fast,
-    Best,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AiRecapJobParams {
     recording_id: String,
     #[serde(default)]
-    quality: AiJobQuality,
+    mode: AiExecutionMode,
+    #[serde(default)]
+    fallback_policy: AiFallbackPolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -146,7 +142,9 @@ struct AiAskJobParams {
     recording_id: String,
     question: String,
     #[serde(default)]
-    quality: AiJobQuality,
+    mode: AiExecutionMode,
+    #[serde(default)]
+    fallback_policy: AiFallbackPolicy,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,6 +208,7 @@ struct CoreState {
     bundled_ai_assets: BundledAiAssets,
     capture_manager: CaptureManager,
     consent_store: ConsentStore,
+    dictionary_staging: DictionaryStaging,
     local_ai_service: LocalAiService,
     local_instruct_assets: LocalInstructAssetManager,
     local_instruct_model: LocalInstructModelService,
@@ -245,18 +244,29 @@ impl CoreState {
             recording_store.settings_root_for_core().join("terminology"),
             recording_store.key_root_for_core(),
         );
-        let job_manager = JobManager::with_roots(
+        let dictionary_staging = DictionaryStaging::with_roots(
+            recording_store
+                .settings_root_for_core()
+                .join("dictionary-staging"),
+            recording_store.key_root_for_core(),
+        );
+        let job_manager = JobManager::with_roots_and_staging(
             PROTOCOL_VERSION,
             recording_store
                 .settings_root_for_core()
                 .join("background-jobs"),
             recording_store.key_root_for_core(),
+            &dictionary_staging,
         );
+        maintain_dictionary_staging(&job_manager, &dictionary_staging);
+        #[cfg(not(test))]
+        start_dictionary_staging_maintenance(job_manager.clone(), dictionary_staging.clone());
         let state = Self {
             started_at_ms,
             bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
             consent_store: ConsentStore::from_env(),
+            dictionary_staging,
             local_ai_service: LocalAiService,
             local_instruct_assets: LocalInstructAssetManager::with_root(
                 instruct_assets_root.clone(),
@@ -310,19 +320,28 @@ impl CoreState {
             recording_store.settings_root_for_core().join("terminology"),
             recording_store.key_root_for_core(),
         );
+        let dictionary_staging = DictionaryStaging::with_test_roots(
+            recording_store
+                .settings_root_for_core()
+                .join("dictionary-staging"),
+            recording_store.key_root_for_core(),
+        );
         let bundled_ai_assets = BundledAiAssets::disabled();
-        let job_manager = JobManager::with_test_roots(
+        let job_manager = JobManager::with_test_roots_and_staging(
             PROTOCOL_VERSION,
             recording_store
                 .settings_root_for_core()
                 .join("background-jobs"),
             recording_store.key_root_for_core(),
+            &dictionary_staging,
         );
+        maintain_dictionary_staging(&job_manager, &dictionary_staging);
         let state = Self {
             started_at_ms,
             bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
             consent_store: ConsentStore::with_root(consent_root),
+            dictionary_staging,
             local_ai_service: LocalAiService,
             local_instruct_assets: LocalInstructAssetManager::with_root(
                 instruct_assets_root.clone(),
@@ -359,10 +378,29 @@ impl CoreState {
             self.bundled_ai_assets.clone(),
             self.model_manager.clone(),
             self.recording_store.clone(),
+            self.dictionary_staging.clone(),
             self.terminology_service.clone(),
             self.transcription_service.clone(),
         )
     }
+}
+
+fn maintain_dictionary_staging(job_manager: &JobManager, staging: &DictionaryStaging) {
+    if let Ok(tokens) = job_manager.apply_retention() {
+        for token in tokens {
+            let _ = staging.delete(&token);
+        }
+    }
+    let references = job_manager.dictionary_staging_references();
+    let _ = staging.cleanup_orphans(&references);
+}
+
+#[cfg(not(test))]
+fn start_dictionary_staging_maintenance(job_manager: JobManager, staging: DictionaryStaging) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_secs(60 * 60));
+        maintain_dictionary_staging(&job_manager, &staging);
+    });
 }
 
 fn startup_recovery_status(result: Result<Value, RecordingStoreError>) -> StartupRecoveryStatus {
@@ -462,6 +500,15 @@ fn network_capability_matrix() -> Value {
 }
 
 fn make_error(id: Value, code: &'static str, message: impl Into<String>) -> RpcResponse {
+    make_error_with_retryability(id, code, message, false)
+}
+
+fn make_error_with_retryability(
+    id: Value,
+    code: &'static str,
+    message: impl Into<String>,
+    retryable: bool,
+) -> RpcResponse {
     RpcResponse {
         id,
         request_id: None,
@@ -471,7 +518,7 @@ fn make_error(id: Value, code: &'static str, message: impl Into<String>) -> RpcR
         error: Some(Box::new(RpcError {
             code,
             message: message.into(),
-            retryable: false,
+            retryable,
         })),
     }
 }
@@ -983,7 +1030,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state
                 .job_manager
                 .submit("speech-model-verification", false, move |context| {
-                    context.progress("verifying", 0, Some(1), Some("model"));
+                    context.progress("verifying", 0, Some(1), Some("stage"));
                     model_manager
                         .verify_local(&store, params)
                         .map_err(|error| JobFailure::new(error.code, error.message, true))
@@ -1041,7 +1088,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state
                 .job_manager
                 .submit("speech-model-import", false, move |context| {
-                    context.progress("verifying-and-installing", 0, Some(1), Some("model"));
+                    context.progress("verifying-and-installing", 0, Some(1), Some("stage"));
                     model_manager
                         .import_finish(&store, params)
                         .map_err(|error| JobFailure::new(error.code, error.message, true))
@@ -1101,7 +1148,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state
                 .job_manager
                 .submit("local-ai-component-import", false, move |context| {
-                    context.progress("verifying-and-importing", 0, Some(1), Some("asset"));
+                    context.progress("verifying-and-importing", 0, Some(1), Some("stage"));
                     LocalInstructAssetManager::with_root(root)
                         .import_from_path(params)
                         .map_err(|error| JobFailure::new(error.code, error.message, true))
@@ -1247,10 +1294,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            let descriptor = descriptor_for_recap(
-                params.recording_id,
-                matches!(params.quality, AiJobQuality::Best),
-            );
+            let descriptor =
+                descriptor_for_recap(params.recording_id, params.mode, params.fallback_policy);
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
@@ -1265,7 +1310,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             let descriptor = descriptor_for_ask(
                 params.recording_id,
                 params.question,
-                matches!(params.quality, AiJobQuality::Best),
+                params.mode,
+                params.fallback_policy,
             );
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
@@ -1296,12 +1342,36 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            let descriptor =
-                descriptor_for_dictionary_import(params.source_file_name, params.archive_base64);
+            let staged = match state
+                .dictionary_staging
+                .stage_base64(&params.source_file_name, &params.archive_base64)
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    return make_error_with_retryability(
+                        id,
+                        error.code,
+                        error.message,
+                        error.retryable,
+                    )
+                }
+            };
+            let staging_token = staged.staging_token.clone();
+            let descriptor = descriptor_for_dictionary_import(staged);
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
-                Err(error) => return make_job_error(id, error),
+                Err(error) => {
+                    if let Err(cleanup_error) = state.dictionary_staging.delete(&staging_token) {
+                        return make_error_with_retryability(
+                            id,
+                            cleanup_error.code,
+                            cleanup_error.message,
+                            cleanup_error.retryable,
+                        );
+                    }
+                    return make_job_error(id, error);
+                }
             }
         }
         "terminology.setEnabled" => {
@@ -1729,12 +1799,45 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             match state.job_manager.cancel(&params.job_id) {
-                Ok(value) => value,
+                Ok(value) => {
+                    let staging_token = match state
+                        .job_manager
+                        .dictionary_staging_reference(&params.job_id)
+                    {
+                        Ok(token) => token,
+                        Err(error) => return make_job_error(id, error),
+                    };
+                    if let Some(token) = staging_token {
+                        if let Err(error) = state.dictionary_staging.delete(&token) {
+                            return make_error_with_retryability(
+                                id,
+                                error.code,
+                                error.message,
+                                error.retryable,
+                            );
+                        }
+                        state.job_manager.discard_dictionary_staging(&params.job_id);
+                    }
+                    value
+                }
                 Err(error) => return make_job_error(id, error),
             }
         }
         "jobs.cancelAll" => match state.job_manager.cancel_all() {
-            Ok(value) => value,
+            Ok(value) => {
+                for token in state.job_manager.dictionary_staging_references() {
+                    if let Err(error) = state.dictionary_staging.delete(&token) {
+                        return make_error_with_retryability(
+                            id,
+                            error.code,
+                            error.message,
+                            error.retryable,
+                        );
+                    }
+                }
+                state.job_manager.discard_all_dictionary_staging();
+                value
+            }
             Err(error) => return make_job_error(id, error),
         },
         "jobs.pauseAll" => match state.job_manager.pause_all_for_shutdown() {
@@ -1757,8 +1860,25 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            let staging_token = match state
+                .job_manager
+                .terminal_dictionary_staging_reference(&params.job_id)
+            {
+                Ok(token) => token,
+                Err(error) => return make_job_error(id, error),
+            };
+            if let Some(token) = staging_token {
+                if let Err(error) = state.dictionary_staging.delete(&token) {
+                    return make_error_with_retryability(
+                        id,
+                        error.code,
+                        error.message,
+                        error.retryable,
+                    );
+                }
+            }
             match state.job_manager.acknowledge(&params.job_id) {
-                Ok(value) => value,
+                Ok(acknowledgement) => acknowledgement.response,
                 Err(error) => return make_job_error(id, error),
             }
         }
@@ -2427,7 +2547,7 @@ mod tests {
         assert_eq!(completed["result"]["format"], "markdown");
         assert_eq!(state.job_manager.list().unwrap()["jobCount"], 1);
         assert_eq!(
-            state.job_manager.acknowledge(&job_id).unwrap()["acknowledged"],
+            state.job_manager.acknowledge(&job_id).unwrap().response["acknowledged"],
             true
         );
     }
@@ -2909,6 +3029,59 @@ mod tests {
             false
         );
         let _ = fs::remove_dir_all(bundle_root);
+    }
+
+    #[test]
+    fn cancelling_dictionary_import_deletes_encrypted_staging_before_rpc_success() {
+        let mut state = core_state();
+        let staged = state
+            .dictionary_staging
+            .stage_bytes("cancelled.candordict", b"encrypted dictionary fixture")
+            .expect("stage dictionary fixture");
+        let accepted = state
+            .job_manager
+            .submit_descriptor(
+                job_manager::JobDescriptor::DictionaryImport {
+                    staging_token: staged.staging_token.clone(),
+                    expected_sha256: staged.expected_sha256.clone(),
+                    original_display_name: staged.original_display_name.clone(),
+                    bytes: staged.bytes,
+                    legacy_source_file_name: None,
+                    legacy_archive_base64: None,
+                },
+                std::sync::Arc::new(|_, context| {
+                    while !context.cancelled() {
+                        std::thread::sleep(std::time::Duration::from_millis(1));
+                    }
+                    Ok(json!({ "rawPathExposed": false }))
+                }),
+            )
+            .expect("submit dictionary import");
+        let job_id = accepted["jobId"].as_str().expect("job id").to_string();
+
+        let response = handle_request(
+            request_with(json!(33), "jobs.cancel", json!({ "jobId": job_id.clone() })),
+            &mut state,
+        );
+
+        assert!(response.ok);
+        assert_eq!(
+            state
+                .job_manager
+                .dictionary_staging_reference(&job_id)
+                .expect("staging reference"),
+            None
+        );
+        let error = state
+            .dictionary_staging
+            .read_verified(
+                &staged.staging_token,
+                &staged.expected_sha256,
+                staged.bytes,
+                &staged.original_display_name,
+            )
+            .expect_err("cancelled staging must be deleted");
+        assert_eq!(error.code, "DICTIONARY_STAGING_MISSING");
     }
 
     #[test]

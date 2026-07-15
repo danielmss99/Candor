@@ -88,21 +88,100 @@ function transcriptionQualityResultSchema(method: string): JsonRuntimeSchema {
   });
 }
 
-function strictLocalAiResultSchema(method: string, mode: "ask" | "recap"): JsonRuntimeSchema {
+const aiFallbackReasons = new Set([
+  "llm-unavailable",
+  "runtime-failed",
+  "model-corrupt",
+  "resource-policy",
+  "user-requested",
+]);
+
+function canonicalAiProvenance(value: JsonValue, method: string): JsonValue {
+  const provenance = objectResult(value, method, "provenance");
+  const engine = provenance.engine;
+  const modelId = provenance.modelId;
+  const fallbackUsed = provenance.fallbackUsed;
+  const fallbackReason = provenance.fallbackReason;
+  const promptVersion = provenance.promptVersion;
+  const generatedAt = provenance.generatedAt;
+  if (
+    (engine !== "local-llm" && engine !== "heuristic")
+    || (modelId !== null && (typeof modelId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(modelId)))
+    || typeof fallbackUsed !== "boolean"
+    || (fallbackReason !== null && (typeof fallbackReason !== "string" || !aiFallbackReasons.has(fallbackReason)))
+    || typeof promptVersion !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(promptVersion)
+    || typeof generatedAt !== "string"
+    || generatedAt.length > 64
+    || Number.isNaN(Date.parse(generatedAt))
+    || (engine === "local-llm" && (typeof modelId !== "string" || fallbackUsed || fallbackReason !== null))
+    || (engine === "heuristic" && (!fallbackUsed || typeof fallbackReason !== "string"))
+  ) {
+    return invalidResult(method, "provenance");
+  }
+  return {
+    engine,
+    modelId,
+    fallbackUsed,
+    fallbackReason,
+    promptVersion,
+    generatedAt,
+  };
+}
+
+function strictLocalAiResultSchema(
+  method: string,
+  mode: "ask" | "recap",
+  requireProvenance = false,
+): JsonRuntimeSchema {
   const outer = jsonObjectResultSchema(method, {
     recordingId: "string",
     engine: "string",
     citations: "array",
     localOnly: "boolean",
+    cloudAi: "boolean",
     rawPathExposed: "boolean",
+    keyMaterialExposedToRenderer: "boolean",
   });
   return createRuntimeSchema(`${method}.result`, (value) => {
     const parsed = outer.parse(value);
     const result = objectResult(parsed, method, "result");
-    if (result.localOnly !== true || result.rawPathExposed !== false) {
+    if (
+      result.localOnly !== true
+      || result.cloudAi !== false
+      || result.rawPathExposed !== false
+      || result.keyMaterialExposedToRenderer !== false
+      || (mode === "recap" && (
+        typeof result.summary !== "string"
+        || typeof result.recapMarkdown !== "string"
+        || !Array.isArray(result.decisions)
+        || !Array.isArray(result.actions)
+        || !Array.isArray(result.risks)
+        || !Array.isArray(result.questions)
+      ))
+      || (mode === "ask" && (
+        typeof result.question !== "string"
+        || typeof result.answer !== "string"
+        || typeof result.answerFound !== "boolean"
+      ))
+      || (result.engine !== "llama-cpp-local" && result.engine !== "heuristic-local")
+    ) {
       return invalidResult(method, "local custody");
     }
-    if (result.engine !== "llama-cpp-local") return parsed;
+    let provenance: JsonValue | undefined;
+    if (requireProvenance || result.provenance !== undefined) {
+      provenance = canonicalAiProvenance(result.provenance, method);
+      const provenanceObject = provenance as Record<string, JsonValue>;
+      if (
+        (result.engine === "llama-cpp-local" && provenanceObject.engine !== "local-llm")
+        || (result.engine === "heuristic-local" && provenanceObject.engine !== "heuristic")
+      ) {
+        return invalidResult(method, "provenance engine");
+      }
+    }
+    if (result.engine !== "llama-cpp-local") {
+      return provenance === undefined ? parsed : { ...result, provenance };
+    }
     if (
       result.strictOutputValidated !== true
       || result.outputSchemaVersion !== 1
@@ -177,7 +256,7 @@ function strictLocalAiResultSchema(method: string, mode: "ask" | "recap"): JsonR
     } else if (typeof result.summary !== "string" || typeof result.recapMarkdown !== "string") {
       return invalidResult(method, "recap content");
     }
-    return parsed;
+    return provenance === undefined ? parsed : { ...result, provenance };
   });
 }
 
@@ -211,7 +290,7 @@ const rendererConfigs: readonly OperationConfig[] = [
   { method: "transcription.status", channel: "candor-core:transcription-status", result: { implemented: "boolean", active: "boolean", localOnly: "boolean", engine: "string", rawPathExposed: "boolean" } },
   { method: "transcription.quality.status", channel: "candor-core:transcription-quality-status", result: { implemented: "boolean", state: "string", tier: "string", languagePreference: "string", recommendedTier: "string", benchmarkState: "string", estimatedMinutesPerHour: "integer-or-null", estimatedCompletionAvailable: "boolean", hardware: "object", tiers: "array", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" }, resultSchema: transcriptionQualityResultSchema("transcription.quality.status") },
   { method: "transcription.quality.update", channel: "candor-core:transcription-quality-update", result: { implemented: "boolean", state: "string", tier: "string", languagePreference: "string", recommendedTier: "string", benchmarkState: "string", estimatedMinutesPerHour: "integer-or-null", estimatedCompletionAvailable: "boolean", hardware: "object", tiers: "array", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" }, resultSchema: transcriptionQualityResultSchema("transcription.quality.update") },
-  { method: "terminology.status", channel: "candor-core:terminology-status", result: { implemented: "boolean", state: "string", dictionaryCount: "integer", entryCount: "integer", dictionaries: "array", encryptedAtRest: "boolean", promptWritingRequired: "boolean", automaticCorrection: "boolean", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" } },
+  { method: "terminology.status", channel: "candor-core:terminology-status", result: { implemented: "boolean", state: "string", dictionaryCount: "integer", entryCount: "integer", dictionaries: "array", encryptedAtRest: "boolean", projectScopeAvailable: "boolean", promptWritingRequired: "boolean", automaticCorrection: "boolean", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" } },
   { method: "terminology.setEnabled", channel: "candor-core:terminology-set-enabled", result: { dictionaryId: "string", enabled: "boolean", savedLocally: "boolean", rawPathExposed: "boolean" } },
   { method: "terminology.assign", channel: "candor-core:terminology-assign", result: { recordingId: "string", dictionaryId: "string", assigned: "boolean", savedLocally: "boolean", rawPathExposed: "boolean" } },
   { method: "terminology.proposals", channel: "candor-core:terminology-proposals", result: { recordingId: "string", proposalCount: "integer", proposals: "array", automaticCorrection: "boolean", approvalRequired: "boolean", rawPathExposed: "boolean" } },
@@ -317,24 +396,211 @@ export function getCoreOperation(method: string): CoreOperationDefinition {
   return operation;
 }
 
-const completedJobResultSchemas: ReadonlyMap<string, JsonRuntimeSchema> = new Map([
-  ["transcription", jsonObjectResultSchema("transcription job", { recordingId: "string", engine: "string", segmentCount: "integer", rawPathExposed: "boolean" })],
-  ["recap", strictLocalAiResultSchema("recap job", "recap")],
-  ["ask", strictLocalAiResultSchema("ask job", "ask")],
-  ["export", jsonObjectResultSchema("export job", { format: "string", fileName: "string", bytes: "integer", rawPathExposed: "boolean" })],
-  ["legacy-import", jsonObjectResultSchema("legacy import job", { importedCount: "integer", skippedCount: "integer", originalsUntouched: "boolean", rawPathExposed: "boolean" })],
-  ["speech-model-verification", jsonObjectResultSchema("speech model verification job", { modelId: "string", installed: "boolean", verified: "boolean", rawPathExposed: "boolean" })],
-  ["speech-model-import", jsonObjectResultSchema("speech model import job", { importId: "string", modelId: "string", imported: "boolean", rejected: "boolean", rawPathExposed: "boolean" })],
-  ["local-ai-component-import", jsonObjectResultSchema("local AI component import job", { assetKind: "string", imported: "boolean", integrityVerified: "boolean", rawPathExposed: "boolean" })],
-  ["local-ai-benchmark", jsonObjectResultSchema("local AI benchmark job", { benchmarkState: "string", tier: "string", passed: "boolean", whisperMeasured: "boolean", localLlmMeasured: "boolean", localOnly: "boolean", cloudAi: "boolean", rawModelNamesExposed: "boolean", rawHashExposed: "boolean", rawMetricExposed: "boolean", rawPathExposed: "boolean" })],
+interface CompletedJobResultDefinition {
+  readonly schema: JsonRuntimeSchema;
+  readonly fields: readonly string[];
+}
+
+const localAiResultFields = [
+  "recordingId", "label", "question", "answer", "answerFound", "intent", "engine", "mode",
+  "localOnly", "cloudAi", "modelRequired", "segmentCount", "matchedSegmentCount", "summary",
+  "decisions", "actions", "risks", "questions", "citations", "recapMarkdown", "output", "sourceIds",
+  "outputSchemaVersion", "strictOutputValidated", "groundingMethod", "modelOutputGrounded",
+  "citationsAddedByCore", "unsupportedClaimsRemoved", "rawPathExposed", "keyMaterialExposedToRenderer",
+  "provenance",
+] as const;
+
+const completedJobResultDefinitions: ReadonlyMap<string, CompletedJobResultDefinition> = new Map([
+  ["transcription", {
+    schema: jsonObjectResultSchema("transcription job", { recordingId: "string", engine: "string", segmentCount: "integer", rawPathExposed: "boolean" }),
+    fields: ["recordingId", "engine", "segmentCount", "rawPathExposed"],
+  }],
+  ["recap", { schema: strictLocalAiResultSchema("recap job", "recap", true), fields: localAiResultFields }],
+  ["ask", { schema: strictLocalAiResultSchema("ask job", "ask", true), fields: localAiResultFields }],
+  ["export", {
+    schema: jsonObjectResultSchema("export job", { format: "string", fileName: "string", bytes: "integer", rawPathExposed: "boolean" }),
+    fields: [
+      "format", "mimeType", "fileName", "bytes", "dataBase64", "markdown", "pageCount", "warningCount",
+      "structuredReport", "editable", "searchableText", "bookmarks", "generatedLocally", "channel",
+      "sampleRateHz", "channelCount", "bitsPerSample", "durationMs", "localOnly", "cloudAi",
+      "networkAttempted", "downloadsAttempted", "rawPathExposed", "keyMaterialExposedToRenderer",
+    ],
+  }],
+  ["legacy-import", {
+    schema: jsonObjectResultSchema("legacy import job", { importedCount: "integer", skippedCount: "integer", originalsUntouched: "boolean", rawPathExposed: "boolean" }),
+    fields: [
+      "importedCount", "skippedCount", "audioImportedCount", "audioSkippedCount", "originalsUntouched",
+      "localOnly", "cloudAi", "rawPathExposed", "keyMaterialExposedToRenderer",
+    ],
+  }],
+  ["speech-model-verification", {
+    schema: jsonObjectResultSchema("speech model verification job", { modelId: "string", installed: "boolean", verified: "boolean", rawPathExposed: "boolean" }),
+    fields: ["modelId", "installed", "verified", "failureCode", "rawPathExposed"],
+  }],
+  ["speech-model-import", {
+    schema: jsonObjectResultSchema("speech model import job", { importId: "string", modelId: "string", imported: "boolean", rejected: "boolean", rawPathExposed: "boolean" }),
+    fields: ["importId", "modelId", "imported", "rejected", "failureCode", "rawPathExposed"],
+  }],
+  ["local-ai-component-import", {
+    schema: jsonObjectResultSchema("local AI component import job", { assetKind: "string", imported: "boolean", integrityVerified: "boolean", rawPathExposed: "boolean" }),
+    fields: ["assetKind", "imported", "integrityVerified", "rawPathExposed"],
+  }],
+  ["local-ai-benchmark", {
+    schema: jsonObjectResultSchema("local AI benchmark job", { benchmarkState: "string", tier: "string", passed: "boolean", whisperMeasured: "boolean", localLlmMeasured: "boolean", localOnly: "boolean", cloudAi: "boolean", rawModelNamesExposed: "boolean", rawHashExposed: "boolean", rawMetricExposed: "boolean", rawPathExposed: "boolean" }),
+    fields: [
+      "benchmarkState", "tier", "passed", "whisperMeasured", "localLlmMeasured", "localOnly", "cloudAi",
+      "rawModelNamesExposed", "rawHashExposed", "rawMetricExposed", "rawPathExposed", "keyMaterialExposedToRenderer",
+    ],
+  }],
+  ["dictionary-import", {
+    schema: jsonObjectResultSchema("dictionary import job", { imported: "boolean", dictionaryId: "string", name: "string", entryCount: "integer", enabled: "boolean", trustLabel: "string", scope: "string", encryptedAtRest: "boolean", localOnly: "boolean", rawPathExposed: "boolean", keyMaterialExposedToRenderer: "boolean" }),
+    fields: [
+      "imported", "dictionaryId", "name", "entryCount", "enabled", "trustLabel", "scope",
+      "encryptedAtRest", "localOnly", "rawPathExposed", "keyMaterialExposedToRenderer",
+    ],
+  }],
+  ["dictionary-index", {
+    schema: jsonObjectResultSchema("dictionary index job", { state: "string", dictionaryCount: "integer", entryCount: "integer", indexedDictionaryId: "string", encryptedAtRest: "boolean", localOnly: "boolean", rawPathExposed: "boolean", keyMaterialExposedToRenderer: "boolean" }),
+    fields: [
+      "state", "dictionaryCount", "entryCount", "indexedDictionaryId", "encryptedAtRest", "localOnly",
+      "rawPathExposed", "keyMaterialExposedToRenderer",
+    ],
+  }],
 ]);
+
+const forbiddenCompletedResultKeys = new Set([
+  "archiveBase64",
+  "keyMaterial",
+  "licenseToken",
+  "modelPath",
+  "path",
+  "privateKey",
+  "prompt",
+  "rawPrompt",
+  "runnerPath",
+  "secret",
+  "sourcePath",
+  "systemPrompt",
+  "transcript",
+]);
+
+function rejectSensitiveResultKeys(value: JsonValue): void {
+  if (Array.isArray(value)) {
+    for (const item of value) rejectSensitiveResultKeys(item);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  for (const [key, nested] of Object.entries(value)) {
+    if (forbiddenCompletedResultKeys.has(key)) {
+      throw new Error(`Completed job result included forbidden ${key} data`);
+    }
+    rejectSensitiveResultKeys(nested);
+  }
+}
+
+function canonicalResult(value: JsonValue, fields: readonly string[]): JsonValue {
+  const source = value as Record<string, JsonValue>;
+  return Object.fromEntries(fields.filter((field) => field in source).map((field) => [field, source[field]]));
+}
+
+function requireCompletedResultValue(
+  type: string,
+  result: Record<string, JsonValue>,
+  field: string,
+  expected: JsonValue,
+): void {
+  if (result[field] !== expected) invalidResult(`${type} job`, field);
+}
+
+function requireOptionalCompletedResultValue(
+  type: string,
+  result: Record<string, JsonValue>,
+  field: string,
+  expected: JsonValue,
+): void {
+  if (field in result && result[field] !== expected) invalidResult(`${type} job`, field);
+}
+
+function validateCompletedResultSemantics(type: string, value: JsonValue): void {
+  const result = objectResult(value, `${type} job`, "result");
+  requireCompletedResultValue(type, result, "rawPathExposed", false);
+  requireOptionalCompletedResultValue(type, result, "keyMaterialExposedToRenderer", false);
+  requireOptionalCompletedResultValue(type, result, "localOnly", true);
+  requireOptionalCompletedResultValue(type, result, "cloudAi", false);
+  requireOptionalCompletedResultValue(type, result, "generatedLocally", true);
+  requireOptionalCompletedResultValue(type, result, "networkAttempted", false);
+  requireOptionalCompletedResultValue(type, result, "downloadsAttempted", false);
+  requireOptionalCompletedResultValue(type, result, "rawModelNamesExposed", false);
+  requireOptionalCompletedResultValue(type, result, "rawHashExposed", false);
+  requireOptionalCompletedResultValue(type, result, "rawMetricExposed", false);
+
+  if (type === "transcription") {
+    if (result.engine !== "whisper-rs" || (result.segmentCount as number) < 0) {
+      invalidResult(`${type} job`, "local transcription result");
+    }
+    return;
+  }
+
+  if (type === "export") {
+    if (
+      !new Set(["markdown", "docx", "pdf", "wav"]).has(result.format as string)
+      || (result.bytes as number) <= 0
+      || typeof result.fileName !== "string"
+      || result.fileName.length === 0
+      || result.fileName.includes("/")
+      || result.fileName.includes("\\")
+    ) {
+      invalidResult(`${type} job`, "local export result");
+    }
+    return;
+  }
+
+  if (type === "legacy-import") {
+    requireCompletedResultValue(type, result, "originalsUntouched", true);
+    return;
+  }
+
+  if (type === "local-ai-benchmark") {
+    if (
+      result.benchmarkState !== "measured"
+      || (result.tier !== "balanced" && result.tier !== "maximum")
+    ) {
+      invalidResult(`${type} job`, "benchmark result");
+    }
+    return;
+  }
+
+  if (type === "dictionary-import") {
+    if (
+      result.encryptedAtRest !== true
+      || (result.trustLabel !== "verified-candor" && result.trustLabel !== "community-unverified")
+      || !new Set(["meeting", "organization", "personal", "specialist", "general"]).has(result.scope as string)
+      || (result.entryCount as number) < 0
+    ) {
+      invalidResult(`${type} job`, "dictionary trust result");
+    }
+    return;
+  }
+
+  if (type === "dictionary-index" && (
+    result.state !== "ready"
+    || result.encryptedAtRest !== true
+    || (result.dictionaryCount as number) < 0
+    || (result.entryCount as number) < 0
+  )) {
+    invalidResult(`${type} job`, "dictionary index result");
+  }
+}
 
 export function validateCompletedJobResult(value: JsonValue): JsonValue {
   if (!value || typeof value !== "object" || Array.isArray(value)) return value;
   const job = value as Record<string, JsonValue>;
   if (job.state !== "completed") return value;
   if (typeof job.type !== "string") throw new Error("Completed job omitted its type");
-  const schema = completedJobResultSchemas.get(job.type);
-  if (!schema) throw new Error(`Completed job type is not registered: ${job.type}`);
-  return { ...job, result: schema.parse(job.result) };
+  const definition = completedJobResultDefinitions.get(job.type);
+  if (!definition) throw new Error(`Completed job type is not registered: ${job.type}`);
+  const result = definition.schema.parse(job.result);
+  rejectSensitiveResultKeys(result);
+  validateCompletedResultSemantics(job.type, result);
+  return { ...job, result: canonicalResult(result, definition.fields) };
 }

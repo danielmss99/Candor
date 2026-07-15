@@ -1,9 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { CandorClient } from "../../core/candor-client";
 import {
-  asArray,
   asObject,
-  asString,
   parseTranscriptionQualityStatus,
   type JsonObject,
   type LocalJsonValue,
@@ -98,7 +96,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const [retentionStatus, setRetentionStatus] = useState<JsonObject>({});
   const [recordingStatus, setRecordingStatus] = useState<JsonObject>({});
   const [diagnosticFailures, setDiagnosticFailures] = useState<string[]>([]);
-  const [jobs, setJobs] = useState<JsonObject[]>([]);
+  const [jobs, setJobs] = useState<BackgroundTask[]>([]);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
 
   const loadCritical = useCallback(async () => {
@@ -109,7 +107,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
       client.object("vault.status", () => api.settings.getStorageStatus()),
       client.object("capture.status", () => api.capture.getStatus()),
       client.object("recording.durable.status", () => api.meetings.getStorageStatus()),
-      client.object("jobs.list", () => api.app.listJobs()),
+      api.app.listJobs(),
     ]);
     setCoreStatus(nextCore);
     setConnectionStatus(asObject(nextCore.connection));
@@ -117,16 +115,13 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     setVaultStatus(nextVault);
     setCaptureStatus(nextCapture);
     setRecordingStatus(nextRecording);
-    setJobs(asArray(nextJobs.jobs).map(asObject));
+    setJobs(nextJobs.jobs);
   }, [api, client]);
 
   useEffect(() => {
     if (!api) return;
     return api.events.subscribe("jobs.changed", (payload) => {
-      const next = asObject(payload as LocalJsonValue);
-      const jobId = asString(next.jobId);
-      if (!jobId) return;
-      setJobs((current) => [next, ...current.filter((job) => asString(job.jobId) !== jobId)]);
+      setJobs((current) => [payload, ...current.filter((job) => job.jobId !== payload.jobId)]);
     });
   }, [api]);
 
@@ -223,8 +218,8 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
 
   const refreshJobs = useCallback(async () => {
     if (!api) return;
-    const next = asObject(await api.app.listJobs());
-    setJobs(asArray(next.jobs).map(asObject));
+    const next = await api.app.listJobs();
+    setJobs(next.jobs);
   }, [api]);
 
   const cancelJob = useCallback(async (jobId: string) => {
@@ -248,7 +243,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const acknowledgeJob = useCallback(async (jobId: string) => {
     if (!api) return;
     await api.app.acknowledgeJob(jobId);
-    setJobs((current) => current.filter((job) => asString(job.jobId) !== jobId));
+    setJobs((current) => current.filter((job) => job.jobId !== jobId));
   }, [api]);
 
   useEffect(() => {

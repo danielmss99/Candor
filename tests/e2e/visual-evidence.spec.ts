@@ -1,3 +1,4 @@
+import AxeBuilder from "@axe-core/playwright";
 import { _electron as electron, expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -51,6 +52,19 @@ test("generates the critical GUI state evidence matrix", async () => {
         mkdirSync(directory, { recursive: true });
         const absolutePath = path.join(directory, `${scenario}.png`);
         await page.screenshot({ path: absolutePath, animations: "disabled" });
+        if (
+          viewport.id === "1440x900-100"
+          && (scenario === "background-activity" || scenario === "meeting-fallback-notice")
+        ) {
+          const results = await new AxeBuilder({ page })
+            .setLegacyMode()
+            .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+            .analyze();
+          expect(
+            results.violations,
+            results.violations.map((violation) => `${violation.id} (${violation.nodes.length})`).join(", "),
+          ).toEqual([]);
+        }
         const bytes = statSync(absolutePath).size;
         expect(bytes).toBeGreaterThan(10_000);
         evidence.push({

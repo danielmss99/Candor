@@ -37,7 +37,7 @@ interface UseLocalAiWorkspaceOptions {
   instructStatus: JsonObject;
   modelStatus: JsonObject;
   transcriptionQualityStatus: TranscriptionQualityStatus;
-  jobs: JsonObject[];
+  jobs: BackgroundTask[];
   activeCapture: boolean;
   run: RunOperation;
   acquireOperation: (scope: string) => (() => void) | null;
@@ -87,14 +87,14 @@ export function shouldStartAutomaticBenchmark(state: AutomaticBenchmarkState): b
 
 export function benchmarkRetryRequired(
   status: TranscriptionQualityStatus,
-  benchmarkJob: JsonObject | undefined,
+  benchmarkJob: BackgroundTask | undefined,
 ): boolean {
   return status.benchmarkFailureTier !== null
     || status.benchmarkState === "failed"
     || (status.benchmarkState === "not-run"
       && Boolean(benchmarkJob)
-      && asBool(benchmarkJob?.terminal)
-      && asString(benchmarkJob?.state) !== "completed");
+      && Boolean(benchmarkJob?.terminal)
+      && benchmarkJob?.state !== "completed");
 }
 
 export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
@@ -128,7 +128,7 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const [askQuestion, setAskQuestion] = useState("What are the action items?");
   const [askAnswer, setAskAnswer] = useState<LocalAiAnswer | null>(null);
   const [recap, setRecap] = useState<LocalAiRecap | null>(null);
-  const [aiMode, setAiMode] = useState<AiMode>("quality");
+  const [aiMode, setAiMode] = useState<AiMode>("local-llm");
   const [instructAssetKind, setInstructAssetKind] = useState<InstructAssetKind>("runner");
   const [instructExpectedSha256, setInstructExpectedSha256] = useState("");
   const [instructAssetError, setInstructAssetError] = useState("");
@@ -137,18 +137,17 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const instructReady = asBool(instructStatus.ready);
   const instructRunnerAsset = asObject(instructAssetsStatus.runner);
   const instructModelAsset = asObject(instructAssetsStatus.model);
-  const useInstructModel = aiMode === "quality" && instructReady;
   const models = useMemo(() => parseModels(modelStatus), [modelStatus]);
-  const aiModeStatus = aiMode === "fast"
-    ? "Fast local analysis"
+  const aiModeStatus = aiMode === "heuristic-fallback"
+    ? "Quick local fallback"
     : instructReady
-      ? "Best local model"
-      : "Fast local fallback";
+      ? "Local AI ready"
+      : "Local AI with disclosed fallback";
   const benchmarkJob = useMemo(
-    () => jobs.find((job) => asString(job.type) === "local-ai-benchmark"),
+    () => jobs.find((job) => job.type === "local-ai-benchmark"),
     [jobs],
   );
-  const benchmarkActive = Boolean(benchmarkJob) && !asBool(benchmarkJob?.terminal);
+  const benchmarkActive = Boolean(benchmarkJob) && !benchmarkJob?.terminal;
   const benchmarkNeedsRetry = benchmarkRetryRequired(transcriptionQualityStatus, benchmarkJob);
   const balancedNeedsFreshBenchmark = transcriptionQualityStatus.tiers.some(
     (tier) => tier.id === "balanced"
@@ -197,7 +196,7 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   }, [api, refreshModelsAndAi]);
 
   useEffect(() => {
-    if (!benchmarkJob || !asBool(benchmarkJob.terminal)) return;
+    if (!benchmarkJob || !benchmarkJob.terminal) return;
     if (transcriptionQualityStatus.benchmarkState !== "not-run") return;
     void refreshModelsAndAi();
   }, [benchmarkJob, refreshModelsAndAi, transcriptionQualityStatus.benchmarkState]);
@@ -357,14 +356,34 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const generateRecap = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("recap", async () => {
-      const accepted = await api.ai.generateRecap(selectedRecordingId, useInstructModel ? "best" : "fast");
+      const accepted = await api.ai.generateRecap({
+        recordingId: selectedRecordingId,
+        mode: aiMode,
+        fallbackPolicy: "allow-disclosed",
+      });
       const result = await waitForJob(api, accepted);
       const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
       setRecap(nextRecap);
-      setNotice(useInstructModel ? "Local model recap generated" : aiMode === "quality" ? "Fast local recap generated because the model is unavailable" : "Fast local recap generated");
+      setNotice(nextRecap.provenance.fallbackUsed ? "Recap created with the disclosed local fallback" : "Local AI recap generated");
       await refreshPrivacyReceipt();
     }, "local-model", "recap");
-  }, [aiMode, api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice, useInstructModel]);
+  }, [aiMode, api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
+
+  const retryRecapWithLocalAi = useCallback(async () => {
+    if (!api || !selectedRecordingId) return;
+    await run("recap", async () => {
+      const accepted = await api.ai.generateRecap({
+        recordingId: selectedRecordingId,
+        mode: "local-llm",
+        fallbackPolicy: "require-local-llm",
+      });
+      const result = await waitForJob(api, accepted);
+      const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
+      setRecap(nextRecap);
+      setNotice("Local AI recap generated");
+      await refreshPrivacyReceipt();
+    }, "local-model", "recap");
+  }, [api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
 
   const ask = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
@@ -374,14 +393,37 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       return;
     }
     await run("ask", async () => {
-      const accepted = await api.ai.ask(selectedRecordingId, question, useInstructModel ? "best" : "fast");
+      const accepted = await api.ai.ask({
+        recordingId: selectedRecordingId,
+        question,
+        mode: aiMode,
+        fallbackPolicy: "allow-disclosed",
+      });
       const result = await waitForJob(api, accepted);
       const answer = client ? await client.answer(async () => result) : parseAnswer(result);
       setAskAnswer(answer);
-      setNotice(useInstructModel ? "Local model answer generated" : "Fast local answer generated");
+      setNotice(answer.provenance.fallbackUsed ? "Answer created with the disclosed local fallback" : "Local AI answer generated");
       await refreshPrivacyReceipt();
     }, "local-model", "ask");
-  }, [api, askQuestion, client, refreshPrivacyReceipt, run, selectedRecordingId, setError, setNotice, useInstructModel]);
+  }, [aiMode, api, askQuestion, client, refreshPrivacyReceipt, run, selectedRecordingId, setError, setNotice]);
+
+  const retryAskWithLocalAi = useCallback(async () => {
+    if (!api || !selectedRecordingId || !askAnswer) return;
+    const question = askAnswer.question || askQuestion.trim();
+    await run("ask", async () => {
+      const accepted = await api.ai.ask({
+        recordingId: selectedRecordingId,
+        question,
+        mode: "local-llm",
+        fallbackPolicy: "require-local-llm",
+      });
+      const result = await waitForJob(api, accepted);
+      const answer = client ? await client.answer(async () => result) : parseAnswer(result);
+      setAskAnswer(answer);
+      setNotice("Local AI answer generated");
+      await refreshPrivacyReceipt();
+    }, "local-model", "ask");
+  }, [api, askAnswer, askQuestion, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
 
   return {
     selectedModel,
@@ -416,6 +458,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     runTranscriptionBenchmark,
     transcribe,
     generateRecap,
+    retryRecapWithLocalAi,
     ask,
+    retryAskWithLocalAi,
   };
 }

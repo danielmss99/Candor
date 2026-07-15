@@ -8,7 +8,7 @@ const expectedPreloadSurface = {
   capture: ["acknowledgeConsent", "getConsent", "getDevices", "getStatus", "recover", "start", "stop"],
   meetings: ["delete", "get", "getImportStatus", "getNotes", "getPrivacyReceipt", "getReplayManifest", "getStorageStatus", "getTranscript", "importLegacy", "list", "readAudioChunk", "search", "updateNotes"],
   transcript: ["cancel", "getQuality", "getStatus", "setQuality", "start", "startQualityBenchmark"],
-  terminology: ["assignToMeeting", "decideCorrection", "getCorrectionProposals", "getStatus", "importDictionary", "importDictionaryPackage", "setEnabled"],
+  terminology: ["assignToMeeting", "decideCorrection", "getCorrectionProposals", "getStatus", "importDictionary", "setEnabled"],
   ai: ["ask", "cancel", "chooseEnhancedComponent", "chooseSpeechModel", "generateRecap", "getBundledAssetsStatus", "getEnhancedAssetsStatus", "getEnhancedStatus", "getStatus", "getWorkloadStatus", "listSpeechModels", "verifySpeechModel"],
   exports: ["cancel", "create", "saveCompleted"],
   settings: ["getNetworkPolicy", "getPrivacyAudit", "getRetentionStatus", "getStorageStatus", "getUpdateStatus", "openLocalStorage"],
@@ -94,7 +94,7 @@ test("renderer is sandboxed behind the exact preload surface", async () => {
       };
     }, Object.keys(expectedPreloadSurface));
     expect(renderer.globals).toEqual({ require: "undefined", process: "undefined", Buffer: "undefined" });
-    expect(renderer.version).toBe(2);
+    expect(renderer.version).toBe(3);
     expect(renderer.topLevel).toEqual([...Object.keys(expectedPreloadSurface), "version"].sort());
     for (const [domain, methods] of Object.entries(expectedPreloadSurface)) {
       expect(renderer.domains[domain]).toEqual([...methods].sort());
