@@ -547,12 +547,13 @@ function assertSmokePayload(payload) {
     payload.rendererVisualState?.bodyTextCharacters < 200 ||
     payload.rendererVisualState?.aiModeVisible !== true ||
     payload.rendererVisualState?.selectedMode !== "Local AI" ||
-    payload.rendererVisualState?.statusText !== "Local AI with disclosed fallback" ||
+    payload.rendererVisualState?.statusText !== "Local AI, asks before fallback" ||
     payload.rendererVisualState?.aiSuggestionsTabActivated !== true ||
     payload.rendererVisualState?.notesTabRestored !== true ||
     payload.rendererVisualState?.currentView !== "meeting" ||
-    payload.rendererVisualState?.sessionRailVisible !== true ||
-    payload.rendererVisualState?.sessionTabsVisible !== true ||
+    payload.rendererVisualState?.desktopShellVisible !== true ||
+    payload.rendererVisualState?.desktopSidebarVisible !== true ||
+    payload.rendererVisualState?.primaryNavigationVisible !== true ||
     payload.rendererVisualState?.recordActionVisible !== true ||
     payload.rendererVisualState?.transcriptVisible !== true ||
     payload.rendererVisualState?.notesVisible !== true ||

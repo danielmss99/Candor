@@ -352,7 +352,7 @@ function Home({ populated, storageLevel = "ok" }: { populated: boolean; storageL
       recordingTitle="Product Strategy Sync"
       instructReady={populated}
       verifiedModelCount={populated ? 1 : 0}
-      aiModeStatus={populated ? "Local AI ready" : "Local AI with disclosed fallback"}
+      aiModeStatus={populated ? "Local AI ready" : "Local AI, asks before fallback"}
       onStartRecording={noop}
       onOpenLibrary={noop}
       onImport={noop}
@@ -426,7 +426,7 @@ function MeetingDetail({ long = false, empty = false, fallback = false }: { long
       recap={empty ? null : fallback ? fallbackRecap : recap}
       askQuestion=""
       askAnswer={null}
-      aiModeStatus={fallback ? "Local AI with disclosed fallback" : "Local AI ready"}
+      aiModeStatus={fallback ? "Local AI, asks before fallback" : "Local AI ready"}
       privacyReceipt={receipt}
       networkCapabilities={network}
       busy={false}
