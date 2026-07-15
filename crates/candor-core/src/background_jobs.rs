@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
-use crate::bundled_ai_assets::BundledAiAssets;
+use crate::bundled_ai_assets::{BundledAiAssets, VerifiedLanguageIdentity};
 use crate::dictionary_package::{verify_candordict_bytes_with_trust, DictionaryTrustAnchor};
 use crate::dictionary_staging::{DictionaryStaging, StagedDictionary};
 use crate::job_manager::{
@@ -236,6 +236,7 @@ impl BackgroundJobServices {
                         &context,
                     )?
                 } else {
+                    let identity_before = self.required_local_llm_identity(&status)?;
                     context.progress("generating", 1, Some(3), Some("stage"));
                     match service.recap_cancellable(
                         &self.recording_store,
@@ -246,14 +247,25 @@ impl BackgroundJobServices {
                         },
                         context.cancellation_flag(),
                     ) {
-                        Ok(value) => with_ai_provenance(
-                            value,
-                            "local-llm",
-                            Some(self.local_llm_model_id()),
-                            false,
-                            None,
-                            "candor-grounded-v1",
-                        )?,
+                        Ok(value) => {
+                            let status_after = service.status(&scheduler);
+                            let identity_after = self.required_local_llm_identity(&status_after)?;
+                            if identity_after != identity_before {
+                                return Err(JobFailure::new(
+                                    "LOCAL_LLM_IDENTITY_CHANGED",
+                                    "the verified Local AI identity changed during generation",
+                                    false,
+                                ));
+                            }
+                            with_ai_provenance(
+                                value,
+                                "local-llm",
+                                Some(&identity_before),
+                                false,
+                                None,
+                                "candor-grounded-v1",
+                            )?
+                        }
                         Err(error) if context.cancelled() || is_non_fallback_error(error.code) => {
                             return Err(JobFailure::new(error.code, error.message, true));
                         }
@@ -326,6 +338,7 @@ impl BackgroundJobServices {
                         &context,
                     )?
                 } else {
+                    let identity_before = self.required_local_llm_identity(&status)?;
                     context.progress("generating", 1, Some(3), Some("stage"));
                     match service.ask_cancellable(
                         &self.recording_store,
@@ -337,14 +350,25 @@ impl BackgroundJobServices {
                         },
                         context.cancellation_flag(),
                     ) {
-                        Ok(value) => with_ai_provenance(
-                            value,
-                            "local-llm",
-                            Some(self.local_llm_model_id()),
-                            false,
-                            None,
-                            "candor-grounded-v1",
-                        )?,
+                        Ok(value) => {
+                            let status_after = service.status(&scheduler);
+                            let identity_after = self.required_local_llm_identity(&status_after)?;
+                            if identity_after != identity_before {
+                                return Err(JobFailure::new(
+                                    "LOCAL_LLM_IDENTITY_CHANGED",
+                                    "the verified Local AI identity changed during generation",
+                                    false,
+                                ));
+                            }
+                            with_ai_provenance(
+                                value,
+                                "local-llm",
+                                Some(&identity_before),
+                                false,
+                                None,
+                                "candor-grounded-v1",
+                            )?
+                        }
                         Err(error) if context.cancelled() || is_non_fallback_error(error.code) => {
                             return Err(JobFailure::new(error.code, error.message, true));
                         }
@@ -386,13 +410,24 @@ impl BackgroundJobServices {
         )
     }
 
-    fn local_llm_model_id(&self) -> String {
+    fn required_local_llm_identity(
+        &self,
+        status: &Value,
+    ) -> Result<VerifiedLanguageIdentity, JobFailure> {
+        if status
+            .pointer("/configuration/source")
+            .and_then(Value::as_str)
+            != Some("bundled-package")
+        {
+            return Err(JobFailure::new(
+                "LOCAL_LLM_IDENTITY_UNVERIFIED",
+                "Local AI is not bound to a verified packaged model identity",
+                false,
+            ));
+        }
         self.bundled_ai_assets
-            .language_config()
-            .ok()
-            .flatten()
-            .and_then(|config| config.model.model_id)
-            .unwrap_or_else(|| "managed-local-model".to_string())
+            .required_language_identity()
+            .map_err(|error| JobFailure::new(error.code, error.message, false))
     }
 
     fn heuristic_recap(&self, recording_id: &str) -> Result<Value, JobFailure> {
@@ -571,12 +606,13 @@ pub fn descriptor_for_transcription(
     channel: Option<String>,
     model_id: Option<String>,
     auto_recap: bool,
+    recap_fallback_policy: AiFallbackPolicy,
 ) -> JobDescriptor {
     let follow_up = auto_recap.then(|| {
         Box::new(JobDescriptor::Recap {
             recording_id: recording_id.clone(),
             mode: AiExecutionMode::LocalLlm,
-            fallback_policy: AiFallbackPolicy::AllowDisclosed,
+            fallback_policy: recap_fallback_policy,
             legacy_quality: None,
         })
     });
@@ -634,7 +670,7 @@ pub fn descriptor_for_dictionary_import(staged: StagedDictionary) -> JobDescript
 fn with_ai_provenance(
     mut result: Value,
     engine: &'static str,
-    model_id: Option<String>,
+    identity: Option<&VerifiedLanguageIdentity>,
     fallback_used: bool,
     fallback_reason: Option<&'static str>,
     prompt_version: &'static str,
@@ -650,7 +686,9 @@ fn with_ai_provenance(
         "provenance".to_string(),
         json!({
             "engine": engine,
-            "modelId": model_id,
+            "modelId": identity.map(|value| value.model_id.as_str()),
+            "modelSha256": identity.map(|value| value.model_sha256.as_str()),
+            "runtimeSha256": identity.map(|value| value.runtime_sha256.as_str()),
             "fallbackUsed": fallback_used,
             "fallbackReason": fallback_reason,
             "promptVersion": prompt_version,
@@ -833,10 +871,15 @@ mod tests {
 
     #[test]
     fn provenance_is_typed_and_contains_no_source_content() {
+        let identity = VerifiedLanguageIdentity {
+            model_id: "qwen3-4b-official-q4_k_m".to_string(),
+            model_sha256: "a".repeat(64),
+            runtime_sha256: "b".repeat(64),
+        };
         let value = with_ai_provenance(
             json!({ "summary": "fixture" }),
             "local-llm",
-            Some("qwen3-4b-official-q4_k_m".to_string()),
+            Some(&identity),
             false,
             None,
             "candor-grounded-v1",
@@ -845,6 +888,8 @@ mod tests {
         let provenance = &value["provenance"];
         assert_eq!(provenance["engine"], "local-llm");
         assert_eq!(provenance["modelId"], "qwen3-4b-official-q4_k_m");
+        assert_eq!(provenance["modelSha256"], "a".repeat(64));
+        assert_eq!(provenance["runtimeSha256"], "b".repeat(64));
         assert_eq!(provenance["fallbackUsed"], false);
         assert_eq!(provenance["fallbackReason"], Value::Null);
         assert_eq!(provenance["promptVersion"], "candor-grounded-v1");
@@ -857,10 +902,15 @@ mod tests {
 
     #[test]
     fn provenance_rejects_non_object_ai_results() {
+        let identity = VerifiedLanguageIdentity {
+            model_id: "qwen3-4b-official-q4_k_m".to_string(),
+            model_sha256: "a".repeat(64),
+            runtime_sha256: "b".repeat(64),
+        };
         let error = with_ai_provenance(
             Value::Null,
             "local-llm",
-            Some("qwen3-4b-official-q4_k_m".to_string()),
+            Some(&identity),
             false,
             None,
             "candor-grounded-v1",

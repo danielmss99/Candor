@@ -3,6 +3,7 @@ import readline from "node:readline";
 const protocolVersion = "m0-jsonrpc-stdio-1";
 const mode = process.env.CANDOR_TEST_CORE_MODE ?? "normal";
 let captureActive = false;
+let captureStartedAtMs = null;
 let responseCount = 0;
 
 function send(request, result, requestId = request.requestId) {
@@ -45,12 +46,16 @@ function resultFor(request) {
       return {
         implemented: true,
         active: captureActive,
-        activeSession: captureActive ? { recordingId: "recording-test-1" } : null,
+        activeSession: captureActive ? {
+          recordingId: "recording-test-1",
+          durationMs: Math.max(0, Date.now() - captureStartedAtMs),
+        } : null,
         sources: {},
         rawPathExposed: false,
       };
     case "capture.startMic":
       captureActive = true;
+      captureStartedAtMs = Date.now();
       return {
         recording: { recordingId: "recording-test-1", state: "recording" },
         capture: { recordingId: "recording-test-1" },
@@ -58,6 +63,7 @@ function resultFor(request) {
       };
     case "capture.stop":
       captureActive = false;
+      captureStartedAtMs = null;
       return {
         recording: { recordingId: "recording-test-1", state: "finished" },
         capture: { recordingId: "recording-test-1", integrityStatus: "verified" },

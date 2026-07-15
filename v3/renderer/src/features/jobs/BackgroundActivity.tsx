@@ -36,7 +36,7 @@ function progressLabel(job: BackgroundTask): string {
     return `${progress.completed} of ${progress.total} ${progress.unit}`;
   }
   if (progress) return `${progress.completed} ${progress.unit}`;
-  return job.stage ? job.stage.replaceAll("-", " ") : "Running locally";
+  return job.stage ? job.stage.replaceAll("-", " ") : "Running";
 }
 
 function etaLabel(job: BackgroundTask): string | null {
@@ -48,9 +48,27 @@ function etaLabel(job: BackgroundTask): string | null {
 }
 
 export function terminalTaskAnnouncement(job: BackgroundTask): string {
-  if (job.state === "completed") return `${jobLabel(job)} completed locally.`;
+  if (job.state === "completed") return `${jobLabel(job)} completed.`;
   if (job.state === "cancelled") return `${jobLabel(job)} cancelled.`;
   return `${jobLabel(job)} needs attention.`;
+}
+
+export const CANCELLABLE_TASK_STATES = new Set<BackgroundTask["state"]>([
+  "queued",
+  "running",
+  "paused",
+]);
+
+export function terminalTasksAnnouncement(jobs: BackgroundTask[]): string {
+  if (jobs.length === 1) return terminalTaskAnnouncement(jobs[0]);
+  const completed = jobs.filter((job) => job.state === "completed").length;
+  const failed = jobs.filter((job) => job.state === "failed").length;
+  const cancelled = jobs.filter((job) => job.state === "cancelled").length;
+  return [
+    completed ? `${completed} background ${completed === 1 ? "task" : "tasks"} completed.` : "",
+    failed ? `${failed} background ${failed === 1 ? "task needs" : "tasks need"} attention.` : "",
+    cancelled ? `${cancelled} background ${cancelled === 1 ? "task was" : "tasks were"} cancelled.` : "",
+  ].filter(Boolean).join(" ");
 }
 
 export function BackgroundActivity({
@@ -63,11 +81,21 @@ export function BackgroundActivity({
 }: BackgroundActivityProps) {
   const previousStates = useRef<Map<string, string> | null>(null);
   const [announcement, setAnnouncement] = useState("");
+  const [cancelAllConfirmationOpen, setCancelAllConfirmationOpen] = useState(false);
   const active = jobs.filter((job) => !job.terminal);
   const failed = jobs.filter((job) => job.state === "failed");
-  const recentCompleted = jobs.filter((job) => job.state === "completed").slice(0, 2);
-  const recentCancelled = jobs.filter((job) => job.state === "cancelled").slice(0, 2);
-  const visible = [...active, ...failed, ...recentCompleted, ...recentCancelled].slice(0, 8);
+  const inProgress = active.filter((job) => job.state !== "queued");
+  const queued = active.filter((job) => job.state === "queued");
+  const recent = jobs
+    .filter((job) => job.state === "completed" || job.state === "cancelled")
+    .slice(0, 4);
+  const cancellable = active.filter((job) => CANCELLABLE_TASK_STATES.has(job.state));
+  const sections = [
+    { id: "attention", label: "Needs attention", jobs: failed },
+    { id: "progress", label: "In progress", jobs: inProgress },
+    { id: "waiting", label: "Waiting", jobs: queued },
+    { id: "recent", label: "Recently completed", jobs: recent },
+  ].filter((section) => section.jobs.length > 0);
   const runningCount = active.filter((job) => job.state === "running").length;
   const queuedCount = active.filter((job) => job.state === "queued").length;
   const pausedCount = active.filter((job) => job.state === "paused").length;
@@ -78,8 +106,12 @@ export function BackgroundActivity({
     pausedCount ? `${pausedCount} paused` : "",
     cancellingCount ? `${cancellingCount} cancelling` : "",
   ].filter(Boolean);
-  const countLabel = activeStateLabels.length
-    ? activeStateLabels.join(" / ")
+  const summaryLabels = [
+    failed.length ? `${failed.length} ${failed.length === 1 ? "task needs" : "tasks need"} attention` : "",
+    ...activeStateLabels,
+  ].filter(Boolean);
+  const countLabel = summaryLabels.length
+    ? summaryLabels.join(" / ")
     : active.length
       ? `${active.length} background ${active.length === 1 ? "task" : "tasks"}`
     : failed.length
@@ -91,14 +123,41 @@ export function BackgroundActivity({
     const previous = previousStates.current;
     previousStates.current = nextStates;
     if (!previous) return;
-    const changed = jobs.find((job) => {
-      return job.terminal && previous.get(job.jobId) !== job.state;
-    });
-    if (!changed) return;
-    setAnnouncement(terminalTaskAnnouncement(changed));
+    const changed = jobs.filter((job) => job.terminal && previous.get(job.jobId) !== job.state);
+    if (!changed.length) return;
+    setAnnouncement(terminalTasksAnnouncement(changed));
     const timer = window.setTimeout(() => setAnnouncement(""), 6_000);
     return () => window.clearTimeout(timer);
   }, [jobs]);
+
+  const confirmCancelAll = () => {
+    setCancelAllConfirmationOpen(false);
+    onCancelAll();
+  };
+
+  const renderJob = (job: BackgroundTask) => {
+    const jobId = job.jobId;
+    const recordingId = job.recordingId ?? "";
+    const state = job.state;
+    const canRetry = (state === "failed" || state === "cancelled" || state === "paused") && job.retryable;
+    const retryLabel = state === "paused" ? "Resume" : "Retry";
+    const eta = etaLabel(job);
+    return (
+      <article className="background-job" key={jobId} data-state={state}>
+        <div className="background-job-copy">
+          <strong>{jobLabel(job)}</strong>
+          <span>{state === "failed" ? job.error?.message ?? "Work needs attention" : progressLabel(job)}</span>
+          {eta ? <small>{eta}</small> : null}
+        </div>
+        <div className="background-job-actions">
+          {recordingId ? <button type="button" aria-label={`Open meeting for ${jobLabel(job)}`} onClick={() => onOpenMeeting(recordingId)}>Open meeting</button> : null}
+          {CANCELLABLE_TASK_STATES.has(state) ? <button type="button" aria-label={`Cancel ${jobLabel(job)}`} onClick={() => onCancel(jobId)}>Cancel</button> : null}
+          {canRetry ? <button type="button" className="primary" aria-label={`${retryLabel} ${jobLabel(job)}`} onClick={() => onRetry(jobId)}>{retryLabel}</button> : null}
+          {job.terminal ? <button type="button" aria-label={`Dismiss ${jobLabel(job)}`} onClick={() => onDismiss(jobId)}>Dismiss</button> : null}
+        </div>
+      </article>
+    );
+  };
 
   return (
     <div className="background-activity-wrap">
@@ -110,32 +169,27 @@ export function BackgroundActivity({
       </summary>
       <section className="background-activity-panel" aria-label="Background tasks" aria-live="polite">
         <header>
-          <div><strong>Background tasks</strong><span>Processing stays on this device</span></div>
-          {active.length > 1 ? <button type="button" aria-label="Cancel all background tasks" onClick={onCancelAll}>Cancel all</button> : null}
+          <div><strong>Activity</strong><span>{countLabel}</span></div>
+          {cancellable.length > 1 ? <button type="button" aria-label="Cancel all cancellable background tasks" onClick={() => setCancelAllConfirmationOpen(true)}>Cancel all</button> : null}
         </header>
-        {visible.length ? visible.map((job) => {
-          const jobId = job.jobId;
-          const recordingId = job.recordingId ?? "";
-          const state = job.state;
-          const canRetry = (state === "failed" || state === "cancelled" || state === "paused") && job.retryable;
-          const retryLabel = state === "paused" ? "Resume" : "Retry";
-          const eta = etaLabel(job);
-          return (
-            <article className="background-job" key={jobId} data-state={state}>
-              <div className="background-job-copy">
-                <strong>{jobLabel(job)}</strong>
-                <span>{state === "failed" ? job.error?.message ?? "Local work needs attention" : progressLabel(job)}</span>
-                {eta ? <small>{eta}</small> : null}
+        {sections.length ? sections.map((section) => (
+          <div className="background-task-section" key={section.id} data-section={section.id}>
+            <h3>{section.label}</h3>
+            {section.jobs.map(renderJob)}
+          </div>
+        )) : <p className="background-activity-empty">Nothing running.</p>}
+        {cancelAllConfirmationOpen ? (
+          <div className="background-cancel-confirmation" role="dialog" aria-modal="true" aria-labelledby="cancel-all-background-title">
+            <div>
+              <h3 id="cancel-all-background-title">Cancel {cancellable.length} background tasks?</h3>
+              <p>Completed and already-cancelling tasks will not be changed.</p>
+              <div className="background-cancel-actions">
+                <button type="button" onClick={() => setCancelAllConfirmationOpen(false)}>Keep tasks</button>
+                <button type="button" className="primary" onClick={confirmCancelAll}>Cancel tasks</button>
               </div>
-              <div className="background-job-actions">
-                {recordingId ? <button type="button" aria-label={`Open meeting for ${jobLabel(job)}`} onClick={() => onOpenMeeting(recordingId)}>Open meeting</button> : null}
-                {!job.terminal && state !== "cancelling" ? <button type="button" aria-label={`Cancel ${jobLabel(job)}`} onClick={() => onCancel(jobId)}>Cancel</button> : null}
-                {canRetry ? <button type="button" className="primary" aria-label={`${retryLabel} ${jobLabel(job)}`} onClick={() => onRetry(jobId)}>{retryLabel}</button> : null}
-                {job.terminal ? <button type="button" aria-label={`Dismiss ${jobLabel(job)}`} onClick={() => onDismiss(jobId)}>Dismiss</button> : null}
-              </div>
-            </article>
-          );
-        }) : <p className="background-activity-empty">No background tasks yet.</p>}
+            </div>
+          </div>
+        ) : null}
       </section>
       </details>
     </div>

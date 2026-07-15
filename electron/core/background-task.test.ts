@@ -136,6 +136,8 @@ describe("background task boundary", () => {
     const provenance = {
       engine: "local-llm",
       modelId: "qwen3-4b-official-q4_k_m",
+      modelSha256: "a".repeat(64),
+      runtimeSha256: "b".repeat(64),
       fallbackUsed: false,
       fallbackReason: null,
       promptVersion: "candor-grounded-v1",
@@ -150,6 +152,8 @@ describe("background task boundary", () => {
     expect(parsed.provenance).toEqual({
       engine: "local-llm",
       modelId: "qwen3-4b-official-q4_k_m",
+      modelSha256: "a".repeat(64),
+      runtimeSha256: "b".repeat(64),
       fallbackUsed: false,
       fallbackReason: null,
       promptVersion: "candor-grounded-v1",
@@ -159,6 +163,8 @@ describe("background task boundary", () => {
       ...provenance,
       engine: "heuristic",
       modelId: null,
+      modelSha256: null,
+      runtimeSha256: null,
       fallbackUsed: true,
       fallbackReason: "user-requested",
     };

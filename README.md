@@ -80,6 +80,7 @@ Common commands:
 | `npm test` | Run the Vitest suite |
 | `npm run v3:verify` | Run the staged local proof stack from M0 through M5 |
 | `npm run audit:source` | Run the Electron/Rust source-security audit |
+| `npm run dev:install-local-ai` | Install the pinned Whisper and Local AI development bundle on this workstation |
 | `npm run electron:v3:pack` | Produce an unpacked `Candor Source Interface` package |
 | `npm run electron:v3:dist:ai-release` | Build a public candidate only after the complete bundled-AI gate passes |
 | `npm run release:complete` | Build Complete only when its exact profile, models, licenses, and evidence pass |
@@ -101,10 +102,15 @@ application resources root, are pinned in `third_party/`, and are verified at
 build time and before first use. Advanced users may deliberately import a local
 override through the native file picker with an expected SHA-256 value.
 
-This source revision contains the packaging and verification boundary but no
-selected model weights or llama.cpp executable. The release-ready manifest is
-therefore false, and `npm run electron:v3:dist:ai-release` must fail until
-licensing, provenance, benchmarks, notices, and real assets are complete.
+Model weights and llama.cpp binaries remain outside Git. On Windows x64,
+`npm run dev:install-local-ai` acquires the exact assets pinned in
+`third_party/`, verifies byte counts and SHA-256 digests, and atomically installs
+them under the ignored `build/ai-bundle-local/` development root. Development
+mode prefers that root without changing the tracked release placeholder. The
+workstation bundle remains `releaseReady: false`, and
+`npm run electron:v3:dist:ai-release` must still fail until licensing,
+provenance, benchmarks, notices, signing, and external release evidence are
+complete.
 `npm run package:source-interface` is the CI/developer package path. Its product
 name is `Candor Source Interface`, its application ID is separate from Candor,
 and its installer name cannot be confused with a Complete release. It is never
@@ -148,7 +154,7 @@ dependency graph, workflow set, or release package.
 ## Release Status
 
 Candor remains prerelease software. Local verification, packaged smoke, and
-artifact auditing are implemented. A selected bundled language model, signed
+artifact auditing are implemented. Final model benchmark approval, signed
 installers, clean-machine offline inference and upgrade proof, real long-duration
 capture, sleep and resume, and device-switch evidence remain mandatory release
 gates.

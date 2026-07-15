@@ -150,7 +150,7 @@ export function EvidenceTimeline({
   return (
     <section className="compact-waveform evidence-timeline" aria-label="Audio evidence timeline">
       <div className="waveform-heading">
-        <span>{active ? "LIVE EVIDENCE" : "AUDIO EVIDENCE"}</span>
+        <span>{active ? "Live timeline" : "Meeting timeline"}</span>
         <strong>{formatClock(durationMs)}</strong>
       </div>
       <div className="timeline-visual">

@@ -226,6 +226,9 @@ function verifySelectedAssetBindings(manifest, modelLock, runtimeLock, platform,
     if (languageRuntimeAsset.engine !== "llama.cpp") {
       failures.push("selected language runtime must use llama.cpp");
     }
+    if (!/\/llama-completion(?:\.exe)?$/i.test(String(languageRuntimeAsset.relativePath).replaceAll("\\", "/"))) {
+      failures.push("selected language runtime must use the llama-completion frontend");
+    }
     if (languageRuntimeLock && languageRuntimeAsset.revision !== languageRuntimeLock.commit) {
       failures.push("selected language runtime revision does not match runtime-lock.json");
     }
@@ -377,7 +380,9 @@ export function verifyBundle(root, options = {}) {
     if (relevantToHost(asset, platform, arch)) {
       const selector = asset.kind === "model"
         ? `${asset.capability}:${asset.kind}:${asset.modelId ?? ""}`
-        : `${asset.capability}:${asset.kind}`;
+        : asset.kind === "library"
+          ? `${asset.capability}:${asset.kind}:${asset.id}`
+          : `${asset.capability}:${asset.kind}`;
       if (hostSelectors.has(selector)) failures.push(`${label} duplicates packaged selector ${selector}`);
       hostSelectors.add(selector);
     }
@@ -524,6 +529,9 @@ function verifyDecisionLocks(manifest, requireReady) {
   if (languageRuntime?.licenseExpression !== "MIT") {
     failures.push("language runtime license is not pinned");
   }
+  if (languageRuntime?.frontend !== "llama-completion") {
+    failures.push("language runtime must pin the llama-completion frontend for strict JSON generation");
+  }
   if (modelLock.schemaVersion !== 1 || typeof modelLock.speech !== "object" || typeof modelLock.language !== "object") {
     failures.push("model lock schema is invalid");
   }
@@ -533,6 +541,15 @@ function verifyDecisionLocks(manifest, requireReady) {
   if (!Array.isArray(modelLock.speech?.candidates)
       || modelLock.speech.candidates.some((candidate) => !candidate?.expectedSha256?.match(SHA256_PATTERN))) {
     failures.push("speech model candidate hashes are incomplete");
+  }
+  if (modelLock.speech?.candidates?.some((candidate) => (
+    candidate?.upstreamPublisher !== "OpenAI"
+      || candidate?.distributionSource !== "ggerganov/whisper.cpp"
+      || !candidate?.distributionRevision?.match(/^[a-f0-9]{40}$/i)
+      || candidate?.distributionRevision !== candidate?.revision
+      || candidate?.provenanceStatus !== "canonical-whisper-cpp-artifact-pinned"
+  ))) {
+    failures.push("speech model candidate provenance must distinguish OpenAI from the pinned whisper.cpp distribution");
   }
   if (!Array.isArray(modelLock.language?.candidates)
       || modelLock.language.candidates.some((candidate) => (
@@ -622,8 +639,11 @@ function verifyReleaseCandidateEvidence(modelLock, runtimeLock, packageProfile) 
     if (candidate.redistributionReview !== "approved") {
       failures.push(`speech model ${modelId} lacks approved redistribution review`);
     }
-    if (candidate.provenanceStatus !== "official-source-pinned") {
-      failures.push(`speech model ${modelId} lacks pinned official provenance`);
+    if (candidate.provenanceStatus !== "canonical-whisper-cpp-artifact-pinned"
+        || candidate.upstreamPublisher !== "OpenAI"
+        || candidate.distributionSource !== "ggerganov/whisper.cpp"
+        || candidate.distributionRevision !== candidate.revision) {
+      failures.push(`speech model ${modelId} lacks pinned upstream and whisper.cpp distribution provenance`);
     }
     if (!Number.isSafeInteger(candidate.bytes) || candidate.bytes <= 0) {
       failures.push(`speech model ${modelId} lacks an exact positive byte count`);
@@ -688,7 +708,7 @@ function makeFixture(root) {
   writeFileSync(path.join(root, "notices", "model-card.md"), "# Fixture model\n");
   const definitions = [
     ["speech-model", "speech", "model", "assets/speech.bin", "speech-default"],
-    ["language-runtime", "language", "runtime", `assets/language-runtime.${process.platform === "win32" ? "exe" : "bin"}`, null],
+    ["language-runtime", "language", "runtime", `assets/llama-completion${process.platform === "win32" ? ".exe" : ""}`, null],
     ["language-model", "language", "model", "assets/language-model.gguf", "language-default"],
     ["general-dictionary", "terminology", "data", "assets/general.candordict", null],
     ["dictionary-publisher-key", "terminology", "public-key", "assets/dictionary-publisher-key.json", null],
@@ -752,6 +772,34 @@ function runSelfTest() {
     const ready = verifyBundle(root, { requireReady: true });
     if (!ready.ok) throw new Error(`valid fixture failed: ${ready.failures.join(", ")}`);
 
+    for (const id of ["language-library-core", "language-library-cpu"]) {
+      const relativePath = `assets/${id}.dll`;
+      const content = Buffer.from(`fixture:${id}`);
+      writeFileSync(path.join(root, relativePath), content);
+      manifest.assets.push({
+        id,
+        capability: "language",
+        kind: "library",
+        engine: "llama.cpp",
+        relativePath,
+        sha256: createHash("sha256").update(content).digest("hex"),
+        bytes: content.length,
+        licenseFile: "notices/license.txt",
+        licenseExpression: "MIT",
+        sourceUrl: "https://example.invalid/fixture",
+        revision: "fixture",
+        redistributionApproved: true,
+        required: true,
+        platform: process.platform,
+        arch: process.arch,
+      });
+    }
+    writeFileSync(path.join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    const withLibraries = verifyBundle(root, { requireReady: true });
+    if (!withLibraries.ok) {
+      throw new Error(`multiple verified runtime libraries failed: ${withLibraries.failures.join(", ")}`);
+    }
+
     const fixtureModelLock = {
       speech: {
         selectedModel: "speech-default",
@@ -762,7 +810,11 @@ function runSelfTest() {
           licenseExpression: "MIT",
           benchmarkStatus: "passed",
           redistributionReview: "approved",
-          provenanceStatus: "official-source-pinned",
+          upstreamPublisher: "OpenAI",
+          distributionSource: "ggerganov/whisper.cpp",
+          distributionRevision: "a".repeat(40),
+          revision: "a".repeat(40),
+          provenanceStatus: "canonical-whisper-cpp-artifact-pinned",
         }],
       },
       language: {

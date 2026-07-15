@@ -98,6 +98,9 @@ const api = Object.freeze({
     getBundledAssetsStatus: () => invoke("candor-core:ai-bundled-assets-status"),
     getEnhancedAssetsStatus: () => invoke("candor-core:ai-instruct-assets-status"),
     getEnhancedStatus: () => invoke("candor-core:ai-instruct-status"),
+    getFallbackPreference: () => invoke("candor-core:ai-fallback-preference-status"),
+    setFallbackPreference: (preference: "ask-first" | "automatic" | "never") =>
+      invoke("candor-core:ai-fallback-preference-update", { preference }),
     getWorkloadStatus: () => invoke("candor-core:ai-scheduler-status"),
     listSpeechModels: () => invoke("candor-core:models-list-local"),
     verifySpeechModel: (modelId?: string) => invoke("candor-models:verify", modelId ? { modelId } : {}),
@@ -110,14 +113,12 @@ const api = Object.freeze({
       }),
     generateRecap: (input: {
       recordingId: string;
-      mode: "local-llm" | "heuristic-fallback";
-      fallbackPolicy: "allow-disclosed" | "require-local-llm";
+      intent?: "default" | "strict-retry" | "explicit-heuristic";
     }) => invoke("candor-ai:recap", input),
     ask: (input: {
       recordingId: string;
       question: string;
-      mode: "local-llm" | "heuristic-fallback";
-      fallbackPolicy: "allow-disclosed" | "require-local-llm";
+      intent?: "default" | "strict-retry" | "explicit-heuristic";
     }) => invoke("candor-ai:ask", input),
     cancel: (jobId: string) => invoke("candor-jobs:cancel", { jobId }),
   }),

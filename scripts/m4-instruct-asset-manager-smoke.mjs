@@ -220,7 +220,10 @@ function writeProof() {
 try {
   const runnerBytes = runnerFixture();
   const modelBytes = modelFixture();
-  const runnerPath = path.join(sourceDir, process.platform === "win32" ? "llama-cli.exe" : "llama-cli");
+  const runnerPath = path.join(
+    sourceDir,
+    process.platform === "win32" ? "llama-completion.exe" : "llama-completion",
+  );
   const modelPath = path.join(sourceDir, "model.gguf");
   writeFileSync(runnerPath, runnerBytes);
   writeFileSync(modelPath, modelBytes);

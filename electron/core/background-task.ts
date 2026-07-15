@@ -50,7 +50,9 @@ export interface BackgroundTaskError {
 
 export interface AiProvenance {
   engine: "local-llm" | "heuristic";
-  modelId?: string | null;
+  modelId: string | null;
+  modelSha256: string | null;
+  runtimeSha256: string | null;
   fallbackUsed: boolean;
   fallbackReason?: "llm-unavailable" | "runtime-failed" | "model-corrupt" | "resource-policy" | "user-requested" | null;
   promptVersion: string;
@@ -108,7 +110,8 @@ const errorFieldSet = new Set([
   "code", "title", "message", "retryable", "severity", "correlationId", "rawPathExposed",
 ]);
 const provenanceFieldSet = new Set([
-  "engine", "modelId", "fallbackUsed", "fallbackReason", "promptVersion", "generatedAt",
+  "engine", "modelId", "modelSha256", "runtimeSha256", "fallbackUsed", "fallbackReason",
+  "promptVersion", "generatedAt",
 ]);
 const collectionFieldSet = new Set([
   "jobs", "jobCount", "activeCount", "persistenceState", "persistenceFailureCode",
@@ -210,6 +213,10 @@ function parseProvenance(value: unknown): AiProvenance | null {
     || (provenance.engine !== "local-llm" && provenance.engine !== "heuristic")
     || typeof provenance.fallbackUsed !== "boolean"
     || !validOptionalIdentifier(provenance.modelId)
+    || (provenance.modelSha256 !== null
+      && (typeof provenance.modelSha256 !== "string" || !/^[a-f0-9]{64}$/.test(provenance.modelSha256)))
+    || (provenance.runtimeSha256 !== null
+      && (typeof provenance.runtimeSha256 !== "string" || !/^[a-f0-9]{64}$/.test(provenance.runtimeSha256)))
     || typeof provenance.promptVersion !== "string"
     || !safePromptVersionPattern.test(provenance.promptVersion)
     || !validTimestamp(provenance.generatedAt)
@@ -219,8 +226,12 @@ function parseProvenance(value: unknown): AiProvenance | null {
     || (provenance.fallbackUsed && typeof provenance.fallbackReason !== "string")
     || (!provenance.fallbackUsed && provenance.fallbackReason !== undefined && provenance.fallbackReason !== null)
     || (provenance.engine === "local-llm" && typeof provenance.modelId !== "string")
+    || (provenance.engine === "local-llm" && typeof provenance.modelSha256 !== "string")
+    || (provenance.engine === "local-llm" && typeof provenance.runtimeSha256 !== "string")
     || (provenance.engine === "local-llm" && provenance.fallbackUsed)
     || (provenance.engine === "heuristic" && provenance.modelId !== undefined && provenance.modelId !== null)
+    || (provenance.engine === "heuristic" && provenance.modelSha256 !== null)
+    || (provenance.engine === "heuristic" && provenance.runtimeSha256 !== null)
     || (provenance.engine === "heuristic" && !provenance.fallbackUsed)
   ) {
     throw invalidTask();
@@ -230,6 +241,8 @@ function parseProvenance(value: unknown): AiProvenance | null {
     modelId: provenance.modelId === undefined || provenance.modelId === null
       ? null
       : provenance.modelId as string,
+    modelSha256: provenance.modelSha256 as string | null,
+    runtimeSha256: provenance.runtimeSha256 as string | null,
     fallbackUsed: provenance.fallbackUsed,
     fallbackReason: provenance.fallbackReason === undefined || provenance.fallbackReason === null
       ? null

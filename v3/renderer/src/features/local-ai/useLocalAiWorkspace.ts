@@ -13,6 +13,7 @@ import {
   type BundledAiStatus,
   type InstructAssetKind,
   type JsonObject,
+  type LocalJsonValue,
   type LocalAiAnswer,
   type LocalAiRecap,
   type RecordingSummary,
@@ -22,10 +23,53 @@ import {
 } from "../../core/contracts";
 import type { useLocalJob } from "../ai/useLocalJob";
 import type { RunOperation } from "../jobs/useOperationRunner";
-import { waitForJob } from "../../core/jobs";
+import { BackgroundJobFailure, waitForJob } from "../../core/jobs";
 
 type CoreApi = NonNullable<Window["candor"]>;
 type LocalJob = ReturnType<typeof useLocalJob>;
+export type AiFallbackPreference = "ask-first" | "automatic" | "never";
+export interface AiFallbackOffer {
+  kind: "recap" | "ask";
+  recordingId: string;
+  question?: string;
+  failureCode: string;
+}
+
+const FALLBACK_OFFERABLE_CODES = new Set([
+  "LOCAL_LLM_UNAVAILABLE",
+  "LOCAL_LLM_RUNTIME_FAILED",
+  "LOCAL_LLM_RESOURCE_POLICY",
+  "LOCAL_LLM_MODEL_CORRUPT",
+  "LOCAL_LLM_BINARY_HASH_INVALID",
+  "LOCAL_LLM_BINARY_HASH_MISMATCH",
+  "LOCAL_LLM_BINARY_HASH_UNREADABLE",
+  "LOCAL_LLM_MODEL_HASH_INVALID",
+  "LOCAL_LLM_MODEL_HASH_MISMATCH",
+  "LOCAL_LLM_MODEL_HASH_UNREADABLE",
+  "LOCAL_LLM_BINARY_HASH_NOT_CONFIGURED",
+  "LOCAL_LLM_BINARY_NOT_CONFIGURED",
+  "LOCAL_LLM_BINARY_NOT_FOUND",
+  "LOCAL_LLM_MODEL_HASH_NOT_CONFIGURED",
+  "LOCAL_LLM_MODEL_NOT_CONFIGURED",
+  "LOCAL_LLM_MODEL_NOT_FOUND",
+  "LOCAL_LLM_NOT_READY",
+  "LOCAL_LLM_COMMAND_FAILED",
+  "LOCAL_LLM_COMMAND_SPAWN_FAILED",
+  "LOCAL_LLM_COMMAND_TIMEOUT",
+  "LOCAL_LLM_COMMAND_WAIT_FAILED",
+  "LOCAL_LLM_OUTPUT_EMPTY",
+  "LOCAL_LLM_OUTPUT_ENCODING_INVALID",
+  "LOCAL_LLM_OUTPUT_READ_FAILED",
+  "LOCAL_LLM_OUTPUT_READER_FAILED",
+  "LOCAL_LLM_OUTPUT_TOO_LARGE",
+  "LOCAL_LLM_STDERR_TOO_LARGE",
+]);
+
+export function canOfferExplicitFallback(error: unknown): error is BackgroundJobFailure {
+  return error instanceof BackgroundJobFailure
+    && error.state === "failed"
+    && FALLBACK_OFFERABLE_CODES.has(error.code);
+}
 
 interface UseLocalAiWorkspaceOptions {
   api: CoreApi | undefined;
@@ -129,10 +173,29 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const [askAnswer, setAskAnswer] = useState<LocalAiAnswer | null>(null);
   const [recap, setRecap] = useState<LocalAiRecap | null>(null);
   const [aiMode, setAiMode] = useState<AiMode>("local-llm");
+  const [aiFallbackPreference, setAiFallbackPreference] = useState<AiFallbackPreference>("ask-first");
+  const [fallbackOffer, setFallbackOffer] = useState<AiFallbackOffer | null>(null);
   const [instructAssetKind, setInstructAssetKind] = useState<InstructAssetKind>("runner");
   const [instructExpectedSha256, setInstructExpectedSha256] = useState("");
   const [instructAssetError, setInstructAssetError] = useState("");
   const [instructSetupOpen, setInstructSetupOpen] = useState(false);
+
+  useEffect(() => {
+    if (!api) return;
+    let cancelled = false;
+    void api.ai.getFallbackPreference().then((value) => {
+      if (cancelled) return;
+      const preference = asString(asObject(value).preference, "ask-first");
+      setAiFallbackPreference(
+        preference === "automatic" || preference === "never" ? preference : "ask-first",
+      );
+    }).catch(() => {
+      if (!cancelled) setAiFallbackPreference("ask-first");
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [api]);
 
   const instructReady = asBool(instructStatus.ready);
   const instructRunnerAsset = asObject(instructAssetsStatus.runner);
@@ -142,7 +205,11 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     ? "Quick local fallback"
     : instructReady
       ? "Local AI ready"
-      : "Local AI with disclosed fallback";
+      : aiFallbackPreference === "automatic"
+        ? "Local AI with automatic fallback"
+        : aiFallbackPreference === "never"
+          ? "Local AI only"
+          : "Local AI, asks before fallback";
   const benchmarkJob = useMemo(
     () => jobs.find((job) => job.type === "local-ai-benchmark"),
     [jobs],
@@ -161,6 +228,7 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const resetMeetingAi = useCallback(() => {
     setRecap(null);
     setAskAnswer(null);
+    setFallbackOffer(null);
   }, []);
 
   useEffect(() => {
@@ -353,33 +421,58 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     }, "local-model", "local-ai-benchmark");
   }, [activeCapture, api, benchmarkActive, run, setNotice, startBenchmarkJob]);
 
+  const updateAiFallbackPreference = useCallback(async (preference: AiFallbackPreference) => {
+    if (!api) return;
+    await run("fallback preference", async () => {
+      const result = asObject(await api.ai.setFallbackPreference(preference));
+      const saved = asString(result.preference, "ask-first");
+      const nextPreference = saved === "automatic" || saved === "never" ? saved : "ask-first";
+      setAiFallbackPreference(nextPreference);
+      if (nextPreference === "never") setAiMode("local-llm");
+      setFallbackOffer(null);
+      setNotice("Local AI fallback preference saved");
+    }, "local-ai-settings");
+  }, [api, run, setNotice]);
+
   const generateRecap = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("recap", async () => {
       const accepted = await api.ai.generateRecap({
         recordingId: selectedRecordingId,
-        mode: aiMode,
-        fallbackPolicy: "allow-disclosed",
+        intent: aiMode === "heuristic-fallback" ? "explicit-heuristic" : "default",
       });
-      const result = await waitForJob(api, accepted);
+      let result: LocalJsonValue;
+      try {
+        result = await waitForJob(api, accepted);
+      } catch (error) {
+        if (aiMode === "local-llm" && aiFallbackPreference === "ask-first" && canOfferExplicitFallback(error)) {
+          setFallbackOffer({
+            kind: "recap",
+            recordingId: selectedRecordingId,
+            failureCode: error.code,
+          });
+        }
+        throw error;
+      }
       const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
       setRecap(nextRecap);
+      setFallbackOffer(null);
       setNotice(nextRecap.provenance.fallbackUsed ? "Recap created with the disclosed local fallback" : "Local AI recap generated");
       await refreshPrivacyReceipt();
     }, "local-model", "recap");
-  }, [aiMode, api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
+  }, [aiFallbackPreference, aiMode, api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
 
   const retryRecapWithLocalAi = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("recap", async () => {
       const accepted = await api.ai.generateRecap({
         recordingId: selectedRecordingId,
-        mode: "local-llm",
-        fallbackPolicy: "require-local-llm",
+        intent: "strict-retry",
       });
       const result = await waitForJob(api, accepted);
       const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
       setRecap(nextRecap);
+      setFallbackOffer(null);
       setNotice("Local AI recap generated");
       await refreshPrivacyReceipt();
     }, "local-model", "recap");
@@ -396,34 +489,76 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       const accepted = await api.ai.ask({
         recordingId: selectedRecordingId,
         question,
-        mode: aiMode,
-        fallbackPolicy: "allow-disclosed",
+        intent: aiMode === "heuristic-fallback" ? "explicit-heuristic" : "default",
       });
-      const result = await waitForJob(api, accepted);
+      let result: LocalJsonValue;
+      try {
+        result = await waitForJob(api, accepted);
+      } catch (error) {
+        if (aiMode === "local-llm" && aiFallbackPreference === "ask-first" && canOfferExplicitFallback(error)) {
+          setFallbackOffer({
+            kind: "ask",
+            recordingId: selectedRecordingId,
+            question,
+            failureCode: error.code,
+          });
+        }
+        throw error;
+      }
       const answer = client ? await client.answer(async () => result) : parseAnswer(result);
       setAskAnswer(answer);
+      setFallbackOffer(null);
       setNotice(answer.provenance.fallbackUsed ? "Answer created with the disclosed local fallback" : "Local AI answer generated");
       await refreshPrivacyReceipt();
     }, "local-model", "ask");
-  }, [aiMode, api, askQuestion, client, refreshPrivacyReceipt, run, selectedRecordingId, setError, setNotice]);
+  }, [aiFallbackPreference, aiMode, api, askQuestion, client, refreshPrivacyReceipt, run, selectedRecordingId, setError, setNotice]);
 
   const retryAskWithLocalAi = useCallback(async () => {
-    if (!api || !selectedRecordingId || !askAnswer) return;
-    const question = askAnswer.question || askQuestion.trim();
+    if (!api || !selectedRecordingId) return;
+    const question = askAnswer?.question || fallbackOffer?.question || askQuestion.trim();
+    if (!question) return;
     await run("ask", async () => {
       const accepted = await api.ai.ask({
         recordingId: selectedRecordingId,
         question,
-        mode: "local-llm",
-        fallbackPolicy: "require-local-llm",
+        intent: "strict-retry",
       });
       const result = await waitForJob(api, accepted);
       const answer = client ? await client.answer(async () => result) : parseAnswer(result);
       setAskAnswer(answer);
+      setFallbackOffer(null);
       setNotice("Local AI answer generated");
       await refreshPrivacyReceipt();
     }, "local-model", "ask");
-  }, [api, askAnswer, askQuestion, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
+  }, [api, askAnswer, askQuestion, client, fallbackOffer, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
+
+  const createQuickFallback = useCallback(async () => {
+    if (!api || !fallbackOffer) return;
+    const offer = fallbackOffer;
+    await run("quick fallback", async () => {
+      if (offer.kind === "recap") {
+        const accepted = await api.ai.generateRecap({
+          recordingId: offer.recordingId,
+          intent: "explicit-heuristic",
+        });
+        const result = await waitForJob(api, accepted);
+        const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
+        setRecap(nextRecap);
+      } else {
+        const accepted = await api.ai.ask({
+          recordingId: offer.recordingId,
+          question: offer.question ?? askQuestion.trim(),
+          intent: "explicit-heuristic",
+        });
+        const result = await waitForJob(api, accepted);
+        const answer = client ? await client.answer(async () => result) : parseAnswer(result);
+        setAskAnswer(answer);
+      }
+      setFallbackOffer(null);
+      setNotice("Quick local fallback created");
+      await refreshPrivacyReceipt(offer.recordingId);
+    }, "local-model", offer.kind);
+  }, [api, askQuestion, client, fallbackOffer, refreshPrivacyReceipt, run, setNotice]);
 
   return {
     selectedModel,
@@ -431,6 +566,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     askAnswer,
     recap,
     aiMode,
+    aiFallbackPreference,
+    fallbackOffer,
     instructAssetKind,
     instructExpectedSha256,
     instructAssetError,
@@ -446,6 +583,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     setSelectedModel: selectModel,
     setAskQuestion,
     setAiMode,
+    updateAiFallbackPreference,
+    dismissFallbackOffer: () => setFallbackOffer(null),
     setInstructAssetKind,
     setInstructExpectedSha256,
     setInstructAssetError,
@@ -461,5 +600,6 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     retryRecapWithLocalAi,
     ask,
     retryAskWithLocalAi,
+    createQuickFallback,
   };
 }

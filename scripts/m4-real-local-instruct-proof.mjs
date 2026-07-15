@@ -830,7 +830,7 @@ try {
 
   const recordingId = await seedRecording(call);
   inferenceAttempted = true;
-  recap = await call("ai.recapInstruct", { recordingId, maxTokens: 320 });
+  recap = await call("ai.recapInstruct", { recordingId, maxTokens: 512 });
   assertInstructResult(recap, "AI instruct recap", "recap");
   recapQuality = evaluateRecap(recap);
   record(recapQuality.ok, "real local recap did not satisfy deterministic quality checks");
@@ -838,7 +838,7 @@ try {
   ask = await call("ai.askInstruct", {
     recordingId,
     question: "What must Priya validate before Friday?",
-    maxTokens: 128,
+    maxTokens: 256,
   });
   assertInstructResult(ask, "AI instruct Ask", "ask");
   askQuality = evaluateAsk(ask);

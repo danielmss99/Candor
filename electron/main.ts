@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog } from "electron";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { CoreClient } from "./core/core-client.js";
@@ -65,7 +66,11 @@ function corePath(): string {
 }
 
 function aiBundleRoot(): string {
-  if (isDev) return path.resolve(__dirname, "..", "..", "build", "ai-bundle");
+  if (isDev) {
+    const localBundle = path.resolve(__dirname, "..", "..", "build", "ai-bundle-local");
+    if (existsSync(path.join(localBundle, "manifest.json"))) return localBundle;
+    return path.resolve(__dirname, "..", "..", "build", "ai-bundle");
+  }
   return path.join(process.resourcesPath, "ai");
 }
 
@@ -116,6 +121,7 @@ function createWindow(smoke = false): BrowserWindow {
       },
       finalizeCapture: () => coreClient.finalizeCaptureForClose(),
       activeBackgroundJobCount: async () => {
+        if (isE2EMode) return 0;
         const response = await coreClient.call("jobs.activeSummary", null);
         if (!response.ok) throw new Error(response.error?.code ?? "JOB_SUMMARY_FAILED");
         const value = response.result;

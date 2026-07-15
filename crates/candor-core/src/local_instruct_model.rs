@@ -53,9 +53,26 @@ const MAX_SEGMENT_TEXT_CHARS: usize = 220;
 const LOCAL_LLM_BASE_TIMEOUT_MS: u64 = 30_000;
 const LOCAL_LLM_PER_OUTPUT_TOKEN_TIMEOUT_MS: u64 = 750;
 const LOCAL_LLM_MAX_TIMEOUT_MS: u64 = 600_000;
-const LLAMA_CLI_SUBPROCESS_FLAGS: [&str; 3] = ["--single-turn", "--simple-io", "--log-disable"];
-const LLAMA_COMPLETION_SUBPROCESS_FLAGS: [&str; 3] =
-    ["--conversation", "--single-turn", "--simple-io"];
+const GROUNDED_RECAP_JSON_SCHEMA: &str = r##"{"type":"object","additionalProperties":false,"required":["schemaVersion","summary","decisions","actions","risks","questions","answer"],"properties":{"schemaVersion":{"const":1},"summary":{"type":"array","items":{"$ref":"#/$defs/claim"}},"decisions":{"type":"array","items":{"$ref":"#/$defs/claim"}},"actions":{"type":"array","items":{"$ref":"#/$defs/action"}},"risks":{"type":"array","items":{"$ref":"#/$defs/claim"}},"questions":{"type":"array","items":{"$ref":"#/$defs/claim"}},"answer":{"type":"null"}},"$defs":{"sourceIds":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,"items":{"type":"string","pattern":"^s[0-9]+$"}},"claim":{"type":"object","additionalProperties":false,"required":["text","sourceIds"],"properties":{"text":{"type":"string","minLength":1},"sourceIds":{"$ref":"#/$defs/sourceIds"}}},"action":{"type":"object","additionalProperties":false,"required":["text","owner","dueDate","confidence","sourceIds"],"properties":{"text":{"type":"string","minLength":1},"owner":{"type":["string","null"]},"dueDate":{"type":["string","null"]},"confidence":{"enum":["high","medium","low"]},"sourceIds":{"$ref":"#/$defs/sourceIds"}}}}}"##;
+const GROUNDED_ASK_JSON_SCHEMA: &str = r##"{"type":"object","additionalProperties":false,"required":["schemaVersion","summary","decisions","actions","risks","questions","answer"],"properties":{"schemaVersion":{"const":1},"summary":{"const":[]},"decisions":{"const":[]},"actions":{"const":[]},"risks":{"const":[]},"questions":{"const":[]},"answer":{"oneOf":[{"$ref":"#/$defs/claim"},{"type":"null"}]}},"$defs":{"sourceIds":{"type":"array","minItems":1,"maxItems":4,"uniqueItems":true,"items":{"type":"string","pattern":"^s[0-9]+$"}},"claim":{"type":"object","additionalProperties":false,"required":["text","sourceIds"],"properties":{"text":{"type":"string","minLength":1},"sourceIds":{"$ref":"#/$defs/sourceIds"}}}}}"##;
+const LLAMA_CLI_SUBPROCESS_FLAGS: [&str; 7] = [
+    "--single-turn",
+    "--simple-io",
+    "--log-disable",
+    "--reasoning",
+    "off",
+    "--reasoning-budget",
+    "0",
+];
+const LLAMA_COMPLETION_SUBPROCESS_FLAGS: [&str; 7] = [
+    "--conversation",
+    "--single-turn",
+    "--simple-io",
+    "--reasoning",
+    "off",
+    "--reasoning-budget",
+    "0",
+];
 const LLAMA_OUTPUT_BOUNDARY: &str = "CANDOR_GENERATED_RESPONSE_START";
 
 #[derive(Debug)]
@@ -173,6 +190,7 @@ struct LocalInstructModelConfig {
 #[derive(Clone, Copy, Debug)]
 struct FailureReasonContext {
     binary_configured: bool,
+    binary_frontend_supported: bool,
     model_configured: bool,
     binary_exists: bool,
     model_exists: bool,
@@ -184,6 +202,14 @@ struct FailureReasonContext {
     model_hash_read_error: bool,
     binary_hash_matched: bool,
     model_hash_matched: bool,
+}
+
+struct PromptRequest<'a> {
+    owner: &'static str,
+    prompt: &'a str,
+    max_tokens: u32,
+    output_schema: Option<&'static str>,
+    cancellation: Option<&'a Arc<AtomicBool>>,
 }
 
 impl LocalInstructModelConfig {
@@ -352,10 +378,13 @@ impl LocalInstructModelService {
             let run = self.run_prompt(
                 &config,
                 scheduler,
-                "local-instruct.recap",
-                &prompt,
-                max_tokens,
-                cancellation.as_ref(),
+                PromptRequest {
+                    owner: "local-instruct.recap",
+                    prompt: &prompt,
+                    max_tokens,
+                    output_schema: Some(GROUNDED_RECAP_JSON_SCHEMA),
+                    cancellation: cancellation.as_ref(),
+                },
             )?;
             grounded_batches.push(validate_grounded_batch(
                 batch,
@@ -419,10 +448,13 @@ impl LocalInstructModelService {
             let run = self.run_prompt(
                 &config,
                 scheduler,
-                "local-instruct.ask",
-                &prompt,
-                max_tokens,
-                cancellation.as_ref(),
+                PromptRequest {
+                    owner: "local-instruct.ask",
+                    prompt: &prompt,
+                    max_tokens,
+                    output_schema: Some(GROUNDED_ASK_JSON_SCHEMA),
+                    cancellation: cancellation.as_ref(),
+                },
             )?;
             grounded_batches.push(validate_grounded_batch(
                 batch,
@@ -460,10 +492,13 @@ impl LocalInstructModelService {
         let run = self.run_prompt(
             &config,
             scheduler,
-            "local-instruct.benchmark",
-            "Return one short sentence confirming that local meeting analysis is ready. Do not include names, numbers, or private information.",
-            48,
-            Some(&cancellation),
+            PromptRequest {
+                owner: "local-instruct.benchmark",
+                prompt: "Return one short sentence confirming that local meeting analysis is ready. Do not include names, numbers, or private information.",
+                max_tokens: 48,
+                output_schema: None,
+                cancellation: Some(&cancellation),
+            },
         )?;
         ensure_not_cancelled(Some(&cancellation))?;
         let elapsed_seconds = run.elapsed_ms as f64 / 1_000.0;
@@ -485,14 +520,24 @@ impl LocalInstructModelService {
         &self,
         config: &LocalInstructModelConfig,
         scheduler: &mut LocalModelScheduler,
-        owner: &'static str,
-        prompt: &str,
-        max_tokens: u32,
-        cancellation: Option<&Arc<AtomicBool>>,
+        request: PromptRequest<'_>,
     ) -> Result<LocalLlmRun, LocalInstructError> {
+        let PromptRequest {
+            owner,
+            prompt,
+            max_tokens,
+            output_schema,
+            cancellation,
+        } = request;
         ensure_not_cancelled(cancellation)?;
         let job_id = scheduler.start_job(LocalModelJobKind::Llm, owner)?;
-        let result = run_prompt_with_config(config, prompt, max_tokens, cancellation.cloned());
+        let result = run_prompt_with_config(
+            config,
+            prompt,
+            max_tokens,
+            output_schema,
+            cancellation.cloned(),
+        );
         scheduler.finish_job(job_id);
         result
     }
@@ -549,6 +594,10 @@ impl LocalInstructModelService {
         scheduler: &LocalModelScheduler,
     ) -> Value {
         let binary_configured = config.binary_path.is_some();
+        let binary_frontend_supported = config
+            .binary_path
+            .as_deref()
+            .is_some_and(is_llama_completion_frontend);
         let model_configured = config.model_path.is_some();
         let binary_exists = config
             .binary_path
@@ -628,6 +677,7 @@ impl LocalInstructModelService {
         let model_hash_verified = model_hash_required && model_hash_matched;
         let (failure_code, failure_message) = failure_reason(FailureReasonContext {
             binary_configured,
+            binary_frontend_supported,
             model_configured,
             binary_exists,
             model_exists,
@@ -723,6 +773,7 @@ fn ensure_ready(
 fn failure_code(code: &str) -> &'static str {
     match code {
         "LOCAL_LLM_BINARY_NOT_CONFIGURED" => "LOCAL_LLM_BINARY_NOT_CONFIGURED",
+        "LOCAL_LLM_FRONTEND_UNSUPPORTED" => "LOCAL_LLM_FRONTEND_UNSUPPORTED",
         "LOCAL_LLM_MODEL_NOT_CONFIGURED" => "LOCAL_LLM_MODEL_NOT_CONFIGURED",
         "LOCAL_LLM_BINARY_NOT_FOUND" => "LOCAL_LLM_BINARY_NOT_FOUND",
         "LOCAL_LLM_MODEL_NOT_FOUND" => "LOCAL_LLM_MODEL_NOT_FOUND",
@@ -752,6 +803,7 @@ fn run_prompt_with_config(
     config: &LocalInstructModelConfig,
     prompt: &str,
     max_tokens: u32,
+    output_schema: Option<&str>,
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<LocalLlmRun, LocalInstructError> {
     ensure_not_cancelled(cancellation.as_ref())?;
@@ -764,7 +816,13 @@ fn run_prompt_with_config(
 
     let prompt = prepare_prompt_for_runner(prompt, config.binary_path.as_deref())?;
     let prompt_path = write_prompt_file(&prompt)?;
-    let command_result = run_llama_command(config, &prompt_path, max_tokens, cancellation.as_ref());
+    let command_result = run_llama_command(
+        config,
+        &prompt_path,
+        max_tokens,
+        output_schema,
+        cancellation.as_ref(),
+    );
     let prompt_deleted_after_run = fs::remove_file(&prompt_path).is_ok();
     if !prompt_deleted_after_run {
         return Err(LocalInstructError::new(
@@ -924,6 +982,7 @@ fn run_llama_command(
     config: &LocalInstructModelConfig,
     prompt_path: &Path,
     max_tokens: u32,
+    output_schema: Option<&str>,
     cancellation: Option<&Arc<AtomicBool>>,
 ) -> Result<LocalLlmRun, LocalInstructError> {
     ensure_not_cancelled(cancellation)?;
@@ -944,13 +1003,20 @@ fn run_llama_command(
     let max_tokens = max_tokens.to_string();
     let context_tokens = context_tokens.to_string();
     let completion_frontend = is_llama_completion_frontend(binary_path);
+    if !completion_frontend {
+        return Err(LocalInstructError::new(
+            "LOCAL_LLM_FRONTEND_UNSUPPORTED",
+            "Candor requires the pinned llama-completion frontend for local AI.",
+        ));
+    }
     let subprocess_flags: &[&str] = if completion_frontend {
         &LLAMA_COMPLETION_SUBPROCESS_FLAGS
     } else {
         &LLAMA_CLI_SUBPROCESS_FLAGS
     };
 
-    let mut child = Command::new(binary_path)
+    let mut command = Command::new(binary_path);
+    command
         .arg("-m")
         .arg(model_path)
         .arg("-f")
@@ -962,7 +1028,11 @@ fn run_llama_command(
         .arg("--temp")
         .arg("0.2")
         .arg("--no-display-prompt")
-        .args(subprocess_flags)
+        .args(subprocess_flags);
+    if let Some(schema) = output_schema {
+        command.arg("--json-schema").arg(schema);
+    }
+    let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1180,6 +1250,7 @@ fn env_path(name: &str) -> Option<PathBuf> {
 fn failure_reason(context: FailureReasonContext) -> (Option<&'static str>, Option<&'static str>) {
     let FailureReasonContext {
         binary_configured,
+        binary_frontend_supported,
         model_configured,
         binary_exists,
         model_exists,
@@ -1196,6 +1267,12 @@ fn failure_reason(context: FailureReasonContext) -> (Option<&'static str>, Optio
         return (
             Some("LOCAL_LLM_BINARY_NOT_CONFIGURED"),
             Some("Configure a local llama.cpp-compatible binary before enabling instruct models."),
+        );
+    }
+    if !binary_frontend_supported {
+        return (
+            Some("LOCAL_LLM_FRONTEND_UNSUPPORTED"),
+            Some("Candor requires the pinned llama-completion frontend for local AI."),
         );
     }
     if !model_configured {
@@ -1442,6 +1519,7 @@ fn append_prompt_segments(prompt: &mut String, segments: &[PromptSegment]) {
 }
 
 fn finish_prompt(prompt: String) -> Result<String, LocalInstructError> {
+    let prompt = format!("{prompt}\n/no_think\n");
     if prompt.len() <= MAX_PROMPT_BYTES {
         Ok(prompt)
     } else {
@@ -2168,9 +2246,9 @@ mod tests {
         let root = temp_root("hash-mismatch");
         fs::create_dir_all(&root).expect("create temp root");
         let binary_path = root.join(if cfg!(windows) {
-            "llama-cli.exe"
+            "llama-completion.exe"
         } else {
-            "llama-cli"
+            "llama-completion"
         });
         let model_path = root.join("tiny.gguf");
         fs::write(&binary_path, b"binary").expect("write binary");
@@ -2199,6 +2277,36 @@ mod tests {
         assert_eq!(status["rawPathExposed"], false);
         assert!(!serialized.contains(&root.to_string_lossy().to_string()));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn status_rejects_legacy_llama_cli_even_with_matching_hashes() {
+        let root = temp_root("unsupported-frontend");
+        fs::create_dir_all(&root).expect("create temp root");
+        let binary_path = root.join(if cfg!(windows) {
+            "llama-cli.exe"
+        } else {
+            "llama-cli"
+        });
+        let model_path = root.join("tiny.gguf");
+        fs::write(&binary_path, b"binary").expect("write binary");
+        fs::write(&model_path, b"model").expect("write model");
+
+        let scheduler = LocalModelScheduler::default();
+        let status = LocalInstructModelService::status_for_config(
+            LocalInstructModelConfig {
+                expected_binary_sha256: Some(sha256_file(&binary_path).expect("hash binary")),
+                expected_model_sha256: Some(sha256_file(&model_path).expect("hash model")),
+                binary_path: Some(binary_path),
+                model_path: Some(model_path),
+                ..LocalInstructModelConfig::default()
+            },
+            &scheduler,
+        );
+
+        assert_eq!(status["ready"], false);
+        assert_eq!(status["failureCode"], "LOCAL_LLM_FRONTEND_UNSUPPORTED");
         let _ = fs::remove_dir_all(root);
     }
 
@@ -2286,11 +2394,37 @@ mod tests {
     fn llama_frontend_contract_uses_clean_one_shot_modes() {
         assert_eq!(
             LLAMA_CLI_SUBPROCESS_FLAGS,
-            ["--single-turn", "--simple-io", "--log-disable"]
+            [
+                "--single-turn",
+                "--simple-io",
+                "--log-disable",
+                "--reasoning",
+                "off",
+                "--reasoning-budget",
+                "0"
+            ]
         );
+        let recap_schema = serde_json::from_str::<Value>(GROUNDED_RECAP_JSON_SCHEMA)
+            .expect("recap output schema must be valid JSON");
+        let ask_schema = serde_json::from_str::<Value>(GROUNDED_ASK_JSON_SCHEMA)
+            .expect("Ask output schema must be valid JSON");
+        assert_eq!(recap_schema["additionalProperties"], false);
+        assert_eq!(recap_schema["properties"]["answer"]["type"], "null");
+        assert_eq!(ask_schema["properties"]["summary"]["const"], json!([]));
+        assert_eq!(ask_schema["properties"]["schemaVersion"]["const"], 1);
+        assert!(GROUNDED_RECAP_JSON_SCHEMA.len() < 8_000);
+        assert!(GROUNDED_ASK_JSON_SCHEMA.len() < 8_000);
         assert_eq!(
             LLAMA_COMPLETION_SUBPROCESS_FLAGS,
-            ["--conversation", "--single-turn", "--simple-io"]
+            [
+                "--conversation",
+                "--single-turn",
+                "--simple-io",
+                "--reasoning",
+                "off",
+                "--reasoning-budget",
+                "0"
+            ]
         );
         assert!(is_llama_completion_frontend(Path::new(
             "llama-completion.exe"

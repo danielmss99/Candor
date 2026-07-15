@@ -47,7 +47,7 @@ function responsiveCore(active = false): string {
         build: { target: "test-target", features: [] }
       };
       if (request.method === "core.version") handshakeCount += 1;
-      if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1" } : null, sources: {}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1", durationMs: 1000 } : null, sources: {}, rawPathExposed: false };
       if (request.method === "capture.startMic") {
         captureActive = true;
         result = {
@@ -86,7 +86,7 @@ function capturingThenSilentCore(): string {
         capabilities: ["stdio-json-lines"],
         build: { target: "test-target", features: [] }
       };
-      if (request.method === "capture.status") result = { implemented: true, active: true, activeSession: { recordingId: "recording-1" }, sources: {}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: true, activeSession: { recordingId: "recording-1", durationMs: 1000 }, sources: {}, rawPathExposed: false };
       if (result !== null) {
         process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       }
@@ -113,7 +113,7 @@ function capturingCoreWithHungStatus(): string {
       if (request.method === "capture.status") result = {
         implemented: true,
         active,
-        activeSession: active ? { recordingId: "recording-1" } : null,
+        activeSession: active ? { recordingId: "recording-1", durationMs: 1000 } : null,
         sources: {},
         rawPathExposed: false
       };
@@ -382,7 +382,7 @@ describe("core client process boundary", () => {
 
   it("rejects a malformed successful result before delivery", async () => {
     const script = responsiveCore().replace(
-      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1" } : null, sources: {}, rawPathExposed: false };',
+      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1", durationMs: 1000 } : null, sources: {}, rawPathExposed: false };',
       'if (request.method === "capture.status") result = { active: "yes" };',
     );
     const client = new CoreClient({

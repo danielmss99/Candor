@@ -324,7 +324,22 @@ try {
     });
     assertCustody(started, "real capture start");
     const captureStartedAt = Date.now();
-    await sleep(realDurationMs);
+    const timerProbeDelayMs = Math.min(
+      500,
+      Math.max(250, Math.floor(realDurationMs / 2)),
+    );
+    await sleep(timerProbeDelayMs);
+    const activeStatus = await call("capture.status");
+    assertCustody(activeStatus, "active real capture status");
+    const activeDurationMs = activeStatus?.activeSession?.durationMs;
+    if (
+      activeStatus?.activeSession?.recordingId !== started?.capture?.recordingId ||
+      !Number.isSafeInteger(activeDurationMs) ||
+      activeDurationMs <= 0
+    ) {
+      throw new Error("real mic capture status did not report an increasing elapsed duration");
+    }
+    await sleep(Math.max(0, realDurationMs - timerProbeDelayMs));
     const stopped = await call("capture.stop");
     const captureStoppedAt = Date.now();
     assertCustody(stopped, "real capture stop");
@@ -334,6 +349,7 @@ try {
     proof.realDevice.mic.ok = true;
     proof.realDevice.mic.durationMsRequested = realDurationMs;
     proof.realDevice.mic.durationMsActual = captureStoppedAt - captureStartedAt;
+    proof.realDevice.mic.timerDurationMs = activeDurationMs;
     proof.realDevice.mic.audioChunkCount = stopped.recording.audioChunkCount;
     proof.realDevice.mic.recordingState = stopped.recording.state;
   }

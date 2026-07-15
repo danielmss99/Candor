@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
 import { VISUAL_SCENARIOS } from "../visual/VisualEvidenceApp";
+import { findClippedText } from "./text-layout";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
@@ -39,6 +40,11 @@ test("generates the critical GUI state evidence matrix", async () => {
     try {
       const page = await app.firstWindow({ timeout: 30_000 });
       await page.waitForLoadState("domcontentloaded");
+      await expect(page.locator("html")).toHaveAttribute("data-theme", /^(light|dark)$/);
+      if ((await page.locator("html").getAttribute("data-theme")) !== "light") {
+        await page.getByRole("button", { name: "Switch to light mode" }).click();
+      }
+      await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
       for (const scenario of VISUAL_SCENARIOS) {
         await page.evaluate((nextScenario) => { window.location.hash = `scenario=${nextScenario}`; }, scenario);
         await expect(page.locator(`[data-visual-scenario="${scenario}"]`)).toBeVisible();
@@ -48,6 +54,7 @@ test("generates the critical GUI state evidence matrix", async () => {
           documentWidth: document.documentElement.scrollWidth,
         }));
         expect(overflow.documentWidth, `${scenario} has horizontal viewport overflow`).toBeLessThanOrEqual(overflow.viewportWidth + 1);
+        expect(await findClippedText(page), `${scenario} has clipped text at ${viewport.id}`).toEqual([]);
         const directory = path.join(evidenceRoot, viewport.id);
         mkdirSync(directory, { recursive: true });
         const absolutePath = path.join(directory, `${scenario}.png`);

@@ -39,6 +39,8 @@ describe("safe diagnostic report", () => {
           provenance: {
             engine: "heuristic",
             modelId: null,
+            modelSha256: null,
+            runtimeSha256: null,
             fallbackUsed: true,
             fallbackReason: "llm-unavailable",
             promptVersion: "candor-heuristic-v1",
@@ -84,6 +86,8 @@ describe("safe diagnostic report", () => {
           provenance: {
             engine: "local-llm",
             modelId: "qwen3-4b",
+            modelSha256: "a".repeat(64),
+            runtimeSha256: "b".repeat(64),
             fallbackUsed: false,
             fallbackReason: null,
             promptVersion: "candor-grounded-v1",

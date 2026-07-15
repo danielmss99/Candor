@@ -102,6 +102,8 @@ describe("renderer core input validation", () => {
       "ai.instructAssetsStatus": null,
       "ai.instructStatus": null,
       "ai.schedulerStatus": null,
+      "ai.fallbackPreference.status": null,
+      "ai.fallbackPreference.update": { preference: "ask-first" },
       "transcription.status": null,
       "transcription.quality.status": null,
       "transcription.quality.update": { tier: "balanced", languagePreference: "english" },

@@ -8,7 +8,6 @@ interface EmptyStateProps {
 export function EmptyState({ title, description, actionLabel, onAction }: EmptyStateProps) {
   return (
     <section className="empty-state-panel" aria-label={title}>
-      <span className="empty-state-mark" aria-hidden="true" />
       <div>
         <h3>{title}</h3>
         <p>{description}</p>

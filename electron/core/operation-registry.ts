@@ -100,6 +100,8 @@ function canonicalAiProvenance(value: JsonValue, method: string): JsonValue {
   const provenance = objectResult(value, method, "provenance");
   const engine = provenance.engine;
   const modelId = provenance.modelId;
+  const modelSha256 = provenance.modelSha256;
+  const runtimeSha256 = provenance.runtimeSha256;
   const fallbackUsed = provenance.fallbackUsed;
   const fallbackReason = provenance.fallbackReason;
   const promptVersion = provenance.promptVersion;
@@ -107,6 +109,8 @@ function canonicalAiProvenance(value: JsonValue, method: string): JsonValue {
   if (
     (engine !== "local-llm" && engine !== "heuristic")
     || (modelId !== null && (typeof modelId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/.test(modelId)))
+    || (modelSha256 !== null && (typeof modelSha256 !== "string" || !/^[a-f0-9]{64}$/.test(modelSha256)))
+    || (runtimeSha256 !== null && (typeof runtimeSha256 !== "string" || !/^[a-f0-9]{64}$/.test(runtimeSha256)))
     || typeof fallbackUsed !== "boolean"
     || (fallbackReason !== null && (typeof fallbackReason !== "string" || !aiFallbackReasons.has(fallbackReason)))
     || typeof promptVersion !== "string"
@@ -114,14 +118,28 @@ function canonicalAiProvenance(value: JsonValue, method: string): JsonValue {
     || typeof generatedAt !== "string"
     || generatedAt.length > 64
     || Number.isNaN(Date.parse(generatedAt))
-    || (engine === "local-llm" && (typeof modelId !== "string" || fallbackUsed || fallbackReason !== null))
-    || (engine === "heuristic" && (!fallbackUsed || typeof fallbackReason !== "string"))
+    || (engine === "local-llm" && (
+      typeof modelId !== "string"
+      || typeof modelSha256 !== "string"
+      || typeof runtimeSha256 !== "string"
+      || fallbackUsed
+      || fallbackReason !== null
+    ))
+    || (engine === "heuristic" && (
+      modelId !== null
+      || modelSha256 !== null
+      || runtimeSha256 !== null
+      || !fallbackUsed
+      || typeof fallbackReason !== "string"
+    ))
   ) {
     return invalidResult(method, "provenance");
   }
   return {
     engine,
     modelId,
+    modelSha256,
+    runtimeSha256,
     fallbackUsed,
     fallbackReason,
     promptVersion,
@@ -286,6 +304,8 @@ const rendererConfigs: readonly OperationConfig[] = [
   { method: "ai.bundledAssetsStatus", channel: "candor-core:ai-bundled-assets-status", result: { implemented: "boolean", localOnly: "boolean", cloudAi: "boolean", releaseReady: "boolean", fixture: "boolean", selectionStatus: "string", state: "string", ready: "boolean", repairRequired: "boolean", repairPolicy: "string", repairAction: "string", speech: "object", language: "object", requiredDownload: "boolean", backgroundDownloads: "boolean", runtimePathAcceptedFromRenderer: "boolean", rawPathExposed: "boolean", hashExposed: "boolean", keyMaterialExposedToRenderer: "boolean" } },
   { method: "ai.instructAssetsStatus", channel: "candor-core:ai-instruct-assets-status", result: { implemented: "boolean", localOnly: "boolean", rawPathExposed: "boolean" } },
   { method: "ai.instructStatus", channel: "candor-core:ai-instruct-status", result: { implemented: "boolean", localOnly: "boolean", rawPathExposed: "boolean" } },
+  { method: "ai.fallbackPreference.status", channel: "candor-core:ai-fallback-preference-status", result: { implemented: "boolean", state: "string", preference: "string", userAuthorizationRequired: "boolean", automaticFallback: "boolean", fallbackDisabled: "boolean", failureCode: "string-or-null", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean", keyMaterialExposedToRenderer: "boolean" } },
+  { method: "ai.fallbackPreference.update", channel: "candor-core:ai-fallback-preference-update", result: { implemented: "boolean", state: "string", preference: "string", userAuthorizationRequired: "boolean", automaticFallback: "boolean", fallbackDisabled: "boolean", failureCode: "string-or-null", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean", keyMaterialExposedToRenderer: "boolean" } },
   { method: "ai.schedulerStatus", channel: "candor-core:ai-scheduler-status", result: { implemented: "boolean", active: "boolean", singleLocalModelJob: "boolean", rawPathExposed: "boolean" } },
   { method: "transcription.status", channel: "candor-core:transcription-status", result: { implemented: "boolean", active: "boolean", localOnly: "boolean", engine: "string", rawPathExposed: "boolean" } },
   { method: "transcription.quality.status", channel: "candor-core:transcription-quality-status", result: { implemented: "boolean", state: "string", tier: "string", languagePreference: "string", recommendedTier: "string", benchmarkState: "string", estimatedMinutesPerHour: "integer-or-null", estimatedCompletionAvailable: "boolean", hardware: "object", tiers: "array", localOnly: "boolean", cloudAi: "boolean", rawPathExposed: "boolean" }, resultSchema: transcriptionQualityResultSchema("transcription.quality.status") },
@@ -323,7 +343,7 @@ const privateConfigs: readonly OperationConfig[] = [
   { method: "jobs.activeSummary", result: { activeCount: "integer", jobs: "array", rawPathExposed: "boolean" } },
   { method: "jobs.get", result: { jobId: "string", type: "string", state: "string", createdAt: "string", updatedAt: "string", terminal: "boolean", rawPathExposed: "boolean" } },
   { method: "jobs.cancel", result: { jobId: "string", state: "string", cancelRequested: "boolean", terminal: "boolean", rawPathExposed: "boolean" } },
-  { method: "jobs.cancelAll", result: { cancelRequestedCount: "integer", rawPathExposed: "boolean" } },
+  { method: "jobs.cancelAll", result: { cancelRequestedCount: "integer", requestedCount: "integer", skippedCount: "integer", rawPathExposed: "boolean" } },
   { method: "jobs.pauseAll", result: { pausedCount: "integer", restartOnNextLaunch: "boolean", rawPathExposed: "boolean" } },
   { method: "jobs.retry", result: { jobId: "string", type: "string", state: "string", createdAt: "string", rawPathExposed: "boolean" } },
   { method: "jobs.acknowledge", result: { jobId: "string", acknowledged: "boolean", rawPathExposed: "boolean" } },

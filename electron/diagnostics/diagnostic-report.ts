@@ -28,6 +28,10 @@ function safeErrorCode(value: unknown): string | null {
   return typeof value === "string" && SAFE_ERROR_CODE.test(value) ? value : null;
 }
 
+function safeSha256(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null;
+}
+
 function safeInteger(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
@@ -72,6 +76,8 @@ export function buildDiagnosticReport(input: DiagnosticReportInput): JsonValue {
         state: safeToken(job.state),
         engine: safeToken(provenance.engine),
         modelId: provenance.modelId === null ? null : safeToken(provenance.modelId),
+        modelSha256: safeSha256(provenance.modelSha256),
+        runtimeSha256: safeSha256(provenance.runtimeSha256),
         fallbackUsed: safeBoolean(provenance.fallbackUsed),
         fallbackReason: provenance.fallbackReason === null ? null : safeToken(provenance.fallbackReason),
         promptVersion: safeToken(provenance.promptVersion),

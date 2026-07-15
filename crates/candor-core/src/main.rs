@@ -1,3 +1,4 @@
+mod ai_fallback_preference;
 mod background_jobs;
 mod bundled_ai_assets;
 mod capture_service;
@@ -27,6 +28,10 @@ use std::process;
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ai_fallback_preference::{
+    AiFallbackPreferenceError, AiFallbackPreferenceService, AiFallbackPreferenceUpdateParams,
+    AiJobIntent,
+};
 use background_jobs::{
     descriptor_for_ask, descriptor_for_dictionary_import, descriptor_for_export,
     descriptor_for_recap, descriptor_for_transcription, processing_queue_failure,
@@ -38,7 +43,7 @@ use capture_service::{
 };
 use consent_store::{ConsentAcknowledgeParams, ConsentError, ConsentStore};
 use dictionary_staging::DictionaryStaging;
-use job_manager::{AiExecutionMode, AiFallbackPolicy, JobFailure, JobManager, JobManagerError};
+use job_manager::{JobFailure, JobManager, JobManagerError};
 use local_ai_service::{
     LocalAiError, LocalAiProofParams, LocalAiService, LocalAskParams, LocalRecapParams,
 };
@@ -131,9 +136,7 @@ struct JobIdParams {
 struct AiRecapJobParams {
     recording_id: String,
     #[serde(default)]
-    mode: AiExecutionMode,
-    #[serde(default)]
-    fallback_policy: AiFallbackPolicy,
+    intent: AiJobIntent,
 }
 
 #[derive(Debug, Deserialize)]
@@ -142,9 +145,7 @@ struct AiAskJobParams {
     recording_id: String,
     question: String,
     #[serde(default)]
-    mode: AiExecutionMode,
-    #[serde(default)]
-    fallback_policy: AiFallbackPolicy,
+    intent: AiJobIntent,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +206,7 @@ impl RecentRequestIds {
 
 struct CoreState {
     started_at_ms: u128,
+    ai_fallback_preference: AiFallbackPreferenceService,
     bundled_ai_assets: BundledAiAssets,
     capture_manager: CaptureManager,
     consent_store: ConsentStore,
@@ -240,6 +242,9 @@ impl CoreState {
         let transcription_quality_root = recording_store
             .settings_root_for_core()
             .join("transcription");
+        let ai_fallback_preference = AiFallbackPreferenceService::with_root(
+            recording_store.settings_root_for_core().join("local-ai"),
+        );
         let terminology_service = TerminologyService::with_roots(
             recording_store.settings_root_for_core().join("terminology"),
             recording_store.key_root_for_core(),
@@ -263,6 +268,7 @@ impl CoreState {
         start_dictionary_staging_maintenance(job_manager.clone(), dictionary_staging.clone());
         let state = Self {
             started_at_ms,
+            ai_fallback_preference,
             bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
             consent_store: ConsentStore::from_env(),
@@ -316,6 +322,9 @@ impl CoreState {
         let transcription_quality_root = recording_store
             .settings_root_for_core()
             .join("transcription");
+        let ai_fallback_preference = AiFallbackPreferenceService::with_root(
+            recording_store.settings_root_for_core().join("local-ai"),
+        );
         let terminology_service = TerminologyService::with_roots(
             recording_store.settings_root_for_core().join("terminology"),
             recording_store.key_root_for_core(),
@@ -338,6 +347,7 @@ impl CoreState {
         maintain_dictionary_staging(&job_manager, &dictionary_staging);
         let state = Self {
             started_at_ms,
+            ai_fallback_preference,
             bundled_ai_assets: bundled_ai_assets.clone(),
             capture_manager: CaptureManager::default(),
             consent_store: ConsentStore::with_root(consent_root),
@@ -559,6 +569,10 @@ fn make_transcription_quality_error(id: Value, error: TranscriptionQualityError)
     make_error(id, error.code, error.message)
 }
 
+fn make_ai_fallback_preference_error(id: Value, error: AiFallbackPreferenceError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
 fn make_terminology_error(id: Value, error: TerminologyError) -> RpcResponse {
     make_error(id, error.code, error.message)
 }
@@ -672,6 +686,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "ai.recapHeuristic",
                 "ai.instructStatus",
                 "ai.instructAssetsStatus",
+                "ai.fallbackPreference.status",
+                "ai.fallbackPreference.update",
                 "ai.instructAssetsImportFromPath",
                 "ai.instructAssetsImport.start",
                 "ai.proofInstructPreflight",
@@ -947,7 +963,16 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                     state.job_manager.set_recording_active(false);
                 }
                 if let Some(recording_id) = recording_id {
-                    let descriptor = descriptor_for_transcription(recording_id, None, None, true);
+                    let descriptor = descriptor_for_transcription(
+                        recording_id,
+                        None,
+                        None,
+                        true,
+                        state
+                            .ai_fallback_preference
+                            .preference_or_safe_default()
+                            .default_fallback_policy(),
+                    );
                     let executor = state.background_job_services().executor();
                     match state.job_manager.submit_descriptor(descriptor, executor) {
                         Ok(job) => {
@@ -1167,6 +1192,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let recording_id = params.recording_id.clone();
+            let identity_before = match state.bundled_ai_assets.required_language_identity() {
+                Ok(identity) => identity,
+                Err(error) => return make_error(id, error.code, error.message),
+            };
             let value = match state.local_instruct_model.recap(
                 &state.recording_store,
                 &mut state.model_scheduler,
@@ -1175,13 +1204,23 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(value) => value,
                 Err(error) => return make_local_instruct_error(id, error),
             };
-            let status = state.local_instruct_model.status(&state.model_scheduler);
+            let identity_after = match state.bundled_ai_assets.required_language_identity() {
+                Ok(identity) if identity == identity_before => identity,
+                Ok(_) => {
+                    return make_error(
+                        id,
+                        "LOCAL_LLM_IDENTITY_CHANGED",
+                        "the verified Local AI identity changed during generation",
+                    )
+                }
+                Err(error) => return make_error(id, error.code, error.message),
+            };
             if let Err(error) = state.recording_store.record_processing_fact(
                 &recording_id,
                 "local-ai-recap",
                 "llama-cpp-local",
-                Some("managed-local-instruct"),
-                status.get("modelSha256").and_then(Value::as_str),
+                Some(&identity_after.model_id),
+                Some(&identity_after.model_sha256),
             ) {
                 return make_recording_error(id, error);
             }
@@ -1193,6 +1232,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let recording_id = params.recording_id.clone();
+            let identity_before = match state.bundled_ai_assets.required_language_identity() {
+                Ok(identity) => identity,
+                Err(error) => return make_error(id, error.code, error.message),
+            };
             let value = match state.local_instruct_model.ask(
                 &state.recording_store,
                 &mut state.model_scheduler,
@@ -1201,13 +1244,23 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(value) => value,
                 Err(error) => return make_local_instruct_error(id, error),
             };
-            let status = state.local_instruct_model.status(&state.model_scheduler);
+            let identity_after = match state.bundled_ai_assets.required_language_identity() {
+                Ok(identity) if identity == identity_before => identity,
+                Ok(_) => {
+                    return make_error(
+                        id,
+                        "LOCAL_LLM_IDENTITY_CHANGED",
+                        "the verified Local AI identity changed during generation",
+                    )
+                }
+                Err(error) => return make_error(id, error.code, error.message),
+            };
             if let Err(error) = state.recording_store.record_processing_fact(
                 &recording_id,
                 "local-ai-ask",
                 "llama-cpp-local",
-                Some("managed-local-instruct"),
-                status.get("modelSha256").and_then(Value::as_str),
+                Some(&identity_after.model_id),
+                Some(&identity_after.model_sha256),
             ) {
                 return make_recording_error(id, error);
             }
@@ -1289,13 +1342,29 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "ai.proofSchedulerBusy" => state.model_scheduler.proof_busy_denies_second_job(),
+        "ai.fallbackPreference.status" => state.ai_fallback_preference.status(),
+        "ai.fallbackPreference.update" => {
+            let params =
+                match decode_params::<AiFallbackPreferenceUpdateParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.ai_fallback_preference.update(params) {
+                Ok(value) => value,
+                Err(error) => return make_ai_fallback_preference_error(id, error),
+            }
+        }
         "ai.recap.start" => {
             let params = match decode_params::<AiRecapJobParams>(id.clone(), req.params) {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            let policy = match state.ai_fallback_preference.resolve_intent(params.intent) {
+                Ok(policy) => policy,
+                Err(error) => return make_ai_fallback_preference_error(id, error),
+            };
             let descriptor =
-                descriptor_for_recap(params.recording_id, params.mode, params.fallback_policy);
+                descriptor_for_recap(params.recording_id, policy.mode, policy.fallback_policy);
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
@@ -1307,11 +1376,15 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            let policy = match state.ai_fallback_preference.resolve_intent(params.intent) {
+                Ok(policy) => policy,
+                Err(error) => return make_ai_fallback_preference_error(id, error),
+            };
             let descriptor = descriptor_for_ask(
                 params.recording_id,
                 params.question,
-                params.mode,
-                params.fallback_policy,
+                policy.mode,
+                policy.fallback_policy,
             );
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
@@ -1565,6 +1638,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 params.channel,
                 params.model_id,
                 false,
+                state
+                    .ai_fallback_preference
+                    .preference_or_safe_default()
+                    .default_fallback_policy(),
             );
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {

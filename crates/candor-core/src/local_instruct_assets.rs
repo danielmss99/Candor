@@ -87,9 +87,9 @@ impl AssetKind {
         match self {
             Self::Runner => {
                 if cfg!(windows) {
-                    "llama-cli.exe"
+                    "llama-completion.exe"
                 } else {
-                    "llama-cli"
+                    "llama-completion"
                 }
             }
             Self::Model => "instruct-model.gguf",

@@ -9,6 +9,20 @@ export interface WaitForJobOptions {
   onProgress?: (job: BackgroundTask) => void;
 }
 
+export class BackgroundJobFailure extends Error {
+  readonly code: string;
+  readonly state: BackgroundTask["state"];
+  readonly retryable: boolean;
+
+  constructor(job: BackgroundTask) {
+    super(job.error?.message ?? (job.state === "cancelled" ? "Local work was cancelled." : "Local work failed."));
+    this.name = "BackgroundJobFailure";
+    this.code = job.error?.code ?? (job.state === "cancelled" ? "JOB_CANCELLED" : "JOB_FAILED");
+    this.state = job.state;
+    this.retryable = job.error?.retryable ?? false;
+  }
+}
+
 function acceptedJobId(value: unknown): string {
   const jobId = asString(asObject(value as LocalJsonValue).jobId);
   if (!/^[a-f0-9]{32}$/.test(jobId)) throw new Error("Candor did not return a valid local work id.");
@@ -42,7 +56,7 @@ export async function waitForJob(
         if (options.acknowledge !== false) await api.app.acknowledgeJob(jobId).catch(() => undefined);
         resolve(result);
       } else {
-        reject(new Error(job.error?.message ?? (state === "cancelled" ? "Local work was cancelled." : "Local work failed.")));
+        reject(new BackgroundJobFailure(job));
       }
       return true;
     };
