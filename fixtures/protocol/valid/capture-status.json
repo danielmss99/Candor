@@ -10,6 +10,7 @@
       "mic": { "implemented": true },
       "system": { "implemented": true }
     },
-    "rawPathExposed": false
+    "rawPathExposed": false,
+    "keyMaterialExposedToRenderer": false
   }
 }

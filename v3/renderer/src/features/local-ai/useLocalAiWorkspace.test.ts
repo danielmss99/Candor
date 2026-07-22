@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   parseModels,
   parseTranscriptionQualityStatus,
@@ -6,6 +6,8 @@ import {
 } from "../../core/contracts";
 import {
   benchmarkRetryRequired,
+  prepareTranscriptHandoff,
+  recordingScopedRecapRequest,
   shouldStartAutomaticBenchmark,
   speechModelForBundledDefault,
 } from "./useLocalAiWorkspace";
@@ -42,6 +44,28 @@ function bundledStatus(modelId: string, ready = true): BundledAiStatus {
 }
 
 describe("local AI model state", () => {
+  it("waits for the cleanup handoff and discloses original-transcript fallback", async () => {
+    const cleanupTranscript = vi.fn().mockResolvedValue({
+      jobId: "a".repeat(32),
+    });
+    const getJob = vi.fn().mockResolvedValue({
+      jobId: "a".repeat(32),
+      type: "transcript-cleanup",
+      state: "completed",
+      terminal: true,
+      result: { fallbackApplied: true },
+    });
+    const api = {
+      ai: { cleanupTranscript },
+      app: { getJob, acknowledgeJob: vi.fn().mockResolvedValue(undefined) },
+      events: { subscribe: vi.fn().mockReturnValue(() => undefined) },
+    } as unknown as NonNullable<Window["candor"]>;
+
+    await expect(prepareTranscriptHandoff(api, "recording-a")).resolves.toBe("original");
+    expect(cleanupTranscript).toHaveBeenCalledWith("recording-a");
+    expect(getJob).toHaveBeenCalledWith("a".repeat(32));
+  });
+
   it("rejects malformed model metadata instead of inventing readiness", () => {
     expect(() => parseModels({ models: [{ modelId: "base.en", installed: true }] }))
       .toThrow(/protocol error/i);
@@ -52,6 +76,14 @@ describe("local AI model state", () => {
     expect(speechModelForBundledDefault("base.en", packaged)).toBe("small.en");
     expect(speechModelForBundledDefault("tiny.en", packaged, true)).toBe("tiny.en");
     expect(speechModelForBundledDefault("base.en", bundledStatus("small.en", false))).toBe("base.en");
+  });
+
+  it("leaves recap template selection bound to the recording in core", () => {
+    expect(recordingScopedRecapRequest("recording-a", "default")).toEqual({
+      recordingId: "recording-a",
+      intent: "default",
+    });
+    expect(recordingScopedRecapRequest("recording-a", "default")).not.toHaveProperty("recapTemplate");
   });
 
   it("starts the automatic benchmark only for ready idle installs without prior work", () => {

@@ -5,14 +5,17 @@ describe("network guard", () => {
   it("allows local resources and blocks remote resources", () => {
     const guard = new NetworkGuard();
     expect(guard.recordRequest("file:///app/index.html", false)).toBe(true);
+    expect(guard.recordRequest("blob:file:///microphone-playback", false, "media")).toBe(true);
+    expect(guard.recordRequest("blob:file:///microphone-playback", false, "xhr")).toBe(false);
+    expect(guard.recordRequest("blob:file:///microphone-playback", false, "mainFrame")).toBe(false);
     expect(guard.recordRequest("http://127.0.0.1:5173/main.tsx", true)).toBe(true);
     expect(guard.recordRequest("https://example.com/data", false)).toBe(false);
     expect(guard.snapshot()).toMatchObject({
-      totalRequests: 3,
-      localAllowedRequests: 1,
+      totalRequests: 6,
+      localAllowedRequests: 2,
       externalAllowedRequests: 1,
-      blockedRequests: 1,
-      blockedSamples: ["https://example.com"],
+      blockedRequests: 3,
+      blockedSamples: ["blob://", "blob://", "https://example.com"],
     });
   });
 

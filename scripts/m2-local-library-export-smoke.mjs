@@ -1,8 +1,10 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { searchWhenReady } from "./core-rpc-search-retry.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -150,7 +152,7 @@ try {
     throw new Error("local library read did not return chunk text");
   }
 
-  const search = await call("recording.durable.search", { query: "offline export" });
+  const search = await searchWhenReady(call, { query: "offline export" });
   assertCustody(search, "search");
   if (search?.matchCount !== 1 || !search?.matches?.[0]?.snippet?.includes("offline export")) {
     throw new Error("local text search did not find the expected chunk");
@@ -294,6 +296,8 @@ try {
   console.log("M2 local library export smoke passed.");
   console.log(`M2 local document export proof written to ${proofPath}.`);
 } finally {
-  if (!child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  lines.close();
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
 }

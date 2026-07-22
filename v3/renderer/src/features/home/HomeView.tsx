@@ -1,6 +1,7 @@
 import { ChevronRight, Cpu, FolderInput, HardDrive, MoreHorizontal } from "lucide-react";
 import { EmptyState } from "../../components/EmptyState";
 import { asNumber, asString, formatDuration, metric, type JsonObject, type RecordingSummary } from "../../core/contracts";
+import { MediaImportControl } from "../media-import";
 
 interface HomeViewProps {
   recordings: RecordingSummary[];
@@ -17,6 +18,7 @@ interface HomeViewProps {
   onStartRecording: () => void;
   onOpenLibrary: () => void;
   onImport: () => void;
+  onMediaImported: () => void | Promise<void>;
   onRecordingTitleChange: (value: string) => void;
   onOpenRecording: (recordingId: string) => void;
 }
@@ -35,6 +37,7 @@ export function HomeView({
   aiModeStatus,
   onOpenLibrary,
   onImport,
+  onMediaImported,
   onRecordingTitleChange,
   onOpenRecording,
 }: HomeViewProps) {
@@ -53,6 +56,16 @@ export function HomeView({
         <details className="command-menu"><summary aria-label="More home actions" title="More actions"><MoreHorizontal size={18} aria-hidden="true" /></summary><div><button type="button" onClick={onImport} disabled={busy || !importAvailable}><FolderInput size={16} aria-hidden="true" />Import previous Candor folder</button></div></details>
       </div>
       {recordingBlocked && !activeCapture ? <div className="home-warning" role="alert"><HardDrive size={17} aria-hidden="true" /><div><strong>Recording is unavailable</strong><span>Free storage space before starting another meeting.</span></div></div> : null}
+      <MediaImportControl
+        compact
+        disabled={activeCapture || busy}
+        disabledMessage={activeCapture
+          ? "Finish the current recording before importing media."
+          : busy
+            ? "Wait for the current local operation to finish before importing media."
+            : undefined}
+        onImported={onMediaImported}
+      />
       <section className="dashboard-section">
         <div className="section-heading"><h2>Recent meetings</h2><button type="button" onClick={onOpenLibrary}>View all</button></div>
         <div className="recent-meeting-list">

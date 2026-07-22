@@ -47,7 +47,7 @@ function responsiveCore(active = false): string {
         build: { target: "test-target", features: [] }
       };
       if (request.method === "core.version") handshakeCount += 1;
-      if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1", durationMs: 1000 } : null, sources: {}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1", durationMs: 1000 } : null, sources: {}, rawPathExposed: false, keyMaterialExposedToRenderer: false };
       if (request.method === "capture.startMic") {
         captureActive = true;
         result = {
@@ -86,7 +86,7 @@ function capturingThenSilentCore(): string {
         capabilities: ["stdio-json-lines"],
         build: { target: "test-target", features: [] }
       };
-      if (request.method === "capture.status") result = { implemented: true, active: true, activeSession: { recordingId: "recording-1", durationMs: 1000 }, sources: {}, rawPathExposed: false };
+      if (request.method === "capture.status") result = { implemented: true, active: true, activeSession: { recordingId: "recording-1", durationMs: 1000 }, sources: {}, rawPathExposed: false, keyMaterialExposedToRenderer: false };
       if (result !== null) {
         process.stdout.write(JSON.stringify({ id: request.id, requestId: request.requestId, protocolVersion, ok: true, result }) + "\\n");
       }
@@ -115,7 +115,8 @@ function capturingCoreWithHungStatus(): string {
         active,
         activeSession: active ? { recordingId: "recording-1", durationMs: 1000 } : null,
         sources: {},
-        rawPathExposed: false
+        rawPathExposed: false,
+        keyMaterialExposedToRenderer: false
       };
       if (request.method === "capture.stop") {
         active = false;
@@ -166,6 +167,7 @@ describe("core client process boundary", () => {
       isDev: false,
       environment: () => ({
         CANDOR_AI_BUNDLE_ROOT: "C:\\Program Files\\Candor\\resources\\ai",
+        CANDOR_AUTOMATION_MODE: "1",
         CANDOR_CORE_TRANSPORT: "untrusted-override",
       }),
       spawnCore: (_executable, environment) => {
@@ -176,6 +178,7 @@ describe("core client process boundary", () => {
 
     await client.call("core.status");
     expect(spawnedEnvironment?.CANDOR_AI_BUNDLE_ROOT).toBe("C:\\Program Files\\Candor\\resources\\ai");
+    expect(spawnedEnvironment?.CANDOR_AUTOMATION_MODE).toBe("0");
     expect(spawnedEnvironment?.CANDOR_CORE_TRANSPORT).toBe("stdio-json-lines");
     await client.shutdown();
   });
@@ -193,6 +196,22 @@ describe("core client process boundary", () => {
     expect(response.result).toMatchObject({ protocolVersion: CORE_PROTOCOL_VERSION, handshakeCount: 1 });
     expect(client.snapshot()).toMatchObject({ state: "running", lastHandshake: { ok: true } });
     await client.shutdown();
+  });
+
+  it("does not mistake a previously signaled child for an exited process", async () => {
+    const child = spawnNode(responsiveCore());
+    const client = new CoreClient({
+      executablePath: () => process.execPath,
+      allowedMethods,
+      isDev: false,
+      spawnCore: () => child,
+    });
+
+    await client.ensureHandshake();
+    expect(child.kill(0)).toBe(true);
+    expect(child.killed).toBe(true);
+    await client.shutdown();
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
   });
 
   it("fails closed on malformed core output", async () => {
@@ -303,8 +322,9 @@ describe("core client process boundary", () => {
     await client.ensureHandshake();
     await client.call("capture.status");
     expect(client.snapshot()).toMatchObject({ captureActive: true });
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
     child.kill();
-    await settle();
+    await exited;
     expect(client.snapshot()).toMatchObject({ captureActive: false, captureRecoveryRequired: true });
     expect(degraded).toEqual([expect.objectContaining({ method: "core.processExit" })]);
   });
@@ -382,7 +402,7 @@ describe("core client process boundary", () => {
 
   it("rejects a malformed successful result before delivery", async () => {
     const script = responsiveCore().replace(
-      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1", durationMs: 1000 } : null, sources: {}, rawPathExposed: false };',
+      'if (request.method === "capture.status") result = { implemented: true, active: captureActive, activeSession: captureActive ? { recordingId: "recording-1", durationMs: 1000 } : null, sources: {}, rawPathExposed: false, keyMaterialExposedToRenderer: false };',
       'if (request.method === "capture.status") result = { active: "yes" };',
     );
     const client = new CoreClient({
@@ -397,7 +417,7 @@ describe("core client process boundary", () => {
     expect(client.snapshot()).toMatchObject({ state: "failed" });
   });
 
-  it("delivers validated job events independently from request responses", async () => {
+  it("keeps CoreClient alive when a media-import jobs.changed event arrives", async () => {
     const script = responsiveCore().replace(
       'if (request.method === "core.shutdown") result = { shutdown: true };',
       `if (request.method === "core.status") {
@@ -406,7 +426,7 @@ describe("core client process boundary", () => {
           event: "jobs.changed",
           payload: {
             jobId: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            type: "export",
+            type: "media-import",
             state: "running",
             createdAt: "2026-07-14T05:00:00Z",
             updatedAt: "2026-07-14T05:00:01Z",
@@ -441,6 +461,10 @@ describe("core client process boundary", () => {
 
     await client.call("core.status");
     expect(events).toEqual(["jobs.changed"]);
+    expect(client.snapshot()).toMatchObject({ state: "running" });
+    await expect(client.call("core.status")).resolves.toMatchObject({ ok: true });
+    expect(events).toEqual(["jobs.changed", "jobs.changed"]);
+    expect(client.snapshot()).toMatchObject({ state: "running" });
     unsubscribe();
     await client.shutdown();
   });

@@ -18,12 +18,29 @@ export function registerCoreIpc(dependencies: IpcDependencies): void {
         throw rendererSafeCoreError("INVALID_RENDERER_INPUT");
       }
       try {
+        if (
+          operation.method === "capture.startMic"
+          || operation.method === "capture.startSystem"
+          || operation.method === "capture.startMicAndSystem"
+        ) {
+          dependencies.modelAcquisition.cancelForCapture();
+        }
         const response = await dependencies.core.call(
           operation.method,
           validatedParams,
         );
         if (!response.ok) throw rendererSafeCoreError(response.error?.code);
-        return sanitizeCoreResultForRenderer(operation.method, response.result ?? null);
+        const result = sanitizeCoreResultForRenderer(
+          operation.method,
+          response.result ?? null,
+          operation.rendererResultFields,
+        );
+        dependencies.liveTranscriptEvents?.observeCoreOperation(
+          operation.method,
+          validatedParams,
+          result,
+        );
+        return result;
       } catch (error) {
         if (error instanceof CoreClientError) throw rendererSafeCoreError(error.code);
         if (error instanceof Error && error.message.startsWith("CANDOR_CORE_ERROR:")) throw error;

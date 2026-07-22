@@ -24,6 +24,7 @@ export interface CaptureCloseGuardDependencies {
   cancelBackgroundJobs(): Promise<void>;
   shutdownCore(): Promise<void>;
   reportFailure(window: BrowserWindow, message: string): Promise<void>;
+  onCloseAborted?(): void;
 }
 
 export interface CaptureCloseGuard {
@@ -78,6 +79,7 @@ export function installCaptureCloseGuard(
       } catch (error) {
         await dependencies.reportFailure(window, closeFailureMessage(error));
       } finally {
+        if (!closeApproved) dependencies.onCloseAborted?.();
         closeInProgress = false;
       }
     })();

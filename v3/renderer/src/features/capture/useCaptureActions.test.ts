@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  activeMeetingProfile,
+  profileCaptureBinding,
+  profilePostStartActions,
   preferredCaptureAction,
+  preferredCaptureActionForProfile,
   requireStartedRecordingId,
   shouldDisableRecordControl,
 } from "./useCaptureActions";
@@ -27,5 +31,66 @@ describe("preferred capture action", () => {
     expect(() => requireStartedRecordingId({ capture: {} })).toThrow(
       "Capture start did not return a durable recording ID.",
     );
+  });
+
+  it("starts live ASR only for an opted-in profile with its verified local model", () => {
+    const profile = {
+      id: "interview",
+      version: 4,
+      captureSource: "microphone" as const,
+      localModelTier: "maximum" as const,
+      language: "fr",
+      dictionaryIds: ["legal"],
+      liveTranscription: true,
+    };
+    expect(profilePostStartActions(profile, false, ["large-v3"])).toEqual([]);
+    expect(profilePostStartActions(profile, true, ["small"])).toEqual([]);
+    expect(profilePostStartActions(profile, true, ["large-v3"]))
+      .toEqual(["live-transcription"]);
+    expect(profilePostStartActions(
+      { ...profile, liveTranscription: false },
+      true,
+      ["large-v3"],
+    )).toEqual([]);
+  });
+
+  it("binds capture requests to the exact active profile version", () => {
+    expect(activeMeetingProfile({
+      activeProfileId: "interview",
+      profiles: [{
+        id: "interview",
+        version: 4,
+        captureSource: "combined",
+        localModelTier: "maximum",
+        language: "fr",
+        dictionaryIds: ["legal"],
+        liveTranscription: false,
+      }],
+    })).toMatchObject({ id: "interview", version: 4, captureSource: "combined" });
+    expect(activeMeetingProfile({
+      activeProfileId: "interview",
+      profiles: [{ id: "interview", captureSource: "combined", localModelTier: "maximum" }],
+    })).toBeNull();
+    expect(profileCaptureBinding({
+      id: "interview",
+      version: 4,
+      captureSource: "combined",
+      localModelTier: "maximum",
+      language: "fr",
+      dictionaryIds: ["legal"],
+      liveTranscription: false,
+    })).toEqual({ profileId: "interview", profileVersion: 4 });
+    const microphoneProfile = {
+      id: "voice-notes",
+      version: 2,
+      captureSource: "microphone" as const,
+      localModelTier: "fast" as const,
+      language: "en",
+      dictionaryIds: [],
+      liveTranscription: true,
+    };
+    expect(preferredCaptureActionForProfile(microphoneProfile, true, true)).toBe("microphone");
+    expect(preferredCaptureActionForProfile(microphoneProfile, false, false)).toBe("microphone");
+    expect(preferredCaptureActionForProfile(null, true, true)).toBe("combined");
   });
 });

@@ -7,15 +7,17 @@ describe("renderer core input validation", () => {
     expect(
       validateRendererCoreParams("capture.startMicAndSystem", {
         label: "  Weekly sync  ",
-        micDeviceId: "mic-1",
         systemDeviceId: "system-1",
         chunkMs: 500,
+        profileId: "weekly-sync",
+        profileVersion: 3,
       }),
     ).toEqual({
       label: "Weekly sync",
-      micDeviceId: "mic-1",
       systemDeviceId: "system-1",
       chunkMs: 500,
+      profileId: "weekly-sync",
+      profileVersion: 3,
     });
   });
 
@@ -24,8 +26,30 @@ describe("renderer core input validation", () => {
       .toThrow("field command is not allowed");
     expect(() => validateRendererCoreParams("capture.startMic", { chunkMs: 99 }))
       .toThrow("chunkMs must be an integer from 100 to 2000");
+    expect(() => validateRendererCoreParams("capture.startMic", { profileId: "general" }))
+      .toThrow("profileId and profileVersion must be provided together");
     expect(() => validateRendererCoreParams("recording.durable.listPage", { offset: 0, limit: 101 }))
       .toThrow("limit must be an integer from 1 to 100");
+  });
+
+  it("accepts bounded microphone-test preferences and rejects forged identity data", () => {
+    const fingerprint = "a".repeat(64);
+    expect(validateRendererCoreParams("capture.setPreferredMicrophone", {
+      deviceId: "input-2",
+      fingerprint,
+      ordinal: 2,
+    })).toEqual({ deviceId: "input-2", fingerprint, ordinal: 2 });
+    expect(validateRendererCoreParams("capture.micTestStart", {})).toEqual({});
+    expect(() => validateRendererCoreParams("capture.micTestStart", { deviceId: "input-2" }))
+      .toThrow("field deviceId is not allowed");
+    expect(() => validateRendererCoreParams("capture.startMic", { deviceId: "input-2" }))
+      .toThrow("field deviceId is not allowed");
+    expect(() => validateRendererCoreParams("capture.setPreferredMicrophone", {
+      deviceId: "input-2",
+      fingerprint: "../not-a-fingerprint",
+    })).toThrow("fingerprint must be 64 lowercase hexadecimal characters");
+    expect(() => validateRendererCoreParams("capture.micTestStart", { executable: "calc.exe" }))
+      .toThrow("field executable is not allowed");
   });
 
   it("rejects malformed identifiers and oversized user content", () => {
@@ -65,12 +89,115 @@ describe("renderer core input validation", () => {
     })).toThrow("field initialPrompt is not allowed");
   });
 
+  it("validates profiles and deterministic replacement rules as bounded structured data", () => {
+    const profile = {
+      name: "Interview",
+      captureSource: "combined",
+      language: "en-US",
+      localModelTier: "maximum",
+      dictionaryIds: ["medical-terms"],
+      replacementRuleSetId: "protected-terms",
+      recapTemplate: "Summarize evidence and follow-ups.",
+      liveTranscription: false,
+    };
+    expect(validateRendererCoreParams("profiles.upsert", profile)).toEqual(profile);
+    expect(() => validateRendererCoreParams("profiles.upsert", {
+      ...profile,
+      executable: "calc.exe",
+    })).toThrow("field executable is not allowed");
+
+    const ruleSet = {
+      name: "Protected terms",
+      rules: [{
+        id: "candor-name",
+        order: 10,
+        matchMode: "whole-word",
+        literal: "candle",
+        replacement: "Candor",
+        protectedTermReview: true,
+        enabled: true,
+      }],
+    };
+    expect(validateRendererCoreParams("replacements.upsert", ruleSet)).toEqual(ruleSet);
+    expect(() => validateRendererCoreParams("replacements.upsert", {
+      ...ruleSet,
+      rules: [...ruleSet.rules, { ...ruleSet.rules[0], id: "duplicate", order: 10 }],
+    })).toThrow("rule IDs and order values must be unique");
+  });
+
+  it("accepts only core-bound protected-term review approval", () => {
+    expect(validateRendererCoreParams("transcription.protectedTermReview", {
+      recordingId: "recording_1",
+    })).toEqual({ recordingId: "recording_1" });
+    expect(validateRendererCoreParams("transcription.applyProtectedTermReview", {
+      recordingId: "recording_1",
+      revisionId: "tr-000001-1",
+      previewToken: "a".repeat(64),
+    })).toEqual({
+      recordingId: "recording_1",
+      revisionId: "tr-000001-1",
+      previewToken: "a".repeat(64),
+    });
+    expect(() => validateRendererCoreParams("transcription.applyProtectedTermReview", {
+      recordingId: "recording_1",
+      revisionId: "tr-000001-1",
+      previewToken: "A".repeat(64),
+    })).toThrow("64 lowercase hexadecimal characters");
+    expect(() => validateRendererCoreParams("transcription.applyProtectedTermReview", {
+      recordingId: "recording_1",
+      revisionId: "tr-000001-1",
+      previewToken: "a".repeat(64),
+      transcript: "renderer-forged text",
+    })).toThrow("field transcript is not allowed");
+  });
+
   it("requires parameterless operations to remain parameterless", () => {
     expect(validateRendererCoreParams("core.status", null)).toBeNull();
     expect(() => validateRendererCoreParams("core.status", { verbose: true }))
       .toThrow("parameters are not accepted");
     expect(() => validateRendererCoreParams("core.ping", { transport: "generic" }))
       .toThrow("parameters are not accepted");
+    expect(() => validateRendererCoreParams("liveTranscript.eventsDrain", { recordingId: "recording_1" }))
+      .toThrow("parameters are not accepted");
+  });
+
+  it("allows live transcript lifecycle control but rejects renderer text ingress", () => {
+    expect(validateRendererCoreParams("liveTranscript.enable", { recordingId: "recording_1" }))
+      .toEqual({ recordingId: "recording_1" });
+    expect(() => validateRendererCoreParams("liveTranscript.start", {
+      recordingId: "recording_1",
+      text: "forged provisional transcript",
+    })).toThrow("field text is not allowed");
+    expect(() => validateRendererCoreParams("liveTranscript.snapshot", { recordingId: "../vault" }))
+      .toThrow("recordingId is invalid");
+  });
+
+  it("allows only opt-in preference and explicit anonymous speaker names", () => {
+    expect(validateRendererCoreParams("diarization.updatePreference", { enabled: true }))
+      .toEqual({ enabled: true });
+    expect(validateRendererCoreParams("diarization.assignSpeakerName", {
+      recordingId: "recording_1",
+      anonymousSpeakerId: "speaker-2",
+      displayName: "Avery",
+    })).toEqual({
+      recordingId: "recording_1",
+      anonymousSpeakerId: "speaker-2",
+      displayName: "Avery",
+    });
+    expect(() => validateRendererCoreParams("diarization.assignSpeakerName", {
+      recordingId: "recording_1",
+      anonymousSpeakerId: "Avery",
+      displayName: "Inferred identity",
+    })).toThrow("speaker-N format");
+    expect(() => validateRendererCoreParams("diarization.assignSpeakerName", {
+      recordingId: "recording_1",
+      anonymousSpeakerId: "speaker-1",
+      displayName: " Avery ",
+    })).toThrow("without surrounding whitespace");
+    expect(() => validateRendererCoreParams("diarization.updatePreference", {
+      enabled: true,
+      modelPath: "C:\\private\\model.bin",
+    })).toThrow("field modelPath is not allowed");
   });
 
   it("defines a runtime input contract for every renderer operation", () => {
@@ -86,10 +213,17 @@ describe("renderer core input validation", () => {
       "privacy.capabilities": null,
       "updates.status": null,
       "import.v2.status": null,
+      "media.importStatus": null,
       "consent.status": null,
       "consent.acknowledge": { items: ["localOnlyStorage"] },
       "capture.status": null,
       "capture.devices": null,
+      "capture.preferences": null,
+      "capture.setPreferredMicrophone": { deviceId: "default" },
+      "capture.micTestStart": {},
+      "capture.micTestStatus": null,
+      "capture.micTestSample": null,
+      "capture.micTestStop": null,
       "capture.startMic": {},
       "capture.startSystem": {},
       "capture.startMicAndSystem": {},
@@ -107,6 +241,46 @@ describe("renderer core input validation", () => {
       "transcription.status": null,
       "transcription.quality.status": null,
       "transcription.quality.update": { tier: "balanced", languagePreference: "english" },
+      "liveTranscript.enable": { recordingId },
+      "liveTranscript.start": { recordingId },
+      "liveTranscript.snapshot": { recordingId },
+      "liveTranscript.clear": { recordingId },
+      "liveTranscript.stop": { recordingId },
+      "liveTranscript.eventsDrain": null,
+      "diarization.status": null,
+      "diarization.updatePreference": { enabled: false },
+      "diarization.speakerNames": { recordingId },
+      "diarization.assignSpeakerName": {
+        recordingId,
+        anonymousSpeakerId: "speaker-1",
+        displayName: "Avery",
+      },
+      "diarization.removeSpeakerName": { recordingId, anonymousSpeakerId: "speaker-1" },
+      "profiles.list": null,
+      "profiles.get": { id: "general" },
+      "profiles.upsert": {
+        name: "Custom",
+        captureSource: "combined",
+        language: "auto",
+        localModelTier: "balanced",
+        dictionaryIds: [],
+        replacementRuleSetId: null,
+        recapTemplate: "Summarize decisions.",
+        liveTranscription: true,
+      },
+      "profiles.delete": { id: "custom-profile", expectedVersion: 1 },
+      "profiles.select": { id: "general" },
+      "replacements.list": null,
+      "replacements.get": { id: "none" },
+      "replacements.upsert": { name: "Custom rules", rules: [] },
+      "replacements.delete": { id: "custom-rules", expectedVersion: 1 },
+      "replacements.preview": { setId: "none", input: "raw transcript" },
+      "replacements.apply": {
+        setId: "none",
+        input: "raw transcript",
+        previewToken: "a".repeat(64),
+        approveProtectedTerms: false,
+      },
       "terminology.status": {},
       "terminology.setEnabled": { dictionaryId: "dictionary_1", enabled: true },
       "terminology.assign": { recordingId, dictionaryId: "dictionary_1", enabled: true },
@@ -117,6 +291,16 @@ describe("renderer core input validation", () => {
       "recording.durable.read": { recordingId },
       "recording.durable.replayManifest": { recordingId },
       "recording.durable.transcriptPage": { recordingId, offset: 0, limit: 50 },
+      "recording.trustHistory": { recordingId },
+      "recording.transcriptRevision": { recordingId, revisionId: "revision_1" },
+      "recording.selectTranscriptRevision": { recordingId, revisionId: "revision_1" },
+      "transcription.prepareReprocess": { recordingId, channel: "mic" },
+      "transcription.protectedTermReview": { recordingId },
+      "transcription.applyProtectedTermReview": {
+        recordingId,
+        revisionId: "revision_1",
+        previewToken: "a".repeat(64),
+      },
       "recording.privacyReceipt": { recordingId },
       "recording.durable.readAudioChunk": { recordingId, index: 0 },
       "recording.durable.search": { query: "budget" },

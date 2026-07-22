@@ -1,4 +1,4 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { CandorClient } from "../core/candor-client";
 import { asBool, asObject, asString } from "../core/contracts";
 import { useCaptureActions } from "../features/capture/useCaptureActions";
@@ -7,12 +7,14 @@ import { useReportWorkflow } from "../features/export/useReportWorkflow";
 import { useOperationRunner } from "../features/jobs/useOperationRunner";
 import { useLicenseState } from "../features/licensing/useLicenseState";
 import { useLocalAiWorkspace } from "../features/local-ai/useLocalAiWorkspace";
+import { useLiveTranscript } from "../features/live-transcript/useLiveTranscript";
 import { useMeetingActions } from "../features/meetings/useMeetingActions";
 import {
   chooseInitialSelection,
   useMeetingWorkspace,
 } from "../features/meetings/useMeetingWorkspace";
 import { useOnboardingSettings } from "../features/onboarding/useOnboardingSettings";
+import { recorderShortcutTestGate } from "../features/onboarding/shortcut-test-gate";
 import { useDiagnosticExport } from "../features/privacy/useDiagnosticExport";
 import { useRuntimeStatus } from "../features/startup/useRuntimeStatus";
 import { useWorkspaceStartup } from "../features/startup/useWorkspaceStartup";
@@ -27,8 +29,10 @@ export function CandorWorkspace() {
   const meeting = useMeetingWorkspace({ api, client });
   const navigation = useAppNavigation(meeting.selectedRecordingId);
   const runtime = useRuntimeStatus(api, client);
+  const [recorderPanelOpen, setRecorderPanelOpen] = useState(false);
   const activeCapture = asBool(runtime.captureStatus.active);
   const activeRecordingId = asString(asObject(runtime.captureStatus.activeSession).recordingId);
+  const liveTranscript = useLiveTranscript(api, activeRecordingId);
   const captureSession = useCaptureSession(activeCapture, activeRecordingId);
   const operations = useOperationRunner(captureSession.failed);
   const diagnostics = useDiagnosticExport({
@@ -116,6 +120,10 @@ export function CandorWorkspace() {
     consentStatus: runtime.consentStatus,
     activeCapture,
     combinedCaptureAvailable,
+    liveTranscriptRuntimeAvailable: asBool(runtime.transcriptionStatus.whisperFeatureEnabled),
+    verifiedLiveModelIds: localAi.models
+      .filter((model) => model.verified)
+      .map((model) => model.modelId),
     recordingTitle: meeting.recordingTitle,
     run: operations.run,
     refreshCapture: runtime.refreshCapture,
@@ -156,6 +164,19 @@ export function CandorWorkspace() {
     setNotice: operations.setNotice,
     setError: operations.setError,
   });
+  useEffect(() => {
+    if (!api?.events) return;
+    return api.events.subscribe("shortcut.triggered", () => {
+      if (onboarding.step !== "app") return;
+      if (recorderShortcutTestGate.shouldSuppressRecorderOpen()) return;
+      navigation.setView("home");
+      setRecorderPanelOpen(true);
+      operations.setNotice("Recorder opened. Recording has not started.");
+      window.setTimeout(() => {
+        document.querySelector<HTMLInputElement>("[data-recorder-dialog] input")?.focus();
+      }, 0);
+    });
+  }, [api, navigation.setView, onboarding.step, operations.setNotice]);
   const refresh = useCallback(async () => {
     if (!api || !client) throw new Error("Candor preload API is unavailable");
     const [, recordings] = await Promise.all([
@@ -189,12 +210,15 @@ export function CandorWorkspace() {
       operations={operations}
       license={license}
       localAi={localAi}
+      liveTranscript={liveTranscript}
       terminology={terminology}
       meetingActions={meetingActions}
       report={report}
       onboarding={onboarding}
       diagnostics={diagnostics}
       startup={startup}
+      recorderPanelOpen={recorderPanelOpen}
+      onCloseRecorderPanel={() => setRecorderPanelOpen(false)}
     />
   );
 }

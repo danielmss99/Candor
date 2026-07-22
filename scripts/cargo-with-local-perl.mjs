@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { delimiter, dirname } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { ensureSherpaOnnxBuildArchive } from "./sherpa-onnx-build-archive.mjs";
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
@@ -25,6 +26,14 @@ function argsRequestSqlcipherVault(cargoArgs) {
     if (arg === "--all-features") return true;
     if (arg === "--features") return (cargoArgs[index + 1] ?? "").includes("sqlcipher-vault");
     return arg.startsWith("--features=") && arg.includes("sqlcipher-vault");
+  });
+}
+
+function argsRequestLocalParakeet(cargoArgs) {
+  return cargoArgs.some((arg, index) => {
+    if (arg === "--all-features") return true;
+    if (arg === "--features") return (cargoArgs[index + 1] ?? "").includes("local-parakeet");
+    return arg.startsWith("--features=") && arg.includes("local-parakeet");
   });
 }
 
@@ -83,6 +92,22 @@ if (!env.CMAKE) {
   if (cmakePath) {
     env.CMAKE = cmakePath;
   }
+}
+
+if (process.platform === "win32" && argsRequestLocalParakeet(args)) {
+  const encodedFlag = "-Ctarget-feature=+crt-static";
+  const existingFlags = `${env.CARGO_ENCODED_RUSTFLAGS ?? ""}\u001f${env.RUSTFLAGS ?? ""}`;
+  if (/target-feature=[^\s\u001f]*-crt-static/.test(existingFlags)) {
+    throw new Error("Parakeet requires the pinned sherpa-onnx /MT runtime; -crt-static is incompatible.");
+  }
+  if (!existingFlags.includes("+crt-static")) {
+    if (env.CARGO_ENCODED_RUSTFLAGS) {
+      env.CARGO_ENCODED_RUSTFLAGS = `${env.CARGO_ENCODED_RUSTFLAGS}\u001f${encodedFlag}`;
+    } else {
+      env.RUSTFLAGS = `${env.RUSTFLAGS ?? ""} ${encodedFlag}`.trim();
+    }
+  }
+  await ensureSherpaOnnxBuildArchive(env);
 }
 
 const userCargoExe = env.USERPROFILE ? `${env.USERPROFILE}\\.cargo\\bin\\cargo.exe` : "";

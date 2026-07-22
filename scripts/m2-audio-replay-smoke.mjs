@@ -1,7 +1,9 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { searchWhenReady } from "./core-rpc-search-retry.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -197,7 +199,7 @@ try {
     throw new Error("recording read did not include the synced transcript segment metadata");
   }
 
-  const search = await call("recording.durable.search", { query: "durable local audio" });
+  const search = await searchWhenReady(call, { query: "durable local audio" });
   assertCustody(search, "search");
   if (search?.matchCount !== 1 || !search?.matches?.[0]?.snippet?.includes("durable local audio")) {
     throw new Error("search did not index the synced transcript segment");
@@ -248,6 +250,8 @@ try {
   await call("core.shutdown");
   console.log("M2 audio replay smoke passed.");
 } finally {
-  if (!child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  lines.close();
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
 }

@@ -1,0 +1,251 @@
+.microphone-setup-control,
+.shortcut-setup-control {
+  display: grid;
+  min-width: 0;
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.setup-control-field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.setup-control-field > span {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.setup-control-field select,
+.setup-control-field input {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.setup-control-field select:focus-visible,
+.setup-control-field input:focus-visible,
+.microphone-setup-control button:focus-visible,
+.shortcut-setup-control button:focus-visible,
+.setup-defer-confirmation button:focus-visible {
+  outline: 3px solid var(--accent-border);
+  outline-offset: 2px;
+}
+
+.mic-meter {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.mic-meter meter {
+  width: 100%;
+  height: 14px;
+  accent-color: var(--accent-primary);
+}
+
+.mic-meter strong {
+  color: var(--text-primary);
+  text-align: right;
+}
+
+.setup-device-status {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
+  border-top: 1px solid var(--border-default);
+  border-bottom: 1px solid var(--border-default);
+  padding: 13px 2px;
+}
+
+.setup-device-status .status-dot {
+  margin-top: 5px;
+}
+
+.setup-device-status strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.setup-device-status p,
+.setup-help-copy,
+.setup-runtime-note,
+.setup-privacy-note,
+.setup-consent-note,
+.shortcut-test-panel p,
+.setup-defer-confirmation p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.setup-device-status[data-state="permission-denied"] strong,
+.setup-device-status[data-state="device-disconnected"] strong,
+.setup-device-status[data-state="retry"] strong,
+.setup-device-status[data-state="clipping"] strong,
+.setup-inline-error {
+  color: var(--error);
+}
+
+.setup-inline-error {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.first-run-operation-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  border: 1px solid color-mix(in srgb, var(--error) 38%, transparent);
+  border-radius: var(--radius);
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+  padding: 10px 12px;
+}
+
+.first-run-operation-error p {
+  margin: 0;
+}
+
+.setup-control-actions,
+.shortcut-test-panel,
+.mic-playback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.setup-control-actions button,
+.shortcut-test-panel button,
+.mic-playback button {
+  min-height: 40px;
+}
+
+.mic-playback audio {
+  width: min(100%, 430px);
+  max-width: 100%;
+  min-height: 42px;
+}
+
+.setup-runtime-note {
+  margin-top: -6px;
+  color: var(--text-primary);
+  font-weight: 650;
+}
+
+.setup-help-copy kbd {
+  border: 1px solid var(--border-default);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  padding: 2px 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+.shortcut-test-panel,
+.setup-defer-confirmation {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  background: var(--bg-subtle);
+  padding: 12px;
+}
+
+.shortcut-test-panel p {
+  margin: 0;
+}
+
+.setup-defer-confirmation {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.setup-defer-confirmation p {
+  margin: 0;
+}
+
+.setup-defer-confirmation > strong {
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.setup-card > .setup-actions {
+  margin-top: 22px;
+}
+
+@media (max-width: 900px) {
+  .activation-shell.setup-shell {
+    min-width: 0;
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+
+  .setup-card {
+    padding: 32px;
+  }
+}
+
+@media (max-width: 720px) {
+  .activation-shell.setup-shell {
+    display: block;
+  }
+
+  .setup-side {
+    align-content: start;
+    padding: 20px;
+  }
+
+  .onboarding-progress {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .onboarding-progress li {
+    grid-template-columns: 26px minmax(0, 1fr);
+  }
+
+  .setup-main {
+    display: block;
+  }
+
+  .setup-card {
+    max-width: none;
+    padding: 28px 20px;
+  }
+
+  .mic-meter {
+    grid-template-columns: 1fr 42px;
+  }
+
+  .mic-meter > span {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .microphone-setup-control *,
+  .shortcut-setup-control * {
+    scroll-behavior: auto;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

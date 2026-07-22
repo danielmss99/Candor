@@ -5,6 +5,8 @@ import { dirname, join, resolve } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { inflateSync } from "node:zlib";
+import { removeTemporaryDirectory } from "./child-process-cleanup.mjs";
+import { verifyPackagedCompanionRuntime } from "./packaged-companion-runtime-smoke.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -251,6 +253,13 @@ function appArchivePathForExecutable(executable) {
     return join(dirname(dirname(executable)), "Resources", "app.asar");
   }
   return join(dirname(executable), "resources", "app.asar");
+}
+
+function resourcesRootForExecutable(executable) {
+  if (process.platform === "darwin") {
+    return join(dirname(dirname(executable)), "Resources");
+  }
+  return join(dirname(executable), "resources");
 }
 
 function nonWindowsAvailableOsKeyLabels() {
@@ -904,7 +913,7 @@ try {
     "utf8",
   );
   rmSync(outputPath, { force: true });
-  rmSync(smokeDataDir, { recursive: true, force: true });
+  removeTemporaryDirectory(smokeDataDir);
   throw error;
 }
 const rendererScreenshotVisualEvidence = pngVisualEvidence(screenshotPath);
@@ -944,7 +953,15 @@ const rendererEntryScreenshotEvidence = payload.rendererEntryScreenshots.map((en
 const packagedArtifacts = {
   appExecutable: fileEvidence(executable),
   coreExecutable: fileEvidence(payload.corePath),
+  candorctlExecutable: fileEvidence(
+    join(dirname(payload.corePath), process.platform === "win32" ? "candorctl.exe" : "candorctl"),
+  ),
+  candorMcpExecutable: fileEvidence(
+    join(dirname(payload.corePath), process.platform === "win32" ? "candor-mcp.exe" : "candor-mcp"),
+  ),
   appArchive: fileEvidence(appArchivePathForExecutable(executable)),
+  thirdPartyNotices: fileEvidence(join(resourcesRootForExecutable(executable), "THIRD_PARTY_NOTICES.md")),
+  mpl20License: fileEvidence(join(resourcesRootForExecutable(executable), "licenses", "MPL-2.0.txt")),
   rendererScreenshot: fileEvidence(screenshotPath),
 };
 for (const [name, entry] of Object.entries(packagedArtifacts)) {
@@ -952,6 +969,9 @@ for (const [name, entry] of Object.entries(packagedArtifacts)) {
     throw new Error(`Packaged smoke could not hash ${name}: ${entry.path}`);
   }
 }
+const packagedCompanionRuntime = await verifyPackagedCompanionRuntime({
+  binDirectory: dirname(payload.corePath),
+});
 mkdirSync(dirname(proofOutputPath), { recursive: true });
 writeFileSync(
   proofOutputPath,
@@ -968,6 +988,7 @@ writeFileSync(
       },
       ci: ciProvenance(),
       packagedArtifacts,
+      packagedCompanionRuntime,
       rendererScreenshotVisualEvidence,
       rendererViewScreenshotEvidence,
       rendererEntryScreenshotEvidence,
@@ -979,7 +1000,7 @@ writeFileSync(
   "utf8",
 );
 rmSync(outputPath, { force: true });
-rmSync(smokeDataDir, { recursive: true, force: true });
+removeTemporaryDirectory(smokeDataDir);
 
 console.log(`M0 packaged runtime smoke passed for ${executable}.`);
 console.log(`M0 packaged runtime proof written to ${proofOutputPath}.`);

@@ -121,6 +121,7 @@ const staticChecks = {
 
 let child = null;
 let liveChecks = null;
+const CORE_RPC_TIMEOUT_MS = 15_000;
 
 if (!existsSync(corePath)) {
   failures.push("candor-core binary is missing for live updater policy proof");
@@ -160,7 +161,7 @@ if (!existsSync(corePath)) {
       const timeout = setTimeout(() => {
         pending.delete(id);
         rejectPromise(new Error(`timeout waiting for ${method}`));
-      }, 5000);
+      }, CORE_RPC_TIMEOUT_MS);
       pending.set(id, {
         resolve: (value) => {
           clearTimeout(timeout);

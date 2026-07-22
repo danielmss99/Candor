@@ -150,7 +150,7 @@ describe("core protocol", () => {
     expect(preload).not.toContain("callCore");
     expect(preload).not.toContain("allowedMethods");
     expect(preload).not.toContain("core: Object.freeze");
-    for (const domain of ["app", "capture", "meetings", "transcript", "ai", "exports", "settings", "licensing", "events"]) {
+    for (const domain of ["app", "capture", "meetings", "transcript", "liveTranscript", "diarization", "ai", "exports", "settings", "licensing", "events"]) {
       expect(preload).toContain(`${domain}: Object.freeze`);
     }
   });

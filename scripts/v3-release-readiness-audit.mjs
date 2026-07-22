@@ -134,11 +134,16 @@ function summarizePayload(payload) {
         : null,
       windowsAppSigned: payload?.windows?.appSignature?.valid === true,
       windowsCoreSigned: payload?.windows?.coreSignature?.valid === true,
+      windowsCompanionsSigned:
+        Array.isArray(payload?.windows?.companionSignatures) &&
+        payload.windows.companionSignatures.length === 2 &&
+        payload.windows.companionSignatures.every((entry) => entry?.valid === true),
       macDmgCount: Array.isArray(payload?.macos?.dmgCandidates) ? payload.macos.dmgCandidates.length : null,
       macAppBundleCount: Array.isArray(payload?.macos?.appBundleCandidates)
         ? payload.macos.appBundleCandidates.length
         : null,
       macAppSigned: payload?.macos?.signature?.appCodeSigned === true,
+      macCompanionsSigned: payload?.macos?.signature?.companionBinariesCodeSigned === true,
       macAppGatekeeperAccepted: payload?.macos?.signature?.appGatekeeperAccepted === true,
       macDmgGatekeeperAccepted: payload?.macos?.signature?.dmgGatekeeperAccepted === true,
       macNotarized: payload?.macos?.signature?.notarized === true,
@@ -399,6 +404,13 @@ function validateReleaseSigning(payload) {
     failures.push("release signing proof must show signed Windows sidecar executable");
   }
   if (
+    !Array.isArray(payload?.windows?.companionSignatures) ||
+    payload.windows.companionSignatures.length !== 2 ||
+    !payload.windows.companionSignatures.every((signature) => signature?.valid === true)
+  ) {
+    failures.push("release signing proof must show signed Windows automation companions");
+  }
+  if (
     !Array.isArray(payload?.windows?.installerSignatures) ||
     !payload.windows.installerSignatures.some((signature) => signature?.valid === true)
   ) {
@@ -423,6 +435,9 @@ function validateReleaseSigning(payload) {
   ) {
     if (payload?.macos?.signature?.appCodeSigned !== true) {
       failures.push("release signing proof must show a signed macOS app bundle");
+    }
+    if (payload?.macos?.signature?.companionBinariesCodeSigned !== true) {
+      failures.push("release signing proof must show signed macOS automation companions");
     }
     if (payload?.macos?.signature?.appGatekeeperAccepted !== true) {
       failures.push("release signing proof must show macOS app bundle Gatekeeper acceptance");
@@ -489,12 +504,38 @@ function validateReleaseArtifactSmoke(payload) {
       "Candor.exe",
       "resources/app.asar",
       "resources/bin/candor-core.exe",
+      "resources/bin/candorctl.exe",
+      "resources/bin/candor-mcp.exe",
     ]) {
       const entry = requiredEntries.find((candidate) => candidate?.extractedPath === expected);
       if (!entry) {
         failures.push(`release artifact smoke missing payload evidence for ${expected}`);
       } else if (entry.hashMatchesUnpacked !== true) {
         failures.push(`release artifact smoke hash did not match unpacked payload for ${expected}`);
+      }
+    }
+  }
+  if (payload?.platform === "darwin") {
+    for (const expected of ["candor-core", "candorctl", "candor-mcp"]) {
+      const suffix = `/Contents/Resources/bin/${expected}`;
+      const entry = requiredEntries.find((candidate) =>
+        String(candidate?.extractedPath ?? "").replaceAll("\\", "/").endsWith(suffix),
+      );
+      if (!entry || entry.hashMatchesUnpacked !== true) {
+        failures.push(`release artifact smoke missing macOS payload evidence for ${expected}`);
+      }
+    }
+  }
+  if (payload?.platform === "linux") {
+    for (const packageKind of ["appimage", "deb"]) {
+      for (const expected of ["candor-core", "candorctl", "candor-mcp"]) {
+        const extractedPath = `${packageKind}:${expected}`;
+        const entry = requiredEntries.find(
+          (candidate) => candidate?.extractedPath === extractedPath,
+        );
+        if (!entry || entry.hashMatchesUnpacked !== true) {
+          failures.push(`release artifact smoke missing Linux payload evidence for ${extractedPath}`);
+        }
       }
     }
   }
@@ -759,6 +800,8 @@ function validateReleaseSbom(payload) {
   if (!/^Candor-0\.\d+\.\d+-SBOM\.spdx\.json$/.test(payload?.file ?? "")) failures.push("release SBOM filename is invalid");
   if (!/^[a-f0-9]{64}$/i.test(payload?.sha256 ?? "") || !(payload?.bytes > 0)) failures.push("release SBOM digest is invalid");
   if (!(payload?.packageCount > 1) || !(payload?.npmPackageCount > 0) || !(payload?.rustPackageCount > 0)) failures.push("release SBOM dependency inventory is incomplete");
+  if (payload?.rustLockFileCount !== 2) failures.push("release SBOM must inventory both Rust lockfiles");
+  if (payload?.companionBinaryPackageCount !== 2) failures.push("release SBOM must inventory both automation companions");
   if (!(payload?.bundledAiPackageCount >= 3)) failures.push("release SBOM does not inventory the bundled speech model, language runtime, and language model");
   if (payload?.networkAttempted !== false || payload?.rawPathExposed !== false) failures.push("release SBOM proof must be path-safe and offline");
   if (Array.isArray(payload?.failures) && payload.failures.length > 0) failures.push("release SBOM proof contains failures");

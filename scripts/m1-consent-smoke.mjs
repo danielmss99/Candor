@@ -1,7 +1,8 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,7 +75,16 @@ function startCore() {
     });
   }
 
-  return { child, call };
+  return { child, lines, call };
+}
+
+async function stopRuntime(runtime) {
+  if (!runtime) return;
+  runtime.lines.close();
+  if (!runtime.child.stdin.destroyed && !runtime.child.stdin.writableEnded) {
+    runtime.child.stdin.end();
+  }
+  await stopChildProcess(runtime.child);
 }
 
 function assertCustody(value, label) {
@@ -141,7 +151,8 @@ try {
   }
 
   await runtime.call("core.shutdown");
-  if (!runtime.child.killed) runtime.child.kill();
+  await stopRuntime(runtime);
+  runtime = null;
 
   runtime = startCore();
   const reopened = await runtime.call("consent.status");
@@ -153,6 +164,6 @@ try {
   await runtime.call("core.shutdown");
   console.log("M1 consent smoke passed.");
 } finally {
-  if (runtime && !runtime.child.killed) runtime.child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  await stopRuntime(runtime);
+  removeTemporaryDirectory(dataDir);
 }

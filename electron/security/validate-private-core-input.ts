@@ -5,9 +5,11 @@ import { validateRendererCoreParams } from "./validate-core-input.js";
 const IMPORT_ID = /^[A-Za-z0-9_-]{1,96}$/;
 const JOB_ID = /^[a-f0-9]{32}$/;
 const SHA256 = /^[a-fA-F0-9]{64}$/;
+const LOWERCASE_SHA256 = /^[a-f0-9]{64}$/;
 const MAX_PATH_CHARACTERS = 32_768;
 const MAX_BASE64_CHUNK_CHARACTERS = 6_000_000;
 const MAX_DICTIONARY_PACKAGE_BASE64_CHARACTERS = 3_333_352;
+const MAX_RECAP_TEMPLATE_BYTES = 4_096;
 
 function fail(method: string, detail: string): never {
   throw new Error(`Invalid ${method} request: ${detail}`);
@@ -166,13 +168,31 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
       value,
       method === "ai.ask.start"
         ? ["recordingId", "question", "intent"]
-        : ["recordingId", "intent"],
+        : ["recordingId", "recapTemplate", "intent"],
     );
     const result: Record<string, JsonValue> = {
       recordingId: requiredRecordingId(method, value.recordingId),
     };
     if (method === "ai.ask.start") {
       result.question = requiredString(method, value.question, "question", INPUT_LIMITS.question);
+    } else if (value.recapTemplate !== undefined) {
+      const recapTemplate = requiredString(
+        method,
+        value.recapTemplate,
+        "recapTemplate",
+        MAX_RECAP_TEMPLATE_BYTES,
+      ).trim();
+      if (
+        !recapTemplate
+        || Buffer.byteLength(recapTemplate, "utf8") > MAX_RECAP_TEMPLATE_BYTES
+        || [...recapTemplate].some((character) => {
+          const code = character.codePointAt(0) ?? 0;
+          return code === 0 || (code < 32 && character !== "\n" && character !== "\r" && character !== "\t");
+        })
+      ) {
+        fail(method, "recapTemplate must contain bounded safe text");
+      }
+      result.recapTemplate = recapTemplate;
     }
     const intent = value.intent ?? "default";
     if (intent !== "default" && intent !== "strict-retry" && intent !== "explicit-heuristic") {
@@ -261,6 +281,33 @@ export function validatePrivateCoreParams(method: string, input: unknown): JsonV
     const value = objectInput(method, input);
     exactFields(method, value, ["sourcePath"]);
     return { sourcePath: requiredString(method, value.sourcePath, "sourcePath", MAX_PATH_CHARACTERS) };
+  }
+  if (method === "media.validateLocalSourcePath") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["sourcePath"]);
+    const sourcePath = requiredString(
+      method,
+      value.sourcePath,
+      "sourcePath",
+      MAX_PATH_CHARACTERS,
+    );
+    if (sourcePath.includes("\0")) fail(method, "sourcePath contains a null character");
+    return { sourcePath };
+  }
+  if (method === "media.importFromPath") {
+    const value = objectInput(method, input);
+    exactFields(method, value, ["sourcePath", "expectedSourceSha256"]);
+    const sourcePath = requiredString(
+      method,
+      value.sourcePath,
+      "sourcePath",
+      MAX_PATH_CHARACTERS,
+    );
+    if (sourcePath.includes("\0")) fail(method, "sourcePath contains a null character");
+    if (typeof value.expectedSourceSha256 !== "string" || !LOWERCASE_SHA256.test(value.expectedSourceSha256)) {
+      fail(method, "expectedSourceSha256 must be a lowercase SHA-256 value");
+    }
+    return { sourcePath, expectedSourceSha256: value.expectedSourceSha256 };
   }
   if (method === "import.v2.proofSynthetic") {
     const value = objectInput(method, input);

@@ -1,7 +1,8 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -483,6 +484,8 @@ try {
   writeProof(proof);
   throw error;
 } finally {
-  if (!child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  lines.close();
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
 }

@@ -1,7 +1,8 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,24 +18,6 @@ const smokeRpcTimeoutMs = 20_000;
 
 if (!existsSync(corePath)) {
   throw new Error(`candor-core debug binary not found: ${corePath}`);
-}
-
-function waitForExit(child, timeoutMs = 5000) {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGKILL");
-      reject(new Error(`candor-core did not exit within ${timeoutMs} ms.`));
-    }, timeoutMs);
-    child.once("exit", () => {
-      clearTimeout(timeout);
-      resolve();
-    });
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-  });
 }
 
 function spawnCore(dataDir) {
@@ -106,16 +89,15 @@ function spawnCore(dataDir) {
     if (child.exitCode !== null || child.signalCode !== null) return;
     try {
       await call("core.shutdown");
-    } catch {
-      child.kill("SIGKILL");
-    }
-    await waitForExit(child);
+    } catch {}
+    if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+    await stopChildProcess(child);
   }
 
   async function crash() {
     if (child.exitCode !== null || child.signalCode !== null) return;
     child.kill("SIGKILL");
-    await waitForExit(child);
+    await stopChildProcess(child);
   }
 
   return { child, call, shutdown, crash };
@@ -214,7 +196,11 @@ try {
   recovery = null;
   console.log("M1 capture crash recovery smoke passed.");
 } finally {
-  if (writer) await writer.crash().catch(() => null);
-  if (recovery) await recovery.shutdown().catch(() => null);
-  rmSync(dataDir, { recursive: true, force: true });
+  const cleanupResults = await Promise.allSettled([
+    writer ? writer.crash() : Promise.resolve(),
+    recovery ? recovery.shutdown() : Promise.resolve(),
+  ]);
+  const cleanupFailure = cleanupResults.find((result) => result.status === "rejected");
+  if (cleanupFailure) throw cleanupFailure.reason;
+  removeTemporaryDirectory(dataDir);
 }

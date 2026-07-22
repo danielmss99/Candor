@@ -275,11 +275,15 @@ function windowsNsisSmoke() {
     const requiredEntries = [
       compareExtracted(extractRoot, "Candor.exe", rel(join(releaseDir, "win-unpacked", "Candor.exe"))),
       compareExtracted(extractRoot, "resources/app.asar", rel(join(releaseDir, "win-unpacked", "resources", "app.asar"))),
-      compareExtracted(
-        extractRoot,
-        "resources/bin/candor-core.exe",
-        rel(join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe")),
+      ...["candor-core.exe", "candorctl.exe", "candor-mcp.exe"].map((binaryName) =>
+        compareExtracted(
+          extractRoot,
+          `resources/bin/${binaryName}`,
+          rel(join(releaseDir, "win-unpacked", "resources", "bin", binaryName)),
+        ),
       ),
+      compareExtracted(extractRoot, "resources/THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"),
+      compareExtracted(extractRoot, "resources/licenses/MPL-2.0.txt", "licenses/MPL-2.0.txt"),
     ];
     for (const entry of requiredEntries) {
       if (!entry.exists) failures.push(`installer payload missing ${entry.extractedPath}`);
@@ -303,6 +307,8 @@ function windowsNsisSmoke() {
         containsAppExecutable: list.stdout.includes("Candor.exe"),
         containsAppArchive: list.stdout.includes("resources/app.asar"),
         containsCoreSidecar: list.stdout.includes("resources/bin/candor-core.exe"),
+        containsCandorctl: list.stdout.includes("resources/bin/candorctl.exe"),
+        containsCandorMcp: list.stdout.includes("resources/bin/candor-mcp.exe"),
       },
       extract: {
         ok: extract.ok,
@@ -380,6 +386,25 @@ function macosDmgSmoke() {
         join(mountedBundleName, "Contents", "Resources", "bin", "candor-core"),
         unpackedBundleRoots.map((root) => rel(join(root, "Contents", "Resources", "bin", "candor-core"))),
       ),
+      ...["candorctl", "candor-mcp"].map((binaryName) =>
+        compareExtractedToAny(
+          mountPoint,
+          join(mountedBundleName, "Contents", "Resources", "bin", binaryName),
+          unpackedBundleRoots.map((root) =>
+            rel(join(root, "Contents", "Resources", "bin", binaryName)),
+          ),
+        ),
+      ),
+      compareExtractedToAny(
+        mountPoint,
+        join(mountedBundleName, "Contents", "Resources", "THIRD_PARTY_NOTICES.md"),
+        ["THIRD_PARTY_NOTICES.md"],
+      ),
+      compareExtractedToAny(
+        mountPoint,
+        join(mountedBundleName, "Contents", "Resources", "licenses", "MPL-2.0.txt"),
+        ["licenses/MPL-2.0.txt"],
+      ),
     ];
     for (const entry of requiredEntries) {
       if (!entry.extracted.exists) failures.push(`DMG payload missing ${entry.extractedPath}`);
@@ -391,6 +416,10 @@ function macosDmgSmoke() {
     const appPath = join(mountPoint, mountedBundleName);
     const infoPlistPath = join(appPath, "Contents", "Info.plist");
     const sidecarPath = join(appPath, "Contents", "Resources", "bin", "candor-core");
+    const companionPaths = {
+      candorctl: join(appPath, "Contents", "Resources", "bin", "candorctl"),
+      "candor-mcp": join(appPath, "Contents", "Resources", "bin", "candor-mcp"),
+    };
     const plutil = commandOnPath(["plutil"]);
     const plist = {
       minimumSystemVersion: null,
@@ -439,6 +468,10 @@ function macosDmgSmoke() {
       appAudioInputEntitlement: false,
       sidecarVerified: false,
       sidecarAudioInputEntitlement: false,
+      companionVerified: {
+        candorctl: false,
+        "candor-mcp": false,
+      },
     };
     if (!codesign) {
       signingGaps.push("codesign was unavailable, so macOS signatures and entitlements were not inspected");
@@ -452,6 +485,12 @@ function macosDmgSmoke() {
         ":-",
         sidecarPath,
       ]);
+      const companionVerifications = Object.fromEntries(
+        Object.entries(companionPaths).map(([name, binaryPath]) => [
+          name,
+          runTool(codesign.path, ["--verify", "--strict", binaryPath]),
+        ]),
+      );
       const entitlementKey = "com.apple.security.device.audio-input";
       signing.appVerified = appVerify.ok;
       signing.sidecarVerified = sidecarVerify.ok;
@@ -460,6 +499,9 @@ function macosDmgSmoke() {
       signing.sidecarAudioInputEntitlement =
         sidecarEntitlements.ok &&
         `${sidecarEntitlements.stdout}\n${sidecarEntitlements.stderr}`.includes(entitlementKey);
+      signing.companionVerified = Object.fromEntries(
+        Object.entries(companionVerifications).map(([name, result]) => [name, result.ok]),
+      );
 
       if (!signing.appVerified) {
         signingGaps.push("macOS app bundle failed strict codesign verification");
@@ -472,6 +514,9 @@ function macosDmgSmoke() {
       }
       if (!signing.sidecarAudioInputEntitlement) {
         signingGaps.push("candor-core sidecar is missing the audio-input entitlement");
+      }
+      for (const [name, verified] of Object.entries(signing.companionVerified)) {
+        if (!verified) signingGaps.push(`${name} companion failed strict codesign verification`);
       }
     }
 
@@ -532,6 +577,18 @@ function linuxPackageSmoke() {
         requiredEntryFromSearch(squashfsRoot, ["candor-core"], "appimage:candor-core", [
           rel(join(releaseDir, "linux-unpacked", "resources", "bin", "candor-core")),
         ]),
+        requiredEntryFromSearch(squashfsRoot, ["candorctl"], "appimage:candorctl", [
+          rel(join(releaseDir, "linux-unpacked", "resources", "bin", "candorctl")),
+        ]),
+        requiredEntryFromSearch(squashfsRoot, ["candor-mcp"], "appimage:candor-mcp", [
+          rel(join(releaseDir, "linux-unpacked", "resources", "bin", "candor-mcp")),
+        ]),
+        requiredEntryFromSearch(squashfsRoot, ["THIRD_PARTY_NOTICES.md"], "appimage:third-party-notices", [
+          "THIRD_PARTY_NOTICES.md",
+        ]),
+        requiredEntryFromSearch(squashfsRoot, ["MPL-2.0.txt"], "appimage:mpl-2.0-license", [
+          "licenses/MPL-2.0.txt",
+        ]),
       );
       for (const entry of requiredEntries.filter((entry) => entry.extractedPath.startsWith("appimage:"))) {
         if (!entry.exists) failures.push(`AppImage payload missing ${entry.extractedPath}`);
@@ -560,6 +617,18 @@ function linuxPackageSmoke() {
           ]),
           requiredEntryFromSearch(debRoot, ["candor-core"], "deb:candor-core", [
             rel(join(releaseDir, "linux-unpacked", "resources", "bin", "candor-core")),
+          ]),
+          requiredEntryFromSearch(debRoot, ["candorctl"], "deb:candorctl", [
+            rel(join(releaseDir, "linux-unpacked", "resources", "bin", "candorctl")),
+          ]),
+          requiredEntryFromSearch(debRoot, ["candor-mcp"], "deb:candor-mcp", [
+            rel(join(releaseDir, "linux-unpacked", "resources", "bin", "candor-mcp")),
+          ]),
+          requiredEntryFromSearch(debRoot, ["THIRD_PARTY_NOTICES.md"], "deb:third-party-notices", [
+            "THIRD_PARTY_NOTICES.md",
+          ]),
+          requiredEntryFromSearch(debRoot, ["MPL-2.0.txt"], "deb:mpl-2.0-license", [
+            "licenses/MPL-2.0.txt",
           ]),
         );
         for (const entry of requiredEntries.filter((entry) => entry.extractedPath.startsWith("deb:"))) {

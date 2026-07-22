@@ -1,0 +1,29 @@
+[package]
+name = "candor-tools"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+description = "Read-only local automation companions for Candor."
+
+[lib]
+name = "candor_tools"
+path = "src/lib.rs"
+
+[[bin]]
+name = "candorctl"
+path = "src/bin/candorctl.rs"
+
+[[bin]]
+name = "candor-mcp"
+path = "src/bin/candor-mcp.rs"
+
+[dependencies]
+getrandom = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+time = { version = "0.3", default-features = false, features = ["std"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

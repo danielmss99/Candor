@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
@@ -64,6 +65,7 @@ struct CachedDigest {
 pub struct BundledAiAssets {
     root: Option<PathBuf>,
     digest_cache: Arc<Mutex<HashMap<PathBuf, CachedDigest>>>,
+    background_verification: Arc<Mutex<BackgroundVerification>>,
 }
 
 impl Default for BundledAiAssets {
@@ -136,6 +138,13 @@ struct BundleSnapshot {
     assets: Vec<InspectedAsset>,
 }
 
+#[derive(Clone, Debug)]
+enum BackgroundVerification {
+    NotStarted,
+    Running,
+    Ready(BundleSnapshot),
+}
+
 impl BundleSnapshot {
     fn unavailable(state: &'static str, failure_code: &'static str) -> Self {
         Self {
@@ -147,6 +156,20 @@ impl BundleSnapshot {
             package_profile: None,
             state,
             failure_code: Some(failure_code),
+            assets: Vec::new(),
+        }
+    }
+
+    fn checking() -> Self {
+        Self {
+            manifest_version: None,
+            bundle_version: None,
+            release_ready: false,
+            fixture: false,
+            selection_status: "checking".to_string(),
+            package_profile: None,
+            state: "checking",
+            failure_code: None,
             assets: Vec::new(),
         }
     }
@@ -176,11 +199,56 @@ impl BundledAiAssets {
         Self {
             root,
             digest_cache: Arc::new(Mutex::new(HashMap::new())),
+            background_verification: Arc::new(Mutex::new(BackgroundVerification::NotStarted)),
         }
     }
 
+    #[cfg(test)]
     pub fn status(&self) -> Value {
-        let snapshot = self.inspect();
+        Self::status_from_snapshot(self.inspect())
+    }
+
+    pub fn status_nonblocking(&self) -> Value {
+        let snapshot = match self.background_verification.lock() {
+            Ok(mut state) => match &*state {
+                BackgroundVerification::Running => BundleSnapshot::checking(),
+                BackgroundVerification::Ready(snapshot) => snapshot.clone(),
+                BackgroundVerification::NotStarted => {
+                    *state = BackgroundVerification::Running;
+                    let worker = self.clone();
+                    drop(state);
+                    let spawn_result = thread::Builder::new()
+                        .name("candor-bundle-integrity".to_string())
+                        .spawn(move || {
+                            lower_background_integrity_priority();
+                            let snapshot = worker.inspect();
+                            if let Ok(mut state) = worker.background_verification.lock() {
+                                *state = BackgroundVerification::Ready(snapshot);
+                            }
+                        });
+                    if spawn_result.is_err() {
+                        let unavailable = BundleSnapshot::unavailable(
+                            "unavailable",
+                            "BUNDLED_AI_VERIFICATION_START_FAILED",
+                        );
+                        if let Ok(mut state) = self.background_verification.lock() {
+                            *state = BackgroundVerification::Ready(unavailable.clone());
+                        }
+                        unavailable
+                    } else {
+                        BundleSnapshot::checking()
+                    }
+                }
+            },
+            Err(_) => BundleSnapshot::unavailable(
+                "unavailable",
+                "BUNDLED_AI_VERIFICATION_STATE_UNAVAILABLE",
+            ),
+        };
+        Self::status_from_snapshot(snapshot)
+    }
+
+    fn status_from_snapshot(snapshot: BundleSnapshot) -> Value {
         let speech = capability_status(&snapshot, "speech");
         let language = capability_status(&snapshot, "language");
         let terminology = capability_status(&snapshot, "terminology");
@@ -267,6 +335,20 @@ impl BundledAiAssets {
         self.verified_asset("speech", "model", Some(model_id))
     }
 
+    pub fn cached_speech_model(&self, model_id: &str) -> Option<VerifiedBundledAsset> {
+        let state = self.background_verification.lock().ok()?;
+        let BackgroundVerification::Ready(snapshot) = &*state else {
+            return None;
+        };
+        snapshot.assets.iter().find_map(|asset| {
+            (asset.record.capability == "speech"
+                && asset.record.kind == "model"
+                && asset.record.model_id.as_deref() == Some(model_id))
+            .then(|| asset.verified.clone())
+            .flatten()
+        })
+    }
+
     pub fn language_config(&self) -> Result<Option<BundledLanguageConfig>, BundledAssetError> {
         let runtime = self.verified_asset("language", "runtime", None)?;
         let model = self.verified_asset("language", "model", None)?;
@@ -278,6 +360,24 @@ impl BundledAiAssets {
                 "packaged language tools are incomplete; reinstall Candor to restore local summaries",
             )),
         }
+    }
+
+    pub fn cached_language_config(&self) -> Option<BundledLanguageConfig> {
+        let state = self.background_verification.lock().ok()?;
+        let BackgroundVerification::Ready(snapshot) = &*state else {
+            return None;
+        };
+        let asset = |kind: &str| {
+            snapshot.assets.iter().find_map(|asset| {
+                (asset.record.capability == "language" && asset.record.kind == kind)
+                    .then(|| asset.verified.clone())
+                    .flatten()
+            })
+        };
+        Some(BundledLanguageConfig {
+            runtime: asset("runtime")?,
+            model: asset("model")?,
+        })
     }
 
     pub fn required_language_identity(
@@ -322,15 +422,80 @@ impl BundledAiAssets {
         kind: &str,
         model_id: Option<&str>,
     ) -> Result<Option<VerifiedBundledAsset>, BundledAssetError> {
-        let snapshot = self.inspect();
-        let matching = snapshot.assets.iter().find(|asset| {
-            asset.record.capability == capability
-                && asset.record.kind == kind
-                && model_id.is_none_or(|id| asset.record.model_id.as_deref() == Some(id))
-        });
-        let Some(asset) = matching else {
+        let Some(root) = self.root.as_ref().filter(|root| root.is_absolute()) else {
             return Ok(None);
         };
+        let manifest_path = root.join(MANIFEST_FILE);
+        let Ok(metadata) = fs::symlink_metadata(&manifest_path) else {
+            return Ok(None);
+        };
+        if metadata.file_type().is_symlink()
+            || !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > MAX_MANIFEST_BYTES
+        {
+            return Ok(None);
+        }
+        let Ok(bytes) = fs::read(&manifest_path) else {
+            return Ok(None);
+        };
+        let Ok(manifest) = serde_json::from_slice::<BundledManifest>(&bytes) else {
+            return Ok(None);
+        };
+        if manifest.manifest_version != MANIFEST_VERSION
+            || manifest.bundle_version.trim().is_empty()
+            || manifest.selection_status.trim().is_empty()
+            || manifest
+                .package_profile
+                .as_deref()
+                .is_some_and(|value| value.trim().is_empty())
+            || manifest.repair_policy != "signed-installer-only"
+            || manifest.assets.len() > MAX_ASSETS
+            || (manifest.fixture && manifest.release_ready)
+        {
+            return Ok(None);
+        }
+        let Ok(canonical_root) = fs::canonicalize(root) else {
+            return Ok(None);
+        };
+        let mut ids = HashSet::new();
+        let mut selectors = HashSet::new();
+        let mut matching = None;
+        for record in manifest.assets {
+            if !ids.insert(record.id.clone()) || !record_is_valid(&record) {
+                return Ok(None);
+            }
+            if !host_matches(&record) {
+                continue;
+            }
+            let selector = if record.kind == "model" {
+                format!(
+                    "{}:{}:{}",
+                    record.capability,
+                    record.kind,
+                    record.model_id.as_deref().unwrap_or_default()
+                )
+            } else if record.kind == "library" {
+                format!("{}:{}:{}", record.capability, record.kind, record.id)
+            } else {
+                format!("{}:{}", record.capability, record.kind)
+            };
+            if !selectors.insert(selector) {
+                return Ok(None);
+            }
+            if record.capability == capability
+                && record.kind == kind
+                && model_id.is_none_or(|id| record.model_id.as_deref() == Some(id))
+            {
+                matching = Some(record);
+            }
+        }
+        let Some(record) = matching else {
+            return Ok(None);
+        };
+        // Verify only the asset requested by this operation. Startup dictionary loading must
+        // not hash every multi-gigabyte speech and language model before the RPC handshake.
+        let asset = self.inspect_asset(root, &canonical_root, record);
         if let Some(verified) = &asset.verified {
             return Ok(Some(verified.clone()));
         }
@@ -540,6 +705,20 @@ impl BundledAiAssets {
             );
         }
         Ok(digest)
+    }
+}
+
+fn lower_background_integrity_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        // Integrity verification can read several gigabytes. It must remain
+        // subordinate to capture and foreground UI work on supported Windows
+        // builds. Failure to lower priority is non-fatal and does not weaken
+        // the verification result.
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     }
 }
 
@@ -1002,6 +1181,108 @@ mod tests {
         assert_eq!(complete["ready"], true);
         assert_eq!(complete["state"], "ready");
         assert_eq!(complete["terminology"]["ready"], true);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn renderer_status_verification_is_nonblocking_and_cached() {
+        let root = temp_root("background-status");
+        write_manifest(
+            &root,
+            json!({
+                "manifestVersion": 1,
+                "bundleVersion": "source-interface-1",
+                "releaseReady": false,
+                "fixture": false,
+                "selectionStatus": "no-default-selected",
+                "repairPolicy": "signed-installer-only",
+                "assets": []
+            }),
+        );
+        let bundle = BundledAiAssets::with_root(root.clone());
+        let first = bundle.status_nonblocking();
+        assert_eq!(first["state"], "checking");
+        assert_eq!(first["rawPathExposed"], false);
+
+        let terminal = (0..200)
+            .find_map(|_| {
+                let status = bundle.status_nonblocking();
+                if status["state"] == "checking" {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    None
+                } else {
+                    Some(status)
+                }
+            })
+            .expect("background verification reaches a terminal state");
+        assert_eq!(terminal["state"], "no-default-selected");
+        assert_eq!(terminal["ready"], false);
+        assert_eq!(terminal["rawPathExposed"], false);
+        assert!(!serde_json::to_string(&terminal)
+            .expect("serialize status")
+            .contains(root.to_string_lossy().as_ref()));
+        let cached = bundle.status_nonblocking();
+        assert_eq!(cached, terminal);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn targeted_dictionary_lookup_does_not_hash_unrelated_models() {
+        let root = temp_root("targeted-terminology");
+        let assets = vec![
+            asset(
+                &root,
+                "speech-model",
+                "speech",
+                "model",
+                Some("large-v3-turbo"),
+            ),
+            asset(
+                &root,
+                "language-model",
+                "language",
+                "model",
+                Some("qwen3-4b-q4-k-m"),
+            ),
+            asset(&root, "general-dictionary", "terminology", "data", None),
+            asset(
+                &root,
+                "dictionary-publisher-key",
+                "terminology",
+                "public-key",
+                None,
+            ),
+        ];
+        write_manifest(
+            &root,
+            json!({
+                "manifestVersion": 1,
+                "bundleVersion": "targeted-terminology-1",
+                "releaseReady": true,
+                "fixture": false,
+                "selectionStatus": "release-selected",
+                "repairPolicy": "signed-installer-only",
+                "assets": assets
+            }),
+        );
+        let bundle = BundledAiAssets::with_root(root.clone());
+        assert!(bundle
+            .general_dictionary()
+            .expect("dictionary lookup")
+            .is_some());
+        assert!(bundle
+            .dictionary_publisher_key()
+            .expect("publisher key lookup")
+            .is_some());
+        let cached = bundle.digest_cache.lock().expect("digest cache");
+        assert_eq!(cached.len(), 2);
+        assert!(cached
+            .keys()
+            .all(|path| path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy();
+                name.contains("dictionary")
+            })));
+        drop(cached);
         let _ = fs::remove_dir_all(root);
     }
 

@@ -158,6 +158,8 @@ function artifactConsistency() {
       "Candor.exe",
       "resources/app.asar",
       "resources/bin/candor-core.exe",
+      "resources/bin/candorctl.exe",
+      "resources/bin/candor-mcp.exe",
     ]) {
       const entry = payloadMatches.find((candidate) => candidate.extractedPath === expected);
       if (!entry || entry.hashMatchesUnpacked !== true) {
@@ -319,12 +321,22 @@ function macosSignatureEvidence(dmgPaths, appBundlePaths) {
       appPath,
     ]);
     const staplerValidate = runMacTool("xcrun", ["stapler", "validate", appPath]);
+    const companionSignatures = ["candorctl", "candor-mcp"].map((binaryName) => ({
+      binaryName,
+      ...runMacTool("codesign", [
+        "--verify",
+        "--strict",
+        "--verbose=2",
+        join(appPath, "Contents", "Resources", "bin", binaryName),
+      ]),
+    }));
     return {
       appBundle: fileEvidence(appPath),
       codesignVerify,
       codesignDisplay,
       gatekeeperAssess,
       staplerValidate,
+      companionSignatures,
     };
   });
 
@@ -359,6 +371,13 @@ function macosSignatureEvidence(dmgPaths, appBundlePaths) {
     dmgs.length > 0 && dmgs.every((entry) => entry.staplerValidate.valid === true);
   const allAppStaplerPass =
     appBundles.length > 0 && appBundles.every((entry) => entry.staplerValidate.valid === true);
+  const allCompanionSignaturesPass =
+    appBundles.length > 0 &&
+    appBundles.every(
+      (entry) =>
+        entry.companionSignatures.length === 2 &&
+        entry.companionSignatures.every((signature) => signature.valid === true),
+    );
 
   return {
     checked: process.platform === "darwin",
@@ -366,6 +385,7 @@ function macosSignatureEvidence(dmgPaths, appBundlePaths) {
     appBundles,
     dmgs,
     appCodeSigned: allAppBundlesPass,
+    companionBinariesCodeSigned: allCompanionSignaturesPass,
     appGatekeeperAccepted: allAppGatekeeperPass,
     dmgGatekeeperAccepted: allDmgGatekeeperPass,
     notarized: allDmgStaplerPass || (dmgs.length === 0 && allAppStaplerPass),
@@ -440,12 +460,15 @@ function windowsAuthenticode(relativePath) {
   });
 
   if (result.status !== 0) {
+    const stderr = typeof result.stderr === "string" ? result.stderr.trim() : "";
+    const stdout = typeof result.stdout === "string" ? result.stdout.trim() : "";
     return {
       path: relativePath.replaceAll("\\", "/"),
-      checked: true,
+      checked: !result.error,
       exists: true,
       valid: false,
-      error: sanitize(result.stderr.trim() || result.stdout.trim()),
+      reason: result.error ? "powershell-unavailable" : "signature-check-failed",
+      error: sanitize(stderr || stdout || result.error?.message || "Authenticode check failed"),
     };
   }
 
@@ -495,9 +518,15 @@ const windows = {
   target: "nsis",
   appExecutable: fileEvidence(join(releaseDir, "win-unpacked", "Candor.exe")),
   coreExecutable: fileEvidence(join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe")),
+  companionExecutables: ["candorctl.exe", "candor-mcp.exe"].map((binaryName) =>
+    fileEvidence(join(releaseDir, "win-unpacked", "resources", "bin", binaryName)),
+  ),
   installerCandidates: windowsInstallerCandidates.map(fileEvidence),
   appSignature: windowsAuthenticode(rel(join(releaseDir, "win-unpacked", "Candor.exe"))),
   coreSignature: windowsAuthenticode(rel(join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe"))),
+  companionSignatures: ["candorctl.exe", "candor-mcp.exe"].map((binaryName) =>
+    windowsAuthenticode(rel(join(releaseDir, "win-unpacked", "resources", "bin", binaryName))),
+  ),
   installerSignatures: windowsInstallerCandidates.map((pathValue) => windowsAuthenticode(rel(pathValue))),
   signingCredentialPresence: boolEnv([
     "CSC_LINK",
@@ -543,6 +572,18 @@ if (consistency.ok !== true) {
 if (windows.installerCandidates.length === 0) failures.push("Windows NSIS installer artifact is missing");
 if (windows.appSignature.valid !== true) failures.push("Windows app executable is not Authenticode-signed");
 if (windows.coreSignature.valid !== true) failures.push("Windows sidecar executable is not Authenticode-signed");
+if (
+  windows.companionExecutables.length !== 2 ||
+  !windows.companionExecutables.every((entry) => entry.exists === true)
+) {
+  failures.push("Windows automation companion executables are missing");
+}
+if (
+  windows.companionSignatures.length !== 2 ||
+  !windows.companionSignatures.every((signature) => signature.valid === true)
+) {
+  failures.push("Windows automation companion executables are not Authenticode-signed");
+}
 if (!windows.installerSignatures.some((signature) => signature.valid === true)) {
   failures.push("Windows signed installer proof is missing");
 }
@@ -550,6 +591,12 @@ if (macos.dmgCandidates.length === 0) failures.push("macOS DMG artifact is missi
 if (macos.notarizationConfigured !== true) failures.push("macOS notarization credentials are not configured");
 if (macos.appBundleCandidates.length > 0 && macos.signature.appCodeSigned !== true) {
   failures.push("macOS app bundle codesign proof is missing or invalid");
+}
+if (
+  macos.appBundleCandidates.length > 0 &&
+  macos.signature.companionBinariesCodeSigned !== true
+) {
+  failures.push("macOS automation companion codesign proof is missing or invalid");
 }
 if (macos.appBundleCandidates.length > 0 && macos.signature.appGatekeeperAccepted !== true) {
   failures.push("macOS app bundle Gatekeeper assessment proof is missing or invalid");

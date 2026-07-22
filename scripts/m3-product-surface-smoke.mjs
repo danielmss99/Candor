@@ -1,7 +1,9 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { searchWhenReady } from "./core-rpc-search-retry.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -422,7 +424,7 @@ try {
     throw new Error("read notes did not return the saved local markdown");
   }
 
-  const search = await call("recording.durable.search", { query: "Rough notes" });
+  const search = await searchWhenReady(call, { query: "Rough notes" });
   assertCustody(search, "notes search");
   const searchMatches = Array.isArray(search?.matches) ? search.matches : [];
   if (search?.matchCount < 1 || !searchMatches.some((match) => match?.channel === "notes")) {
@@ -460,6 +462,8 @@ try {
   await call("core.shutdown");
   console.log("M3 product surface smoke passed.");
 } finally {
-  if (!child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  lines.close();
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
 }

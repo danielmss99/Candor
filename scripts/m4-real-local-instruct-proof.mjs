@@ -1,4 +1,5 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -10,7 +11,6 @@ import {
   openSync,
   readdirSync,
   readSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -69,6 +69,7 @@ const dataDir = mkdtempSync(path.join(tmpdir(), "candor-v3-m4-real-instruct-"));
 const failures = [];
 const observations = [];
 let child = null;
+let coreLines = null;
 let status = null;
 let recap = null;
 let ask = null;
@@ -421,14 +422,14 @@ function spawnCore() {
 }
 
 function makeRpc(childProcess) {
-  const lines = createInterface({ input: childProcess.stdout });
+  coreLines = createInterface({ input: childProcess.stdout });
   const pending = new Map();
 
   childProcess.stderr.on("data", (chunk) => {
     process.stderr.write(`[candor-core stderr] ${chunk}`);
   });
 
-  lines.on("line", (line) => {
+  coreLines.on("line", (line) => {
     let response;
     try {
       response = JSON.parse(line);
@@ -780,7 +781,7 @@ function runSelfTest() {
     selfTestFailures.push("invalid native fixture passed header validation");
   }
 
-  rmSync(dataDir, { recursive: true, force: true });
+  removeTemporaryDirectory(dataDir);
   if (selfTestFailures.length > 0) {
     for (const failure of selfTestFailures) console.error(`- ${failure}`);
     process.exit(1);
@@ -797,7 +798,7 @@ if (prerequisiteMissing || invalidPrerequisites.length > 0) {
   } else {
     observations.push("real local model prerequisites are missing; strict proof was not attempted");
   }
-  rmSync(dataDir, { recursive: true, force: true });
+  removeTemporaryDirectory(dataDir);
   const summary = writeProofArtifact();
   if (summary.allowMissingAccepted) {
     console.log(`M4 real local instruct proof recorded missing prerequisites at ${proofPath}.`);
@@ -857,8 +858,10 @@ try {
 } catch (error) {
   fail(safeError(error));
 } finally {
-  if (child && !child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  coreLines?.close();
+  if (child && !child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  if (child) await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
 }
 
 const summary = writeProofArtifact();

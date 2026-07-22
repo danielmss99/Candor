@@ -4,8 +4,9 @@ Status: **Windows local directory package and packaged runtime smoke passed; cle
 
 ## Requirement
 
-Electron shell and `candor-core` sidecar must package together into a runnable
-app on Windows, macOS, and Linux.
+Electron shell, `candor-core`, and the read-only `candorctl` and `candor-mcp`
+companions must package together into a runnable app on Windows, macOS, and
+Linux.
 
 ## Expected Layout
 
@@ -13,6 +14,9 @@ app on Windows, macOS, and Linux.
 - Renderer: `dist-v3/renderer`
 - Rust sidecar: packaged as `resources/bin/candor-core` or
   `resources/bin/candor-core.exe`
+- Read-only automation companions: packaged beside the core as
+  `resources/bin/candorctl` and `resources/bin/candor-mcp`, with `.exe`
+  suffixes on Windows
 - Packaged Rust sidecar is built with `sqlcipher-vault,local-whisper` so the
   release binary includes the encrypted vault and local Whisper transcription
   feature gates.
@@ -45,11 +49,12 @@ M0 network-deny proof.
 `npm run v3:release-artifact-smoke` writes
 `release-v3/proofs/v3-release-artifact-smoke-<platform>-<arch>.json`. On
 Windows it extracts the NSIS installer payload without installing it and checks
-that `Candor.exe`, `resources/app.asar`, and
-`resources/bin/candor-core.exe` match the unpacked package by hash. On macOS
-and Linux, the same gate must prove the DMG, AppImage, or deb payload entries
-match the corresponding unpacked app payload hashes before M0 packaging can
-pass. Windows inspection prefers electron-builder's managed 7-Zip binary over
+that `Candor.exe`, `resources/app.asar`, `resources/bin/candor-core.exe`,
+`resources/bin/candorctl.exe`, and `resources/bin/candor-mcp.exe` match the
+unpacked package by hash. On macOS and Linux, the same gate must prove the DMG,
+AppImage, or deb core and companion payload entries match the corresponding
+unpacked app payload hashes before M0 packaging can pass. Windows inspection
+prefers electron-builder's managed 7-Zip binary over
 an arbitrary system `PATH` copy so NSIS extraction layout is reproducible on
 developer machines and hosted runners.
 On macOS, signing and entitlement findings are recorded separately as
@@ -96,8 +101,9 @@ guard, and no external request is allowed.
 
 `npm run m0:artifact-manifest` writes
 `release-v3/proofs/m0-artifact-manifest-<platform>-<arch>.json`, hashing the
-packaged executable, `candor-core`, `app.asar`, release-shaped platform
-artifacts, and M0 source/proof files. The manifest requires the Windows NSIS
+packaged executable, `candor-core`, both automation companions, `app.asar`,
+release-shaped platform artifacts, and M0 source/proof files. The manifest
+requires the Windows NSIS
 installer, macOS DMG, or Linux AppImage plus deb artifact for the current
 platform before it can pass.
 The manifest also records git and CI provenance. `npm run v3:verify` and
@@ -105,9 +111,10 @@ The manifest also records git and CI provenance. `npm run v3:verify` and
 and the M0 proof audit rejects staged-verification or packaged-smoke proof that
 cannot be matched to a valid manifest from the same source identity.
 The packaged smoke proof also records hashes for the packaged executable,
-`candor-core`, and `app.asar`. The proof audit cross-checks those hashes against
-the artifact manifest so stale smoke results cannot be paired with a different
-package, and writes the matching hash evidence into the audit summary row.
+`candor-core`, `candorctl`, `candor-mcp`, and `app.asar`. The proof audit
+cross-checks those hashes against the artifact manifest so stale smoke results
+cannot be paired with a different package, and writes the matching hash
+evidence into the audit summary row.
 
 Windows network-deny proof uses the packaged smoke as a subcheck and writes a
 separate `release-v3/proofs/m0-network-deny-windows-<timestamp>.json` artifact
@@ -178,12 +185,18 @@ receipts for diagnosis.
 
 ## Execution Log
 
-Current vetted Windows artifact:
+Historical vetted Windows artifact:
 
 ```text
 release-v3/Candor Setup 2.0.0.exe
 release-v3/win-unpacked/Candor.exe
 ```
+
+This 2026-07-11 artifact predates the packaged automation companions. It
+remains historical evidence for the earlier core-only layout and does not
+satisfy the current five-entry package and signing gates. A newly built
+installer and refreshed smoke, manifest, signing, and network receipts are
+required before release readiness can pass.
 
 Immutable SHA-256 identities:
 

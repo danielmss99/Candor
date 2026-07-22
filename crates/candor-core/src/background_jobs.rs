@@ -1,7 +1,9 @@
 use std::fs;
 use std::sync::Arc;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 
@@ -13,13 +15,19 @@ use crate::job_manager::{
 };
 use crate::local_ai_service::{LocalAiService, LocalAskParams, LocalRecapParams};
 use crate::local_instruct_model::{
-    LocalInstructAskParams, LocalInstructModelService, LocalInstructRecapParams,
+    cleanup_prompt_template_sha256, recap_prompt_template_sha256, LocalInstructAskParams,
+    LocalInstructCleanupParams, LocalInstructModelService, LocalInstructRecapParams,
 };
 use crate::local_model_scheduler::LocalModelScheduler;
+use crate::meeting_profiles::MeetingProcessingProfileSnapshot;
 use crate::model_manager::ModelManager;
-use crate::recording_store::{ExportRecordingParams, RecordingStore};
+use crate::recording_store::{
+    CleanupFailureDraft, ExportRecordingParams, RecapReceiptDraft, RecordingIdParams,
+    RecordingStore, RecordingStoreError,
+};
 use crate::terminology_dictionary::{TerminologyService, TerminologyStatusParams};
 use crate::transcription_service::{TranscriptionRunLocalParams, TranscriptionService};
+use candor_core::live_transcript_service::LiveTranscriptService;
 
 #[derive(Clone)]
 pub struct BackgroundJobServices {
@@ -29,6 +37,7 @@ pub struct BackgroundJobServices {
     dictionary_staging: DictionaryStaging,
     terminology_service: TerminologyService,
     transcription_service: TranscriptionService,
+    live_transcript: LiveTranscriptService,
 }
 
 impl BackgroundJobServices {
@@ -39,6 +48,7 @@ impl BackgroundJobServices {
         dictionary_staging: DictionaryStaging,
         terminology_service: TerminologyService,
         transcription_service: TranscriptionService,
+        live_transcript: LiveTranscriptService,
     ) -> Self {
         Self {
             bundled_ai_assets,
@@ -47,6 +57,7 @@ impl BackgroundJobServices {
             dictionary_staging,
             terminology_service,
             transcription_service,
+            live_transcript,
         }
     }
 
@@ -113,12 +124,18 @@ impl BackgroundJobServices {
                 model_id,
                 ..
             } => self.transcribe(recording_id, channel, model_id, context),
+            JobDescriptor::Cleanup {
+                recording_id,
+                fallback_to_raw,
+                ..
+            } => self.cleanup(recording_id, fallback_to_raw, context),
             JobDescriptor::Recap {
                 recording_id,
+                recap_template,
                 mode,
                 fallback_policy,
                 ..
-            } => self.recap(recording_id, mode, fallback_policy, context),
+            } => self.recap(recording_id, recap_template, mode, fallback_policy, context),
             JobDescriptor::Ask {
                 recording_id,
                 question,
@@ -167,8 +184,8 @@ impl BackgroundJobServices {
         let mut scheduler = LocalModelScheduler::default();
         context.progress("transcribing", 1, Some(3), Some("stage"));
         let mut service = self.transcription_service.clone();
-        let value = service
-            .run_local_cancellable(
+        let run = service
+            .run_local_cancellable_with_commit(
                 &self.recording_store,
                 &mut scheduler,
                 &self.model_manager,
@@ -180,6 +197,10 @@ impl BackgroundJobServices {
                 context.cancellation_flag(),
             )
             .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+        let _ = self
+            .live_transcript
+            .reconcile_committed(&run.committed_final_revision);
+        let value = run.public_value;
         context.progress("saving-transcript", 2, Some(3), Some("stage"));
         let model = value.get("model").and_then(Value::as_object);
         self.recording_store
@@ -198,15 +219,165 @@ impl BackgroundJobServices {
         Ok(transcription_completion_summary(recording_id, &value))
     }
 
+    fn cleanup(
+        &self,
+        recording_id: String,
+        fallback_to_raw: bool,
+        context: JobContext,
+    ) -> Result<Value, JobFailure> {
+        context.progress("preparing-cleanup", 0, Some(3), Some("stage"));
+        let selected_input = self
+            .recording_store
+            .transcript_for_local_ai(recording_id.clone())
+            .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+        if selected_input
+            .get("inputRevisionKind")
+            .and_then(Value::as_str)
+            == Some("ai-cleaned")
+        {
+            return Ok(json!({
+                "recordingId": recording_id,
+                "revisionId": selected_input.get("inputRevisionId").cloned().unwrap_or(Value::Null),
+                "parentRevisionId": selected_input.get("currentRevisionId").cloned().unwrap_or(Value::Null),
+                "kind": "ai-cleaned",
+                "source": "ai-cleanup",
+                "current": false,
+                "currentCleaned": true,
+                "segmentCount": selected_input.get("segmentCount").cloned().unwrap_or(json!(0)),
+                "validationResult": "passed",
+                "cleaned": true,
+                "fallbackApplied": false,
+                "reused": true,
+                "localOnly": true,
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }));
+        }
+        let fallback_input_kind = selected_input
+            .get("inputRevisionKind")
+            .and_then(Value::as_str)
+            .unwrap_or("legacy")
+            .to_string();
+        let source = self
+            .recording_store
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+        let parent_revision_id = source
+            .get("currentRevisionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                JobFailure::new(
+                    "LOCAL_LLM_CLEANUP_SOURCE_INVALID",
+                    "transcript cleanup requires an immutable source revision",
+                    false,
+                )
+            })?
+            .to_string();
+        let started_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let started = Instant::now();
+        let service = self.local_instruct_service();
+        let mut scheduler = LocalModelScheduler::default();
+        let status = service.status(&scheduler);
+        let identity = if status["ready"] == true {
+            Some(self.required_local_llm_identity(&status)?)
+        } else {
+            None
+        };
+        context.progress("cleaning-transcript", 1, Some(3), Some("stage"));
+        let result = match identity.as_ref() {
+            Some(identity) => service.cleanup_cancellable(
+                &self.recording_store,
+                &mut scheduler,
+                LocalInstructCleanupParams {
+                    recording_id: recording_id.clone(),
+                    max_tokens: None,
+                },
+                &identity.model_id,
+                &identity.model_sha256,
+                context.cancellation_flag(),
+            ),
+            None => Err(crate::local_instruct_model::LocalInstructError {
+                code: stable_local_ai_code(
+                    status["failureCode"]
+                        .as_str()
+                        .unwrap_or("LOCAL_LLM_UNAVAILABLE"),
+                ),
+                message: "the verified local cleanup model is not ready".to_string(),
+            }),
+        };
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        match result {
+            Ok(value) => {
+                context.progress("saving-cleaned-transcript", 2, Some(3), Some("stage"));
+                let identity = identity.expect("successful cleanup has verified identity");
+                self.recording_store
+                    .record_processing_fact(
+                        &recording_id,
+                        "local-ai-cleanup",
+                        "llama-cpp-local",
+                        Some(&identity.model_id),
+                        Some(&identity.model_sha256),
+                    )
+                    .map_err(|error| JobFailure::new(error.code, error.message, true))?;
+                Ok(value)
+            }
+            Err(error) => {
+                let cancelled = context.cancelled() || error.code == "LOCAL_LLM_COMMAND_CANCELLED";
+                let _ = self
+                    .recording_store
+                    .record_cleanup_failure(CleanupFailureDraft {
+                        recording_id: recording_id.clone(),
+                        parent_revision_id,
+                        engine: "llama-cpp-local".to_string(),
+                        model_id: identity.as_ref().map(|value| value.model_id.clone()),
+                        model_sha256: identity.as_ref().map(|value| value.model_sha256.clone()),
+                        prompt_template_sha256: cleanup_prompt_template_sha256(),
+                        started_at_ms,
+                        elapsed_ms,
+                        error_code: error.code.to_string(),
+                        cancelled,
+                    });
+                if fallback_to_raw && !cancelled && !is_non_fallback_error(error.code) {
+                    Ok(json!({
+                        "recordingId": recording_id,
+                        "cleaned": false,
+                        "fallbackApplied": true,
+                        "fallbackInputKind": fallback_input_kind,
+                        "failureCode": stable_local_ai_code(error.code),
+                        "localOnly": true,
+                        "rawPathExposed": false,
+                        "keyMaterialExposedToRenderer": false
+                    }))
+                } else {
+                    Err(JobFailure::new(error.code, error.message, true))
+                }
+            }
+        }
+    }
+
     fn recap(
         &self,
         recording_id: String,
+        recap_template: Option<String>,
         mode: AiExecutionMode,
         fallback_policy: AiFallbackPolicy,
         context: JobContext,
     ) -> Result<Value, JobFailure> {
+        let started_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis())
+            .unwrap_or_default();
+        let started = Instant::now();
+        let recap_template_requested = recap_template
+            .as_deref()
+            .is_some_and(|template| !template.trim().is_empty());
         context.progress("preparing", 0, Some(3), Some("stage"));
-        let result = match mode {
+        let mut result = match mode {
             AiExecutionMode::HeuristicFallback => {
                 context.progress("summarizing", 1, Some(3), Some("stage"));
                 with_ai_provenance(
@@ -243,6 +414,7 @@ impl BackgroundJobServices {
                         &mut scheduler,
                         LocalInstructRecapParams {
                             recording_id: recording_id.clone(),
+                            recap_template,
                             max_tokens: None,
                         },
                         context.cancellation_flag(),
@@ -280,6 +452,16 @@ impl BackgroundJobServices {
                 }
             }
         };
+        if let Some(root) = result.as_object_mut() {
+            root.insert(
+                "recapTemplateRequested".to_string(),
+                Value::Bool(recap_template_requested),
+            );
+            root.entry("recapTemplateApplied".to_string())
+                .or_insert_with(|| {
+                    Value::Bool(recap_template_requested && mode == AiExecutionMode::LocalLlm)
+                });
+        }
         if context.cancelled() {
             return Err(JobFailure::new(
                 "JOB_CANCELLED",
@@ -288,6 +470,59 @@ impl BackgroundJobServices {
             ));
         }
         context.progress("saving-local-result", 2, Some(3), Some("stage"));
+        let input_revision_id = result
+            .get("inputRevisionId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                JobFailure::new(
+                    "LOCAL_AI_RECAP_LINEAGE_INVALID",
+                    "the recap did not identify its transcript input revision",
+                    false,
+                )
+            })?;
+        let provenance = result.get("provenance").and_then(Value::as_object);
+        let engine = result
+            .get("engine")
+            .and_then(Value::as_str)
+            .unwrap_or("heuristic-local");
+        let prompt_version = provenance
+            .and_then(|value| value.get("promptVersion"))
+            .and_then(Value::as_str)
+            .unwrap_or("candor-heuristic-v1");
+        let prompt_template_sha256 = if engine == "llama-cpp-local" {
+            recap_prompt_template_sha256()
+        } else {
+            format!("{:x}", Sha256::digest(prompt_version.as_bytes()))
+        };
+        let fallback_applied = required_cleanup_fallback(&result)?
+            || provenance
+                .and_then(|value| value.get("fallbackUsed"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        self.recording_store
+            .record_recap_receipt(RecapReceiptDraft {
+                recording_id: recording_id.clone(),
+                input_revision_id: input_revision_id.to_string(),
+                engine: engine.to_string(),
+                model_id: provenance
+                    .and_then(|value| value.get("modelId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                model_sha256: provenance
+                    .and_then(|value| value.get("modelSha256"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                prompt_template_sha256,
+                validation_result: if engine == "llama-cpp-local" {
+                    "passed".to_string()
+                } else {
+                    "not-applicable".to_string()
+                },
+                fallback_applied,
+                started_at_ms,
+                elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            })
+            .map_err(|error| JobFailure::new(error.code, error.message, true))?;
         self.recording_store
             .record_ai_processing_fact(
                 &recording_id,
@@ -606,14 +841,23 @@ pub fn descriptor_for_transcription(
     channel: Option<String>,
     model_id: Option<String>,
     auto_recap: bool,
+    processing_profile: Option<&MeetingProcessingProfileSnapshot>,
     recap_fallback_policy: AiFallbackPolicy,
 ) -> JobDescriptor {
+    let model_id = model_id.or_else(|| processing_profile.map(|profile| profile.model_id.clone()));
+    let recap_template = processing_profile.and_then(|profile| profile.recap_template.clone());
     let follow_up = auto_recap.then(|| {
-        Box::new(JobDescriptor::Recap {
+        let recap = JobDescriptor::Recap {
             recording_id: recording_id.clone(),
+            recap_template,
             mode: AiExecutionMode::LocalLlm,
             fallback_policy: recap_fallback_policy,
             legacy_quality: None,
+        };
+        Box::new(JobDescriptor::Cleanup {
+            recording_id: recording_id.clone(),
+            fallback_to_raw: true,
+            follow_up: Some(Box::new(recap)),
         })
     });
     JobDescriptor::Transcription {
@@ -624,17 +868,46 @@ pub fn descriptor_for_transcription(
     }
 }
 
+pub fn descriptor_for_cleanup(recording_id: String, fallback_to_raw: bool) -> JobDescriptor {
+    JobDescriptor::Cleanup {
+        recording_id,
+        fallback_to_raw,
+        follow_up: None,
+    }
+}
+
 pub fn descriptor_for_recap(
     recording_id: String,
+    recap_template: Option<String>,
     mode: AiExecutionMode,
     fallback_policy: AiFallbackPolicy,
 ) -> JobDescriptor {
     JobDescriptor::Recap {
         recording_id,
+        recap_template,
         mode,
         fallback_policy,
         legacy_quality: None,
     }
+}
+
+pub fn descriptor_for_recording_recap(
+    store: &RecordingStore,
+    recording_id: String,
+    requested_template: Option<String>,
+    mode: AiExecutionMode,
+    fallback_policy: AiFallbackPolicy,
+) -> Result<JobDescriptor, RecordingStoreError> {
+    let recap_template = store
+        .processing_profile(&recording_id)?
+        .and_then(|profile| profile.recap_template)
+        .or(requested_template);
+    Ok(descriptor_for_recap(
+        recording_id,
+        recap_template,
+        mode,
+        fallback_policy,
+    ))
 }
 
 pub fn descriptor_for_ask(
@@ -705,7 +978,14 @@ fn transcription_completion_summary(recording_id: String, result: &Value) -> Val
         "recordingId": recording_id,
         "engine": result["engine"].as_str().unwrap_or("whisper-rs"),
         "segmentCount": result["writtenSegmentCount"].as_u64().unwrap_or(0),
-        "rawPathExposed": false
+        "modelId": result["model"]["modelId"].as_str(),
+        "language": result["language"].as_str(),
+        "processingProfile": result.get("processingProfile").cloned().unwrap_or(Value::Null),
+        "normalization": result.get("normalization").cloned().unwrap_or(Value::Null),
+        "revisionId": result["trustHistory"]["revisionId"].as_str(),
+        "receiptId": result["trustHistory"]["receiptId"].as_str(),
+        "rawPathExposed": false,
+        "keyMaterialExposedToRenderer": false
     })
 }
 
@@ -792,6 +1072,19 @@ fn stable_local_ai_code(code: &str) -> &'static str {
     }
 }
 
+fn required_cleanup_fallback(result: &Value) -> Result<bool, JobFailure> {
+    result
+        .get("cleanupFallbackApplied")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| {
+            JobFailure::new(
+                "LOCAL_AI_RECAP_LINEAGE_INVALID",
+                "the recap did not identify whether transcript cleanup fell back",
+                false,
+            )
+        })
+}
+
 pub fn processing_queue_failure(error: &crate::job_manager::JobManagerError) -> Value {
     json!({
         "code": error.code,
@@ -804,6 +1097,102 @@ pub fn processing_queue_failure(error: &crate::job_manager::JobManagerError) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::meeting_profiles::{
+        MeetingProcessingProfileSnapshot, ProfileCaptureSource, PROCESSING_PROFILE_SCHEMA_VERSION,
+    };
+    use crate::recording_store::StartRecordingParams;
+
+    fn profile_snapshot(template: &str) -> MeetingProcessingProfileSnapshot {
+        MeetingProcessingProfileSnapshot {
+            schema_version: PROCESSING_PROFILE_SCHEMA_VERSION,
+            profile_id: "standup".to_string(),
+            profile_version: 1,
+            capture_source: ProfileCaptureSource::Microphone,
+            model_id: "small".to_string(),
+            speech_model_id: Some("small".to_string()),
+            cleanup_model_id: Some("qwen3-4b-official-q4_k_m".to_string()),
+            summary_model_id: Some("qwen3-4b-official-q4_k_m".to_string()),
+            language: "auto".to_string(),
+            transcription_language: "auto".to_string(),
+            dictionary_ids: vec!["product".to_string()],
+            replacement_rule_set: None,
+            recap_template: Some(template.to_string()),
+            live_transcription: true,
+        }
+    }
+
+    #[test]
+    fn automatic_recap_carries_the_selected_profile_template() {
+        let profile = profile_snapshot("Focus on blockers and owners.");
+        let descriptor = descriptor_for_transcription(
+            "recording-profile".to_string(),
+            None,
+            None,
+            true,
+            Some(&profile),
+            AiFallbackPolicy::RequireLocalLlm,
+        );
+        let JobDescriptor::Transcription {
+            model_id,
+            follow_up: Some(follow_up),
+            ..
+        } = descriptor
+        else {
+            panic!("expected transcription follow-up");
+        };
+        let JobDescriptor::Cleanup {
+            fallback_to_raw,
+            follow_up: Some(recap_follow_up),
+            ..
+        } = *follow_up
+        else {
+            panic!("expected cleanup handoff");
+        };
+        let JobDescriptor::Recap { recap_template, .. } = *recap_follow_up else {
+            panic!("expected recap after cleanup");
+        };
+        assert!(fallback_to_raw);
+        assert_eq!(
+            recap_template.as_deref(),
+            Some("Focus on blockers and owners.")
+        );
+        assert_eq!(model_id.as_deref(), Some("small"));
+    }
+
+    #[test]
+    fn manual_recap_uses_capture_time_template_instead_of_current_renderer_profile() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "candor-recording-recap-profile-{}-{suffix}",
+            std::process::id()
+        ));
+        let store = RecordingStore::with_root(root.clone());
+        let started = store
+            .start_with_processing_profile(
+                StartRecordingParams {
+                    label: Some("Bound recap".to_string()),
+                },
+                Some(profile_snapshot("Template A from capture.")),
+            )
+            .expect("start recording");
+        let recording_id = started["recordingId"].as_str().unwrap().to_string();
+        let descriptor = descriptor_for_recording_recap(
+            &store,
+            recording_id,
+            Some("Template B from current profile.".to_string()),
+            AiExecutionMode::LocalLlm,
+            AiFallbackPolicy::RequireLocalLlm,
+        )
+        .expect("descriptor");
+        let JobDescriptor::Recap { recap_template, .. } = descriptor else {
+            panic!("expected recap descriptor");
+        };
+        assert_eq!(recap_template.as_deref(), Some("Template A from capture."));
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn fallback_policy_is_explicit_and_never_masks_preemption_or_cancellation() {
@@ -867,6 +1256,21 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn recap_receipt_requires_explicit_cleanup_fallback_lineage() {
+        let error = required_cleanup_fallback(&json!({
+            "inputRevisionId": "revision-1"
+        }))
+        .expect_err("missing cleanup fallback lineage must fail closed");
+        assert_eq!(error.code, "LOCAL_AI_RECAP_LINEAGE_INVALID");
+        assert!(!error.retryable);
+
+        assert!(required_cleanup_fallback(&json!({
+            "cleanupFallbackApplied": true
+        }))
+        .expect("explicit cleanup fallback lineage"));
     }
 
     #[test]

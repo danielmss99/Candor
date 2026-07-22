@@ -11,13 +11,14 @@ export class NetworkGuard {
   private deniedNavigationRequests = 0;
   private readonly deniedNavigationSamples: string[] = [];
 
-  recordRequest(value: string, isDevRequest: boolean): boolean {
+  recordRequest(value: string, isDevRequest: boolean, resourceType = "other"): boolean {
     this.totalRequests += 1;
     const url = new URL(value);
     const allowed =
       url.protocol === "file:" ||
       url.protocol === "devtools:" ||
       url.protocol === "data:" ||
+      (url.protocol === "blob:" && resourceType === "media") ||
       isDevRequest;
     if (allowed) {
       if (isDevRequest) this.externalAllowedRequests += 1;
@@ -88,6 +89,8 @@ export function installSessionHardening(
   });
   session.defaultSession.setPermissionCheckHandler(denyPermissionCheck);
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
-    callback({ cancel: !guard.recordRequest(details.url, isDevRequest(details.url)) });
+    callback({
+      cancel: !guard.recordRequest(details.url, isDevRequest(details.url), details.resourceType),
+    });
   });
 }

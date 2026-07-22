@@ -8,6 +8,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const repoRoot = resolve(__dirname, "..");
 const expectedProtocolVersion = "m0-jsonrpc-stdio-1";
+const packagedRuntimeArtifactNames = [
+  "appExecutable",
+  "coreExecutable",
+  "candorctlExecutable",
+  "candorMcpExecutable",
+  "appArchive",
+];
 
 function hasArg(name) {
   return process.argv.includes(name);
@@ -863,7 +870,7 @@ function validateSmokeProof(payload) {
     "session guard must report zero blocked requests before the explicit network probe",
     failures,
   );
-  for (const artifactName of ["appExecutable", "coreExecutable", "appArchive"]) {
+  for (const artifactName of packagedRuntimeArtifactNames) {
     requireField(
       payload?.packagedArtifacts?.[artifactName]?.exists === true,
       `packagedArtifacts.${artifactName} must exist`,
@@ -905,7 +912,7 @@ function validateSmokeManifestPair(smokePayload, manifestPayload) {
     requireField(smokePayload?.ci?.runAttempt === manifestPayload?.ci?.runAttempt, "smoke CI run attempt must match manifest", failures);
     requireField(smokePayload?.ci?.sha === manifestPayload?.ci?.sha, "smoke CI sha must match manifest", failures);
   }
-  for (const artifactName of ["appExecutable", "coreExecutable", "appArchive"]) {
+  for (const artifactName of packagedRuntimeArtifactNames) {
     requireField(
       smokePayload?.packagedArtifacts?.[artifactName]?.sha256 ===
         manifestPayload?.packaged?.[artifactName]?.sha256,
@@ -961,7 +968,7 @@ function sourceIdentityMatchEvidence(v3Payload, manifestCandidate) {
 
 function artifactHashMatchEvidence(smokePayload, manifestCandidate) {
   const artifacts = {};
-  for (const artifactName of ["appExecutable", "coreExecutable", "appArchive"]) {
+  for (const artifactName of packagedRuntimeArtifactNames) {
     const smokeArtifact = smokePayload?.packagedArtifacts?.[artifactName] ?? {};
     const manifestArtifact = manifestCandidate?.payload?.packaged?.[artifactName] ?? {};
     artifacts[artifactName] = {
@@ -1183,6 +1190,16 @@ function minimalValidSmokeProof() {
         bytes: 101,
         sha256: "b".repeat(64),
       },
+      candorctlExecutable: {
+        exists: true,
+        bytes: 103,
+        sha256: "d".repeat(64),
+      },
+      candorMcpExecutable: {
+        exists: true,
+        bytes: 104,
+        sha256: "e".repeat(64),
+      },
       appArchive: {
         exists: true,
         bytes: 102,
@@ -1228,6 +1245,16 @@ function minimalValidManifestProof() {
         exists: true,
         bytes: 101,
         sha256: "b".repeat(64),
+      },
+      candorctlExecutable: {
+        exists: true,
+        bytes: 103,
+        sha256: "d".repeat(64),
+      },
+      candorMcpExecutable: {
+        exists: true,
+        bytes: 104,
+        sha256: "e".repeat(64),
       },
       appArchive: {
         exists: true,
@@ -1415,8 +1442,10 @@ function runSelfTest() {
   const validHashEvidence = artifactHashMatchEvidence(validSmoke, { file: "manifest.json", payload: validManifest });
   assertSelfTest(
     validHashEvidence.artifacts.coreExecutable.sha256Match === true &&
-      validHashEvidence.artifacts.coreExecutable.bytesMatch === true,
-    "artifact hash match evidence should show core executable match",
+      validHashEvidence.artifacts.coreExecutable.bytesMatch === true &&
+      validHashEvidence.artifacts.candorctlExecutable.sha256Match === true &&
+      validHashEvidence.artifacts.candorMcpExecutable.sha256Match === true,
+    "artifact hash match evidence should show core and companion executable matches",
   );
 
   assertSelfTestFailure(
@@ -1491,6 +1520,13 @@ function runSelfTest() {
       delete payload.packagedArtifacts.coreExecutable.sha256;
     },
     "packagedArtifacts.coreExecutable must include sha256",
+  );
+  assertSelfTestFailure(
+    "missing companion artifact hash evidence",
+    (payload) => {
+      delete payload.packagedArtifacts.candorMcpExecutable.sha256;
+    },
+    "packagedArtifacts.candorMcpExecutable must include sha256",
   );
 
   const mismatchedManifest = cloneJson(validManifest);
@@ -2247,12 +2283,18 @@ function validateManifestProof(payload) {
   requireField(payload?.ok === true, "ok must be true", failures);
   requireField(payload?.proofKind === "m0-artifact-manifest", "proofKind must be m0-artifact-manifest", failures);
   validateSourceProvenance(payload, "manifest", failures);
-  requireField(payload?.packaged?.appExecutable?.exists === true, "packaged app executable must exist", failures);
-  requireField(payload?.packaged?.appExecutable?.sha256, "packaged app executable hash must exist", failures);
-  requireField(payload?.packaged?.coreExecutable?.exists === true, "packaged core executable must exist", failures);
-  requireField(payload?.packaged?.coreExecutable?.sha256, "packaged core executable hash must exist", failures);
-  requireField(payload?.packaged?.appArchive?.exists === true, "packaged app archive must exist", failures);
-  requireField(payload?.packaged?.appArchive?.sha256, "packaged app archive hash must exist", failures);
+  for (const artifactName of packagedRuntimeArtifactNames) {
+    requireField(
+      payload?.packaged?.[artifactName]?.exists === true,
+      `packaged ${artifactName} must exist`,
+      failures,
+    );
+    requireField(
+      payload?.packaged?.[artifactName]?.sha256,
+      `packaged ${artifactName} hash must exist`,
+      failures,
+    );
+  }
   requireField(Array.isArray(payload?.releaseArtifacts), "release artifact list must exist", failures);
   const releaseArtifacts = Array.isArray(payload?.releaseArtifacts) ? payload.releaseArtifacts : [];
   const releaseKinds = new Set(releaseArtifacts.filter((entry) => entry?.exists === true).map((entry) => entry?.kind));

@@ -7,11 +7,13 @@ import {
   mkdtempSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readSync,
   readFileSync,
   realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -21,6 +23,7 @@ import { fileURLToPath } from "node:url";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultBundleRoot = path.join(repoRoot, "build", "ai-bundle");
 const strict = process.argv.includes("--require-ready");
+const requireSourceInterface = process.argv.includes("--require-source-interface");
 const selfTest = process.argv.includes("--self-test");
 const rootArgumentIndex = process.argv.indexOf("--root");
 const profileArgumentIndex = process.argv.indexOf("--profile");
@@ -33,10 +36,16 @@ const bundleRoot = rootArgumentIndex >= 0
 
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const MAX_ASSETS = 64;
+const MAX_BUNDLE_TREE_ENTRIES = 1024;
+const MAX_CONTROL_NOTICE_BYTES = 128 * 1024;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i;
 const SAFE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,95}$/i;
 const CAPABILITIES = new Set(["speech", "language", "terminology"]);
 const KINDS = new Set(["runtime", "library", "model", "data", "public-key"]);
+const BUNDLE_CONTROL_FILES = new Set([
+  "manifest.json",
+  "notices/README.md",
+]);
 const MANIFEST_FIELDS = new Set([
   "manifestVersion",
   "bundleVersion",
@@ -97,6 +106,175 @@ function safeRelativePath(value) {
     && !value.includes("\\")
     && !path.isAbsolute(value)
     && !value.split("/").some((part) => part === "" || part === "." || part === "..");
+}
+
+function isProhibitedTransientPath(relativePath) {
+  return relativePath.split("/").some((part) => (
+    /(?:\.(?:part|partial|tmp|temp|bak|backup|old|orig|save)|~)$/i.test(part)
+    || /^~/.test(part)
+    || /^#.*#$/.test(part)
+  ));
+}
+
+function collectBundleTree(root, failures) {
+  const files = [];
+  const directories = [];
+  const caseInsensitivePaths = new Map();
+  let entryCount = 0;
+  let limitReported = false;
+
+  let rootState;
+  try {
+    rootState = lstatSync(root);
+  } catch {
+    failures.push("bundle root is unavailable");
+    return { files, directories };
+  }
+  if (rootState.isSymbolicLink() || !rootState.isDirectory()) {
+    failures.push("bundle root must be a regular non-symlink directory");
+    return { files, directories };
+  }
+
+  function walk(directory, relativeDirectory) {
+    let names;
+    try {
+      names = readdirSync(directory).sort((left, right) => left.localeCompare(right, "en"));
+    } catch {
+      failures.push(`bundle directory ${relativeDirectory || "."} is unreadable`);
+      return;
+    }
+
+    for (const name of names) {
+      entryCount += 1;
+      if (entryCount > MAX_BUNDLE_TREE_ENTRIES) {
+        if (!limitReported) {
+          failures.push(`bundle tree cannot contain more than ${MAX_BUNDLE_TREE_ENTRIES} entries`);
+          limitReported = true;
+        }
+        return;
+      }
+
+      const relativePath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
+      const target = path.join(directory, name);
+      if (!safeRelativePath(relativePath)) {
+        failures.push(`bundle tree path ${JSON.stringify(relativePath)} is unsafe`);
+      }
+      const foldedPath = relativePath.toLowerCase();
+      const existingPath = caseInsensitivePaths.get(foldedPath);
+      if (existingPath !== undefined && existingPath !== relativePath) {
+        failures.push(`bundle tree has a case-insensitive path collision: ${existingPath} and ${relativePath}`);
+      } else {
+        caseInsensitivePaths.set(foldedPath, relativePath);
+      }
+      if (isProhibitedTransientPath(relativePath)) {
+        failures.push(`bundle tree contains prohibited partial or backup path ${relativePath}`);
+      }
+
+      let state;
+      try {
+        state = lstatSync(target);
+      } catch {
+        failures.push(`bundle tree entry ${relativePath} is unreadable`);
+        continue;
+      }
+      if (state.isSymbolicLink()) {
+        failures.push(`bundle tree entry ${relativePath} must not be a symbolic link or junction`);
+        continue;
+      }
+      if (state.isDirectory()) {
+        directories.push(relativePath);
+        walk(target, relativePath);
+      } else if (state.isFile()) {
+        files.push({ relativePath, bytes: state.size });
+      } else {
+        failures.push(`bundle tree entry ${relativePath} must be a regular file or directory`);
+      }
+    }
+  }
+
+  walk(root, "");
+  return { files, directories };
+}
+
+function verifyBundleTreeClosure(root, manifest, failures) {
+  const allowedFiles = new Set();
+  const declaredPaths = new Map();
+
+  function declarePath(relativePath, claim, claimKind) {
+    if (!safeRelativePath(relativePath)) return;
+    const foldedPath = relativePath.toLowerCase();
+    const existing = declaredPaths.get(foldedPath);
+    if (existing !== undefined) {
+      if (existing.relativePath !== relativePath) {
+        failures.push(
+          `manifest has a case-insensitive path collision: ${existing.relativePath} and ${relativePath}`,
+        );
+      } else if (
+        claimKind === "asset"
+        || existing.claimKind === "asset"
+        || existing.claimKind === "control"
+        || claimKind === "control"
+      ) {
+        failures.push(`manifest path ${relativePath} is claimed by both ${existing.claim} and ${claim}`);
+      }
+    } else {
+      declaredPaths.set(foldedPath, { relativePath, claim, claimKind });
+    }
+    allowedFiles.add(relativePath);
+  }
+
+  for (const controlFile of BUNDLE_CONTROL_FILES) {
+    declarePath(controlFile, `control file ${controlFile}`, "control");
+  }
+  for (const [index, asset] of (Array.isArray(manifest?.assets) ? manifest.assets : []).entries()) {
+    if (!asset || typeof asset !== "object" || Array.isArray(asset)) continue;
+    declarePath(asset.relativePath, `assets[${index}].relativePath`, "asset");
+    declarePath(asset.licenseFile, `assets[${index}].licenseFile`, "reference");
+    if (asset.modelCard !== undefined) {
+      declarePath(asset.modelCard, `assets[${index}].modelCard`, "reference");
+    }
+  }
+
+  const allowedDirectories = new Set();
+  for (const allowedFile of allowedFiles) {
+    const parts = allowedFile.split("/");
+    for (let index = 1; index < parts.length; index += 1) {
+      allowedDirectories.add(parts.slice(0, index).join("/"));
+    }
+  }
+  const allowedFilesByFoldedPath = new Map(
+    [...allowedFiles].map((relativePath) => [relativePath.toLowerCase(), relativePath]),
+  );
+  const allowedDirectoriesByFoldedPath = new Map(
+    [...allowedDirectories].map((relativePath) => [relativePath.toLowerCase(), relativePath]),
+  );
+
+  const tree = collectBundleTree(root, failures);
+  for (const file of tree.files) {
+    if (!allowedFiles.has(file.relativePath)) {
+      const declaredSpelling = allowedFilesByFoldedPath.get(file.relativePath.toLowerCase());
+      if (declaredSpelling !== undefined) {
+        failures.push(`bundle file ${file.relativePath} does not match declared path spelling ${declaredSpelling}`);
+      } else {
+        failures.push(`bundle contains unlisted file ${file.relativePath}`);
+      }
+    }
+    if (file.relativePath === "notices/README.md" && (
+      file.bytes <= 0 || file.bytes > MAX_CONTROL_NOTICE_BYTES
+    )) {
+      failures.push(`notices/README.md must contain 1 to ${MAX_CONTROL_NOTICE_BYTES} bytes`);
+    }
+  }
+  for (const directory of tree.directories) {
+    if (!allowedDirectories.has(directory)) {
+      const declaredSpelling = allowedDirectoriesByFoldedPath.get(directory.toLowerCase());
+      if (declaredSpelling !== undefined) {
+        failures.push(`bundle directory ${directory} does not match declared path spelling ${declaredSpelling}`);
+      } else {
+        failures.push(`bundle contains unlisted directory ${directory}`);
+      }
+    }
+  }
 }
 
 function rejectUnknownFields(value, allowed, label, failures) {
@@ -269,6 +447,7 @@ export function verifyBundle(root, options = {}) {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const requireReady = options.requireReady ?? false;
+  const requireSourceInterfaceMode = options.requireSourceInterface ?? false;
   const requiredProfile = options.requiredProfile ?? null;
   const manifest = loadManifest(root, failures);
   if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) {
@@ -300,6 +479,24 @@ export function verifyBundle(root, options = {}) {
   if (!Array.isArray(manifest.assets)) failures.push("assets must be an array");
   const assets = Array.isArray(manifest.assets) ? manifest.assets : [];
   if (assets.length > MAX_ASSETS) failures.push(`assets cannot contain more than ${MAX_ASSETS} entries`);
+  if (manifest.selectionStatus === "no-default-selected" && assets.length !== 0) {
+    failures.push("selectionStatus no-default-selected requires an empty asset inventory");
+  }
+  if (manifest.packageProfile === "source-interface" && assets.length !== 0) {
+    failures.push("packageProfile source-interface requires an empty asset inventory");
+  }
+  if (requireSourceInterfaceMode) {
+    if (requireReady) failures.push("source-interface and release-ready modes are mutually exclusive");
+    if (manifest.releaseReady !== false) failures.push("source-interface releaseReady must be false");
+    if (manifest.fixture !== false) failures.push("source-interface fixture must be false");
+    if (manifest.selectionStatus !== "no-default-selected") {
+      failures.push("source-interface selectionStatus must be no-default-selected");
+    }
+    if (manifest.packageProfile !== "source-interface") {
+      failures.push("source-interface packageProfile must be source-interface");
+    }
+    if (assets.length !== 0) failures.push("source-interface asset inventory must be empty");
+  }
   if (requireReady && manifest.releaseReady !== true) failures.push("releaseReady must be true for a release bundle");
   if (requireReady && manifest.selectionStatus !== "release-selected") {
     failures.push("selectionStatus must be release-selected for a release bundle");
@@ -314,6 +511,7 @@ export function verifyBundle(root, options = {}) {
   } catch {
     failures.push("bundle root is unavailable");
   }
+  verifyBundleTreeClosure(root, manifest, failures);
 
   const ids = new Set();
   const hostSelectors = new Set();
@@ -765,17 +963,107 @@ function makeFixture(root) {
   return manifest;
 }
 
+function makeSourceInterfaceFixture(root) {
+  mkdirSync(path.join(root, "notices"), { recursive: true });
+  writeFileSync(
+    path.join(root, "notices", "README.md"),
+    "# Candor Local AI Notices\n\nNo default model is selected.\n",
+  );
+  const manifest = {
+    manifestVersion: 1,
+    bundleVersion: "source-interface-fixture",
+    releaseReady: false,
+    fixture: false,
+    selectionStatus: "no-default-selected",
+    packageProfile: "source-interface",
+    repairPolicy: "signed-installer-only",
+    assets: [],
+  };
+  writeFileSync(path.join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+  return manifest;
+}
+
+function requireFailure(result, expectedFailure, rejectedDescription) {
+  if (result.ok || !result.failures.some((failure) => failure.includes(expectedFailure))) {
+    throw new Error(`${rejectedDescription} was accepted: ${result.failures.join(", ")}`);
+  }
+}
+
 function runSelfTest() {
   const root = mkdtempSync(path.join(tmpdir(), "candor-ai-bundle-verifier-"));
   try {
-    const manifest = makeFixture(root);
-    const ready = verifyBundle(root, { requireReady: true });
+    const sourceRoot = path.join(root, "source-interface");
+    const sourceManifest = makeSourceInterfaceFixture(sourceRoot);
+    const sourceReady = verifyBundle(sourceRoot, { requireSourceInterface: true });
+    if (!sourceReady.ok) {
+      throw new Error(`valid source-interface fixture failed: ${sourceReady.failures.join(", ")}`);
+    }
+
+    const orphanPath = path.join(sourceRoot, "orphan.bin");
+    writeFileSync(orphanPath, "orphan");
+    requireFailure(
+      verifyBundle(sourceRoot, { requireSourceInterface: true }),
+      "bundle contains unlisted file orphan.bin",
+      "an unlisted bundle file",
+    );
+    rmSync(orphanPath, { force: true });
+
+    const partialPath = path.join(sourceRoot, "model.bin.part");
+    writeFileSync(partialPath, "partial");
+    requireFailure(
+      verifyBundle(sourceRoot, { requireSourceInterface: true }),
+      "prohibited partial or backup path model.bin.part",
+      "a stale partial bundle file",
+    );
+    rmSync(partialPath, { force: true });
+
+    const backupPath = path.join(sourceRoot, "manifest.json.bak");
+    writeFileSync(backupPath, "backup");
+    requireFailure(
+      verifyBundle(sourceRoot, { requireSourceInterface: true }),
+      "prohibited partial or backup path manifest.json.bak",
+      "a backup bundle file",
+    );
+    rmSync(backupPath, { force: true });
+
+    const externalDirectory = path.join(root, "symlink-target");
+    const symlinkPath = path.join(sourceRoot, "linked-assets");
+    mkdirSync(externalDirectory);
+    symlinkSync(externalDirectory, symlinkPath, process.platform === "win32" ? "junction" : "dir");
+    requireFailure(
+      verifyBundle(sourceRoot, { requireSourceInterface: true }),
+      "must not be a symbolic link or junction",
+      "a bundle symlink or junction",
+    );
+    rmSync(symlinkPath, { recursive: true, force: true });
+
+    sourceManifest.assets = [{}];
+    writeFileSync(path.join(sourceRoot, "manifest.json"), `${JSON.stringify(sourceManifest, null, 2)}\n`);
+    requireFailure(
+      verifyBundle(sourceRoot, { requireSourceInterface: true }),
+      "selectionStatus no-default-selected requires an empty asset inventory",
+      "a no-default-selected manifest with assets",
+    );
+    sourceManifest.assets = [];
+    sourceManifest.selectionStatus = "development-selected";
+    writeFileSync(path.join(sourceRoot, "manifest.json"), `${JSON.stringify(sourceManifest, null, 2)}\n`);
+    requireFailure(
+      verifyBundle(sourceRoot, { requireSourceInterface: true }),
+      "source-interface selectionStatus must be no-default-selected",
+      "a source-interface package with a selected default",
+    );
+    sourceManifest.selectionStatus = "no-default-selected";
+    writeFileSync(path.join(sourceRoot, "manifest.json"), `${JSON.stringify(sourceManifest, null, 2)}\n`);
+
+    const releaseRoot = path.join(root, "release");
+    const manifest = makeFixture(releaseRoot);
+    const ready = verifyBundle(releaseRoot, { requireReady: true });
     if (!ready.ok) throw new Error(`valid fixture failed: ${ready.failures.join(", ")}`);
 
     for (const id of ["language-library-core", "language-library-cpu"]) {
       const relativePath = `assets/${id}.dll`;
       const content = Buffer.from(`fixture:${id}`);
-      writeFileSync(path.join(root, relativePath), content);
+      writeFileSync(path.join(releaseRoot, relativePath), content);
       manifest.assets.push({
         id,
         capability: "language",
@@ -794,11 +1082,33 @@ function runSelfTest() {
         arch: process.arch,
       });
     }
-    writeFileSync(path.join(root, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
-    const withLibraries = verifyBundle(root, { requireReady: true });
+    writeFileSync(path.join(releaseRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    const withLibraries = verifyBundle(releaseRoot, { requireReady: true });
     if (!withLibraries.ok) {
       throw new Error(`multiple verified runtime libraries failed: ${withLibraries.failures.join(", ")}`);
     }
+
+    const duplicateAsset = {
+      ...manifest.assets[0],
+      id: "speech-duplicate",
+      modelId: "speech-duplicate",
+    };
+    manifest.assets.push(duplicateAsset);
+    writeFileSync(path.join(releaseRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    requireFailure(
+      verifyBundle(releaseRoot),
+      "manifest path assets/speech.bin is claimed by both",
+      "an exact asset path collision",
+    );
+    duplicateAsset.relativePath = "assets/SPEECH.bin";
+    writeFileSync(path.join(releaseRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    requireFailure(
+      verifyBundle(releaseRoot),
+      "manifest has a case-insensitive path collision",
+      "a case-insensitive asset path collision",
+    );
+    manifest.assets.pop();
+    writeFileSync(path.join(releaseRoot, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 
     const fixtureModelLock = {
       speech: {
@@ -888,8 +1198,8 @@ function runSelfTest() {
     }
 
     manifest.assets[0].sha256 = "0".repeat(64);
-    writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest));
-    const zeroDigest = verifyBundle(root);
+    writeFileSync(path.join(releaseRoot, "manifest.json"), JSON.stringify(manifest));
+    const zeroDigest = verifyBundle(releaseRoot);
     if (zeroDigest.ok) throw new Error("zero digest was accepted");
     if (zeroDigest.verifiedAssets.some((asset) => asset.id === "speech-model")) {
       throw new Error("failed asset was counted as verified");
@@ -897,23 +1207,23 @@ function runSelfTest() {
 
     manifest.assets[0].sha256 = createHash("sha256").update("fixture:speech-model").digest("hex");
     manifest.unexpected = true;
-    writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest));
-    if (verifyBundle(root).ok) throw new Error("unknown manifest field was accepted");
+    writeFileSync(path.join(releaseRoot, "manifest.json"), JSON.stringify(manifest));
+    if (verifyBundle(releaseRoot).ok) throw new Error("unknown manifest field was accepted");
     delete manifest.unexpected;
 
     manifest.assets[0].redistributionApproved = false;
-    writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest));
-    if (verifyBundle(root).ok) throw new Error("unapproved asset was accepted");
+    writeFileSync(path.join(releaseRoot, "manifest.json"), JSON.stringify(manifest));
+    if (verifyBundle(releaseRoot).ok) throw new Error("unapproved asset was accepted");
     manifest.assets[0].redistributionApproved = true;
 
     manifest.assets[0].relativePath = "../escape.bin";
-    writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest));
-    if (verifyBundle(root).ok) throw new Error("path traversal was accepted");
+    writeFileSync(path.join(releaseRoot, "manifest.json"), JSON.stringify(manifest));
+    if (verifyBundle(releaseRoot).ok) throw new Error("path traversal was accepted");
 
     manifest.assets[0].relativePath = "assets/speech.bin";
     manifest.fixture = true;
-    writeFileSync(path.join(root, "manifest.json"), JSON.stringify(manifest));
-    if (verifyBundle(root, { requireReady: true }).ok) throw new Error("release-ready fixture was accepted");
+    writeFileSync(path.join(releaseRoot, "manifest.json"), JSON.stringify(manifest));
+    if (verifyBundle(releaseRoot, { requireReady: true }).ok) throw new Error("release-ready fixture was accepted");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -923,11 +1233,18 @@ function runSelfTest() {
 if (selfTest) {
   runSelfTest();
 } else {
+  if (strict && requireSourceInterface) {
+    throw new Error("--require-ready and --require-source-interface are mutually exclusive");
+  }
+  if (requireSourceInterface && expectedProfile !== null) {
+    throw new Error("--profile cannot be used with --require-source-interface");
+  }
   if (expectedProfile !== null && !new Set(["complete", "complete-max"]).has(expectedProfile)) {
     throw new Error("--profile must be complete or complete-max");
   }
   const result = verifyBundle(bundleRoot, {
     requireReady: strict,
+    requireSourceInterface,
     requiredProfile: expectedProfile,
   });
   result.failures.push(...verifyDecisionLocks(result.manifest, strict));

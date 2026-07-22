@@ -1,7 +1,8 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -250,6 +251,8 @@ try {
   await call("core.shutdown");
   console.log("M1 SQLCipher vault smoke passed.");
 } finally {
-  if (!child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  lines.close();
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
 }

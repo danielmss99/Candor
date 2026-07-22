@@ -1,7 +1,9 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -17,9 +19,14 @@ if (!existsSync(corePath)) {
   throw new Error(`candor-core debug binary not found: ${corePath}`);
 }
 
+const smokeDataDir = mkdtempSync(path.join(tmpdir(), "candor-m0-core-smoke-"));
 const child = spawn(corePath, [], {
   stdio: ["pipe", "pipe", "pipe"],
   windowsHide: true,
+  env: {
+    ...process.env,
+    CANDOR_V3_DATA_DIR: smokeDataDir,
+  },
 });
 
 const lines = createInterface({ input: child.stdout });
@@ -57,7 +64,7 @@ lines.on("line", (line) => {
   unmatchedResponses.push(response);
 });
 
-function call(method, params = null) {
+function call(method, params = null, timeoutMs = 5000) {
   const request = createVersionedCoreRequest(method, params);
   const id = request.requestId;
   const payload = JSON.stringify(request);
@@ -65,7 +72,7 @@ function call(method, params = null) {
     const timeout = setTimeout(() => {
       pending.delete(id);
       reject(new Error(`timeout waiting for ${method}`));
-    }, 5000);
+    }, timeoutMs);
     pending.set(id, {
       resolve: (value) => {
         clearTimeout(timeout);
@@ -107,7 +114,10 @@ async function sendRawExpectError(rawLine, expectedCode) {
 }
 
 try {
-  const version = await call("core.version");
+  // A freshly linked Windows binary can be delayed by first-run malware
+  // scanning. Keep the startup allowance bounded without weakening subsequent
+  // per-request timeouts.
+  const version = await call("core.version", null, 15000);
   const status = await call("core.status");
   const capabilities = await call("core.capabilities");
   const audit = await call("privacy.auditSnapshot");
@@ -164,5 +174,8 @@ try {
   await call("core.shutdown");
   console.log("M0 candor-core smoke passed.");
 } finally {
-  if (!child.killed) child.kill();
+  lines.close();
+  if (!child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  await stopChildProcess(child);
+  removeTemporaryDirectory(smokeDataDir);
 }

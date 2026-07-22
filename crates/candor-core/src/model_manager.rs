@@ -1,8 +1,10 @@
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -11,9 +13,14 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
 use crate::bundled_ai_assets::{BundledAiAssets, VerifiedBundledAsset};
+use crate::parakeet_package::{
+    self, VerifiedParakeetPackage, PARAKEET_ARCHIVE_BYTES, PARAKEET_ARCHIVE_SHA256,
+    PARAKEET_MODEL_ID, PARAKEET_PACKAGE_DIRECTORY,
+};
 use crate::recording_store::RecordingStore;
 
 const DEFAULT_MODEL_ID: &str = "base.en";
+const GIB: u64 = 1024 * 1024 * 1024;
 const SYNTHETIC_PROOF_BYTES: &[u8] = b"candor synthetic model proof, not a real whisper model\n";
 const MAX_MODEL_IMPORT_CHUNK_BYTES: usize = 512 * 1024;
 static NEXT_MODEL_IMPORT_ID_SUFFIX: AtomicU64 = AtomicU64::new(1);
@@ -62,72 +69,102 @@ const HASH_LARGE_V3: &str = match option_env!("CANDOR_SHA256_LARGE_V3") {
     None => "64D182B440B98D5203C4F9BD541544D84C605196C4F7B845DFA11FB23594D1E2",
 };
 
-const MODEL_SPECS: [ModelSpec; 11] = [
+const MODEL_SPECS: [ModelSpec; 12] = [
     ModelSpec {
         id: "tiny.en",
         expected_sha256: HASH_TINY_EN,
         language: "english",
         role: "fast-captions",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "tiny",
         expected_sha256: HASH_TINY,
         language: "multilingual",
         role: "fast-captions",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "base.en",
         expected_sha256: HASH_BASE_EN,
         language: "english",
         role: "default-transcription",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "small.en",
         expected_sha256: HASH_SMALL_EN,
         language: "english",
         role: "higher-quality-transcription",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "small.en-tdrz",
         expected_sha256: HASH_SMALL_EN_TDRZ,
         language: "english",
         role: "deferred-diarization",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "medium.en",
         expected_sha256: HASH_MEDIUM_EN,
         language: "english",
         role: "higher-quality-transcription",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "base",
         expected_sha256: HASH_BASE,
         language: "multilingual",
         role: "default-transcription",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "small",
         expected_sha256: HASH_SMALL,
         language: "multilingual",
         role: "higher-quality-transcription",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "medium",
         expected_sha256: HASH_MEDIUM,
         language: "multilingual",
         role: "higher-quality-transcription",
+        minimum_memory_bytes: None,
+        local_benchmark_required: false,
     },
     ModelSpec {
         id: "large-v3-turbo",
         expected_sha256: HASH_LARGE_V3_TURBO,
         language: "multilingual",
         role: "large-local-transcription",
+        minimum_memory_bytes: Some(8 * GIB),
+        local_benchmark_required: true,
     },
     ModelSpec {
         id: "large-v3",
         expected_sha256: HASH_LARGE_V3,
         language: "multilingual",
         role: "large-local-transcription",
+        minimum_memory_bytes: Some(16 * GIB),
+        local_benchmark_required: true,
+    },
+    ModelSpec {
+        id: PARAKEET_MODEL_ID,
+        expected_sha256: PARAKEET_ARCHIVE_SHA256,
+        language: "25-european-languages",
+        role: "default-final-transcription",
+        minimum_memory_bytes: Some(8 * GIB),
+        local_benchmark_required: false,
     },
 ];
 
@@ -137,6 +174,8 @@ pub(crate) struct ModelSpec {
     pub(crate) expected_sha256: &'static str,
     pub(crate) language: &'static str,
     pub(crate) role: &'static str,
+    pub(crate) minimum_memory_bytes: Option<u64>,
+    pub(crate) local_benchmark_required: bool,
 }
 
 #[derive(Debug)]
@@ -198,7 +237,7 @@ pub struct ModelImportAbortParams {
     pub import_id: String,
 }
 
-#[cfg(feature = "local-whisper")]
+#[cfg(any(feature = "local-whisper", feature = "local-parakeet"))]
 #[derive(Debug)]
 pub(crate) struct VerifiedModel {
     pub(crate) model_id: String,
@@ -236,11 +275,38 @@ struct ModelImportManifest {
 #[derive(Clone, Default)]
 pub struct ModelManager {
     bundled_assets: BundledAiAssets,
+    loaded_contexts: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+#[cfg(any(feature = "local-whisper", feature = "local-parakeet", test))]
+pub(crate) struct ModelRuntimeLoadGuard {
+    loaded_contexts: Arc<Mutex<HashMap<String, usize>>>,
+    model_id: String,
+}
+
+#[cfg(any(feature = "local-whisper", feature = "local-parakeet", test))]
+impl Drop for ModelRuntimeLoadGuard {
+    fn drop(&mut self) {
+        let Ok(mut loaded) = self.loaded_contexts.lock() else {
+            return;
+        };
+        let Some(count) = loaded.get_mut(&self.model_id) else {
+            return;
+        };
+        if *count <= 1 {
+            loaded.remove(&self.model_id);
+        } else {
+            *count -= 1;
+        }
+    }
 }
 
 impl ModelManager {
     pub fn with_bundled_assets(bundled_assets: BundledAiAssets) -> Self {
-        Self { bundled_assets }
+        Self {
+            bundled_assets,
+            loaded_contexts: Arc::default(),
+        }
     }
 
     pub fn status(&self, store: &RecordingStore) -> Value {
@@ -286,7 +352,8 @@ impl ModelManager {
             "bundledDefaultsSupported": true,
             "bundledAssets": bundled_assets,
             "backgroundDownloads": false,
-            "downloadPolicy": "network-download-not-implemented-in-m2",
+            "explicitCatalogDownloadsAvailable": true,
+            "downloadPolicy": "electron-trusted-catalog-explicit-downloads",
             "defaultModelId": selected_default_model,
             "supportedModelCount": MODEL_SPECS.len(),
             "installedModelCount": installed_model_count,
@@ -298,7 +365,7 @@ impl ModelManager {
     }
 
     pub fn bundled_assets_status(&self) -> Value {
-        let mut status = self.bundled_assets.status();
+        let mut status = self.bundled_assets.status_nonblocking();
         let Some(failure_code) = self.bundled_speech_trust_failure(&status) else {
             return status;
         };
@@ -358,8 +425,16 @@ impl ModelManager {
         }
     }
 
-    pub fn list_local(&self, store: &RecordingStore) -> Value {
-        let models = self.model_states(store, false);
+    pub fn list_local(
+        &self,
+        store: &RecordingStore,
+        measured_latencies_ms: &BTreeMap<String, u64>,
+    ) -> Value {
+        let models = self
+            .model_states(store, false)
+            .into_iter()
+            .map(|model| self.with_transparency(model, measured_latencies_ms))
+            .collect::<Vec<_>>();
         let installed_models = models
             .iter()
             .filter(|model| {
@@ -381,6 +456,119 @@ impl ModelManager {
             "rawPathExposed": false,
             "keyMaterialExposedToRenderer": false
         })
+    }
+
+    #[cfg(any(feature = "local-whisper", feature = "local-parakeet", test))]
+    pub(crate) fn mark_runtime_loaded(&self, model_id: &str) -> ModelRuntimeLoadGuard {
+        if let Ok(mut loaded) = self.loaded_contexts.lock() {
+            let count = loaded.entry(model_id.to_string()).or_insert(0);
+            *count = count.saturating_add(1);
+        }
+        ModelRuntimeLoadGuard {
+            loaded_contexts: Arc::clone(&self.loaded_contexts),
+            model_id: model_id.to_string(),
+        }
+    }
+
+    fn runtime_warm_state(&self, model_id: &str) -> Option<bool> {
+        self.loaded_contexts
+            .lock()
+            .ok()
+            .map(|loaded| loaded.get(model_id).copied().unwrap_or_default() > 0)
+    }
+
+    fn with_transparency(
+        &self,
+        mut model: Value,
+        measured_latencies_ms: &BTreeMap<String, u64>,
+    ) -> Value {
+        let Some(model_id) = model
+            .get("modelId")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+        else {
+            return model;
+        };
+        let Ok(spec) = model_spec(&model_id) else {
+            return model;
+        };
+        let warm = self.runtime_warm_state(&model_id);
+        let measured_latency_ms = measured_latencies_ms.get(&model_id).copied();
+        let is_parakeet = model_id == PARAKEET_MODEL_ID;
+        let hardware_requirement = match spec.minimum_memory_bytes {
+            Some(bytes) if spec.local_benchmark_required => format!(
+                "At least {} GB system memory and a passing local performance check",
+                bytes / GIB
+            ),
+            Some(bytes) => format!("At least {} GB system memory", bytes / GIB),
+            None => "Local CPU; Candor does not enforce a minimum memory threshold".to_string(),
+        };
+        if let Some(object) = model.as_object_mut() {
+            object.insert(
+                "hardwareRequirement".to_string(),
+                Value::String(hardware_requirement),
+            );
+            object.insert(
+                "hardwareRequirements".to_string(),
+                json!({
+                    "policy": if is_parakeet {
+                        "candor-local-parakeet-v1"
+                    } else {
+                        "candor-local-whisper-v1"
+                    },
+                    "minimumMemoryBytes": spec.minimum_memory_bytes,
+                    "minimumLogicalCpuCount": 1,
+                    "localCpuRequired": true,
+                    "acceleratorRequired": false,
+                    "passingLocalBenchmarkRequired": spec.local_benchmark_required
+                }),
+            );
+            object.insert("warm".to_string(), warm.map_or(Value::Null, Value::Bool));
+            object.insert(
+                "warmState".to_string(),
+                Value::String(
+                    match warm {
+                        Some(true) => "loaded",
+                        Some(false) => "cold",
+                        None => "unavailable",
+                    }
+                    .to_string(),
+                ),
+            );
+            object.insert(
+                "warmStateBasis".to_string(),
+                Value::String(
+                    if is_parakeet {
+                        "in-process-sherpa-onnx-recognizer"
+                    } else {
+                        "in-process-whisper-context"
+                    }
+                    .to_string(),
+                ),
+            );
+            object.insert(
+                "measuredLatencyMs".to_string(),
+                measured_latency_ms.map_or(Value::Null, Value::from),
+            );
+            object.insert(
+                "latencyMeasurementState".to_string(),
+                Value::String(
+                    if measured_latency_ms.is_some() {
+                        "measured"
+                    } else {
+                        "unmeasured"
+                    }
+                    .to_string(),
+                ),
+            );
+            object.insert(
+                "latencyMeasurementBasis".to_string(),
+                measured_latency_ms.map_or(Value::Null, |_| {
+                    Value::String("30-second-local-inference-benchmark".to_string())
+                }),
+            );
+        }
+        model
     }
 
     pub fn verify_local(
@@ -545,6 +733,15 @@ impl ModelManager {
         store: &RecordingStore,
         params: ModelImportFinishParams,
     ) -> Result<Value, ModelManagerError> {
+        self.import_finish_with_cancellation(store, params, None)
+    }
+
+    pub fn import_finish_with_cancellation(
+        &self,
+        store: &RecordingStore,
+        params: ModelImportFinishParams,
+        cancellation: Option<Arc<AtomicBool>>,
+    ) -> Result<Value, ModelManagerError> {
         validate_import_id(&params.import_id)?;
         let root = store.models_root_for_core();
         let manifest = read_import_manifest(&root, &params.import_id)?;
@@ -565,6 +762,15 @@ impl ModelManager {
 
         let spec = model_spec(&manifest.model_id)?;
         let part_path = import_part_path(&root, &manifest.import_id)?;
+        if spec.id == PARAKEET_MODEL_ID {
+            return self.finish_parakeet_import(
+                store,
+                &root,
+                manifest,
+                part_path,
+                cancellation.as_ref(),
+            );
+        }
         let verification = verify_model_path_value(&part_path, spec);
         let verified = verification
             .get("verified")
@@ -614,6 +820,98 @@ impl ModelManager {
             "imported": true,
             "rejected": false,
             "verification": installed,
+            "localOnly": true,
+            "cloudAi": false,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    fn finish_parakeet_import(
+        &self,
+        store: &RecordingStore,
+        root: &Path,
+        manifest: ModelImportManifest,
+        part_path: PathBuf,
+        cancellation: Option<&Arc<AtomicBool>>,
+    ) -> Result<Value, ModelManagerError> {
+        let archive_digest = sha256_file(&part_path)?;
+        if manifest.bytes_written != PARAKEET_ARCHIVE_BYTES
+            || !archive_digest.eq_ignore_ascii_case(PARAKEET_ARCHIVE_SHA256)
+        {
+            cleanup_import_files(root, &manifest.import_id);
+            return Ok(json!({
+                "importId": manifest.import_id,
+                "modelId": PARAKEET_MODEL_ID,
+                "imported": false,
+                "rejected": true,
+                "verification": parakeet_model_value(parakeet_package::PackageState {
+                    installed: false,
+                    verified: false,
+                    bytes: manifest.bytes_written,
+                    modified_unix_ms: 0,
+                    archive_sha256: Some(archive_digest),
+                    failure_code: Some("MODEL_HASH_MISMATCH"),
+                    failure_message: Some("Parakeet archive failed the trusted SHA-256 check".to_string()),
+                }),
+                "localOnly": true,
+                "cloudAi": false,
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }));
+        }
+
+        let staging = parakeet_staging_path(root, &manifest.import_id)?;
+        let package = match parakeet_package::install_archive(&part_path, &staging, cancellation) {
+            Ok(package) => package,
+            Err(error) => {
+                cleanup_import_files(root, &manifest.import_id);
+                let _ = fs::remove_dir_all(&staging);
+                return Err(ModelManagerError::new(error.code, error.message));
+            }
+        };
+        let target = model_path_for_store(store, PARAKEET_MODEL_ID);
+        let backup = root.join(format!("{}.replace-backup", manifest.import_id));
+        if backup.exists() {
+            let _ = fs::remove_dir_all(&backup);
+        }
+        if target.exists() {
+            if !manifest.replace {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(ModelManagerError::new(
+                    "MODEL_ALREADY_INSTALLED",
+                    "local Parakeet package already exists; start the import with replace true",
+                ));
+            }
+            fs::rename(&target, &backup).map_err(|error| {
+                let _ = fs::remove_dir_all(&staging);
+                ModelManagerError::new("MODEL_IMPORT_REPLACE_FAILED", error.to_string())
+            })?;
+        }
+        if let Err(error) = fs::rename(&staging, &target) {
+            if backup.exists() {
+                let _ = fs::rename(&backup, &target);
+            }
+            let _ = fs::remove_dir_all(&staging);
+            return Err(ModelManagerError::new(
+                "MODEL_IMPORT_COMMIT_FAILED",
+                error.to_string(),
+            ));
+        }
+        if backup.exists() {
+            let _ = fs::remove_dir_all(&backup);
+        }
+        let _ = fs::remove_file(&part_path);
+        remove_import_manifest(root, &manifest.import_id)?;
+        let installed = parakeet_model_value(parakeet_package::quick_state(&target));
+
+        Ok(json!({
+            "importId": manifest.import_id,
+            "modelId": PARAKEET_MODEL_ID,
+            "imported": true,
+            "rejected": false,
+            "verification": installed,
+            "modelPackageDigest": package.archive_sha256,
             "localOnly": true,
             "cloudAi": false,
             "rawPathExposed": false,
@@ -705,20 +1003,25 @@ impl ModelManager {
                 {
                     return managed;
                 }
-                match self.bundled_assets.speech_model(spec.id) {
-                    Ok(Some(asset)) => bundled_model_value(spec, asset),
-                    _ => managed,
-                }
+                self.bundled_assets
+                    .cached_speech_model(spec.id)
+                    .map_or(managed, |asset| bundled_model_value(spec, asset))
             })
             .collect()
     }
 
-    #[cfg(feature = "local-whisper")]
+    #[cfg(any(feature = "local-whisper", feature = "local-parakeet"))]
     pub(crate) fn verified_model_path(
         &self,
         store: &RecordingStore,
         model_id: &str,
     ) -> Result<VerifiedModel, ModelManagerError> {
+        if model_id == PARAKEET_MODEL_ID {
+            return Err(ModelManagerError::new(
+                "MODEL_ENGINE_MISMATCH",
+                "Parakeet must be loaded through the sherpa-onnx package adapter",
+            ));
+        }
         let spec = model_spec(model_id)?;
         let path = model_path_for_store(store, spec.id);
         let verification = verify_model_path(&path, &spec)?;
@@ -761,6 +1064,73 @@ impl ModelManager {
             )),
             Err(error) => Err(ModelManagerError::new(error.code, error.message)),
         }
+    }
+
+    /// Resolves only a model whose integrity was already verified and whose
+    /// size and modification time still match the verification cache. This is
+    /// safe on the synchronous RPC path because it never hashes model bytes.
+    #[cfg(any(feature = "local-whisper", feature = "local-parakeet"))]
+    pub(crate) fn cached_verified_model_path(
+        &self,
+        store: &RecordingStore,
+        model_id: &str,
+    ) -> Result<VerifiedModel, ModelManagerError> {
+        if model_id == PARAKEET_MODEL_ID {
+            return Err(ModelManagerError::new(
+                "MODEL_ENGINE_MISMATCH",
+                "Parakeet cannot be loaded as a live Whisper model",
+            ));
+        }
+        let spec = model_spec(model_id)?;
+        let path = model_path_for_store(store, spec.id);
+        let managed = quick_model_state(&path, &spec);
+        if managed["verified"].as_bool() == Some(true) {
+            return Ok(VerifiedModel {
+                model_id: spec.id.to_string(),
+                path,
+                sha256: managed["actualSha256"]
+                    .as_str()
+                    .unwrap_or(spec.expected_sha256)
+                    .to_string(),
+                bytes: managed["bytes"].as_u64().unwrap_or_default(),
+                modified_unix_ms: managed["modifiedUnixMs"].as_u64().unwrap_or_default(),
+                source: "managed-local",
+            });
+        }
+        if managed["installed"].as_bool() == Some(true) {
+            return Err(ModelManagerError::new(
+                "MODEL_VERIFICATION_REQUIRED",
+                "verify the selected local Whisper model before starting live transcription",
+            ));
+        }
+        if let Some(asset) = self.bundled_assets.cached_speech_model(spec.id) {
+            if bundled_model_is_trusted(&spec, &asset) {
+                return Ok(VerifiedModel {
+                    model_id: spec.id.to_string(),
+                    path: asset.path,
+                    sha256: asset.sha256,
+                    bytes: asset.bytes,
+                    modified_unix_ms: 0,
+                    source: "bundled-package",
+                });
+            }
+            return Err(ModelManagerError::new(
+                "BUNDLED_AI_MODEL_TRUST_MISMATCH",
+                "packaged Whisper model does not match Candor's trusted model digest",
+            ));
+        }
+        Err(ModelManagerError::new(
+            "LIVE_TRANSCRIPT_MODEL_NOT_READY",
+            "the selected verified local Whisper model is not ready yet",
+        ))
+    }
+
+    pub(crate) fn verified_parakeet_package(
+        &self,
+        store: &RecordingStore,
+    ) -> Result<VerifiedParakeetPackage, ModelManagerError> {
+        parakeet_package::verified_package(&model_path_for_store(store, PARAKEET_MODEL_ID))
+            .map_err(|error| ModelManagerError::new(error.code, error.message))
     }
 
     pub(crate) fn resolve_model_id(
@@ -814,12 +1184,12 @@ pub(crate) fn normalize_model_id(value: Option<String>) -> Result<String, ModelM
     } else {
         Err(ModelManagerError::new(
             "MODEL_ID_INVALID",
-            "model id is not in the local Whisper allowlist",
+            "model id is not in Candor's local speech-model allowlist",
         ))
     }
 }
 
-#[cfg(feature = "local-whisper")]
+#[cfg(any(feature = "local-whisper", feature = "local-parakeet"))]
 impl VerifiedModel {
     pub(crate) fn public_value(&self) -> Value {
         json!({
@@ -866,7 +1236,11 @@ fn model_path_for_store(store: &RecordingStore, model_id: &str) -> PathBuf {
 }
 
 fn model_file_name(model_id: &str) -> String {
-    format!("ggml-{model_id}.bin")
+    if model_id == PARAKEET_MODEL_ID {
+        PARAKEET_PACKAGE_DIRECTORY.to_string()
+    } else {
+        format!("ggml-{model_id}.bin")
+    }
 }
 
 fn bundled_model_value(spec: &ModelSpec, asset: VerifiedBundledAsset) -> Value {
@@ -999,9 +1373,20 @@ fn cleanup_import_files(root: &Path, import_id: &str) {
     if let Ok(path) = import_manifest_path(root, import_id) {
         let _ = fs::remove_file(path);
     }
+    if let Ok(path) = parakeet_staging_path(root, import_id) {
+        let _ = fs::remove_dir_all(path);
+    }
+}
+
+fn parakeet_staging_path(root: &Path, import_id: &str) -> Result<PathBuf, ModelManagerError> {
+    validate_import_id(import_id)?;
+    Ok(root.join(format!("{import_id}.package-staging")))
 }
 
 fn quick_model_state(path: &Path, spec: &ModelSpec) -> Value {
+    if spec.id == PARAKEET_MODEL_ID {
+        return parakeet_model_value(parakeet_package::quick_state(path));
+    }
     let Some((bytes, modified_unix_ms)) = model_fingerprint(path) else {
         return model_value(
             spec,
@@ -1055,6 +1440,9 @@ fn quick_model_state(path: &Path, spec: &ModelSpec) -> Value {
 }
 
 fn verify_model_path_value(path: &Path, spec: ModelSpec) -> Value {
+    if spec.id == PARAKEET_MODEL_ID {
+        return parakeet_model_value(parakeet_package::verify_state(path));
+    }
     match verify_model_path(path, &spec) {
         Ok(verification) => model_value(
             &spec,
@@ -1085,6 +1473,17 @@ fn verify_model_path(
     path: &Path,
     spec: &ModelSpec,
 ) -> Result<ModelVerification, ModelManagerError> {
+    if spec.id == PARAKEET_MODEL_ID {
+        let state = parakeet_package::verify_state(path);
+        return Ok(ModelVerification {
+            verified: state.verified,
+            bytes: state.bytes,
+            modified_unix_ms: state.modified_unix_ms,
+            actual_sha256: state.archive_sha256,
+            failure_code: state.failure_code,
+            failure_message: state.failure_message,
+        });
+    }
     let Some((bytes, modified_unix_ms)) = model_fingerprint(path) else {
         return Ok(ModelVerification {
             verified: false,
@@ -1177,6 +1576,27 @@ fn model_value(
         "verificationRequired": verification_required,
         "failureCode": failure_code,
         "failureMessage": failure_message,
+        "rawPathExposed": false
+    })
+}
+
+fn parakeet_model_value(state: parakeet_package::PackageState) -> Value {
+    json!({
+        "modelId": PARAKEET_MODEL_ID,
+        "fileName": PARAKEET_PACKAGE_DIRECTORY,
+        "language": "25-european-languages",
+        "role": "default-final-transcription",
+        "engine": "sherpa-onnx",
+        "expectedSha256": PARAKEET_ARCHIVE_SHA256,
+        "installed": state.installed,
+        "verified": state.verified,
+        "bytes": state.bytes,
+        "modifiedUnixMs": state.modified_unix_ms,
+        "actualSha256": state.archive_sha256,
+        "verificationRequired": state.installed && !state.verified,
+        "failureCode": state.failure_code,
+        "failureMessage": state.failure_message,
+        "packageLayout": "nemo-transducer-v1",
         "rawPathExposed": false
     })
 }
@@ -1321,6 +1741,82 @@ mod tests {
     }
 
     #[test]
+    fn transparency_uses_core_policy_and_explicit_unmeasured_state() {
+        let manager = ModelManager::default();
+        let spec = model_spec("large-v3-turbo").expect("large turbo spec");
+        let model = model_value(
+            &spec,
+            true,
+            true,
+            1,
+            0,
+            Some(spec.expected_sha256.to_string()),
+            false,
+            None,
+            None,
+        );
+        let transparent = manager.with_transparency(model, &BTreeMap::new());
+
+        assert_eq!(
+            transparent["hardwareRequirement"],
+            "At least 8 GB system memory and a passing local performance check"
+        );
+        assert_eq!(
+            transparent["hardwareRequirements"]["minimumMemoryBytes"],
+            8 * GIB
+        );
+        assert_eq!(
+            transparent["hardwareRequirements"]["passingLocalBenchmarkRequired"],
+            true
+        );
+        assert_eq!(transparent["warm"], false);
+        assert_eq!(transparent["warmState"], "cold");
+        assert_eq!(transparent["measuredLatencyMs"], Value::Null);
+        assert_eq!(transparent["latencyMeasurementState"], "unmeasured");
+        assert_eq!(transparent["latencyMeasurementBasis"], Value::Null);
+    }
+
+    #[test]
+    fn transparency_reports_only_supplied_cached_latency_measurement() {
+        let manager = ModelManager::default();
+        let spec = model_spec("large-v3").expect("large model spec");
+        let model = model_value(
+            &spec,
+            true,
+            true,
+            1,
+            0,
+            Some(spec.expected_sha256.to_string()),
+            false,
+            None,
+            None,
+        );
+        let measurements = BTreeMap::from([("large-v3".to_string(), 12_345)]);
+        let transparent = manager.with_transparency(model, &measurements);
+
+        assert_eq!(transparent["measuredLatencyMs"], 12_345);
+        assert_eq!(transparent["latencyMeasurementState"], "measured");
+        assert_eq!(
+            transparent["latencyMeasurementBasis"],
+            "30-second-local-inference-benchmark"
+        );
+    }
+
+    #[test]
+    fn runtime_warm_signal_tracks_live_context_guards() {
+        let manager = ModelManager::default();
+        let observer = manager.clone();
+        assert_eq!(manager.runtime_warm_state("small.en"), Some(false));
+        let first = manager.mark_runtime_loaded("small.en");
+        assert_eq!(observer.runtime_warm_state("small.en"), Some(true));
+        let second = manager.mark_runtime_loaded("small.en");
+        drop(first);
+        assert_eq!(manager.runtime_warm_state("small.en"), Some(true));
+        drop(second);
+        assert_eq!(manager.runtime_warm_state("small.en"), Some(false));
+    }
+
+    #[test]
     fn bundled_readiness_rejects_a_self_consistent_but_untrusted_manifest_digest() {
         let root = bundled_test_root("untrusted-bundle");
         fs::create_dir_all(root.join("assets")).expect("create assets");
@@ -1364,7 +1860,17 @@ mod tests {
         .expect("write manifest");
 
         let manager = ModelManager::with_bundled_assets(BundledAiAssets::with_root(root.clone()));
-        let status = manager.bundled_assets_status();
+        let status = (0..200)
+            .find_map(|_| {
+                let status = manager.bundled_assets_status();
+                if status["state"] == "checking" {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    None
+                } else {
+                    Some(status)
+                }
+            })
+            .expect("background bundled status completes");
         assert_eq!(status["speech"]["state"], "corrupt");
         assert_eq!(status["speech"]["ready"], false);
         assert_eq!(

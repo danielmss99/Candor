@@ -1,5 +1,6 @@
 import { CoreClientError } from "./core-errors.js";
 import type { JsonValue } from "./json.js";
+import { hasRendererCustodyViolation } from "../preload-response-contract.cjs";
 
 export interface RuntimeSchema<T> {
   readonly name: string;
@@ -27,6 +28,21 @@ function isJsonValue(value: unknown, depth = 0): value is JsonValue {
   if (Array.isArray(value)) return value.every((item) => isJsonValue(item, depth + 1));
   if (typeof value !== "object") return false;
   return Object.values(value).every((item) => isJsonValue(item, depth + 1));
+}
+
+function hasRendererCustodySentinelViolation(value: JsonValue, depth = 0): boolean {
+  if (depth > 64 || value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => hasRendererCustodySentinelViolation(item, depth + 1));
+  }
+  if (
+    (Object.hasOwn(value, "rawPathExposed") && value.rawPathExposed !== false)
+    || (
+      Object.hasOwn(value, "keyMaterialExposedToRenderer")
+      && value.keyMaterialExposedToRenderer !== false
+    )
+  ) return true;
+  return Object.values(value).some((item) => hasRendererCustodySentinelViolation(item, depth + 1));
 }
 
 function fieldMatches(value: JsonValue, rule: FieldRule): boolean {
@@ -69,12 +85,23 @@ export function createRuntimeSchema<T>(name: string, parser: (value: unknown) =>
 export function jsonObjectResultSchema(
   method: string,
   required: Readonly<Record<string, FieldRule>>,
+  enforceSensitiveFields = false,
 ): JsonRuntimeSchema {
   return createRuntimeSchema(`${method}.result`, (value) => {
     if (!isJsonValue(value) || value === null || typeof value !== "object" || Array.isArray(value)) {
       throw new CoreClientError(
         "CORE_RESULT_SCHEMA_INVALID",
         `candor-core returned an invalid result for ${method}`,
+        false,
+      );
+    }
+    if (
+      hasRendererCustodySentinelViolation(value)
+      || (enforceSensitiveFields && hasRendererCustodyViolation(value))
+    ) {
+      throw new CoreClientError(
+        "CORE_RESULT_SCHEMA_INVALID",
+        `candor-core returned an invalid renderer custody sentinel for ${method}`,
         false,
       );
     }

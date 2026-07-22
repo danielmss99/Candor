@@ -29,6 +29,7 @@ describe("capture close guard", () => {
   it("closes an idle app only after core shutdown", async () => {
     const window = new FakeWindow();
     const shutdownCore = vi.fn(async () => undefined);
+    const onCloseAborted = vi.fn();
     const guard = installCaptureCloseGuard(window as unknown as BrowserWindow, {
       phase: () => "idle",
       confirmStopAndQuit: vi.fn(async () => false),
@@ -39,6 +40,7 @@ describe("capture close guard", () => {
       cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore,
       reportFailure: vi.fn(async () => undefined),
+      onCloseAborted,
     });
 
     guard.requestClose();
@@ -47,12 +49,14 @@ describe("capture close guard", () => {
     expect(shutdownCore).toHaveBeenCalledOnce();
     expect(guard.approved()).toBe(true);
     expect(window.isDestroyed()).toBe(true);
+    expect(onCloseAborted).not.toHaveBeenCalled();
   });
 
   it("keeps recording when the user cancels close", async () => {
     const window = new FakeWindow();
     const finalizeCapture = vi.fn(async () => undefined);
     const shutdownCore = vi.fn(async () => undefined);
+    const onCloseAborted = vi.fn();
     const guard = installCaptureCloseGuard(window as unknown as BrowserWindow, {
       phase: () => "recording",
       confirmStopAndQuit: vi.fn(async () => false),
@@ -63,6 +67,7 @@ describe("capture close guard", () => {
       cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore,
       reportFailure: vi.fn(async () => undefined),
+      onCloseAborted,
     });
 
     guard.requestClose();
@@ -72,6 +77,7 @@ describe("capture close guard", () => {
     expect(shutdownCore).not.toHaveBeenCalled();
     expect(guard.approved()).toBe(false);
     expect(window.isDestroyed()).toBe(false);
+    expect(onCloseAborted).toHaveBeenCalledOnce();
   });
 
   it("finalizes capture before closing and stays open on failure", async () => {
@@ -96,6 +102,7 @@ describe("capture close guard", () => {
 
     const failedWindow = new FakeWindow();
     const reportFailure = vi.fn(async () => undefined);
+    const onCloseAborted = vi.fn();
     const failedGuard = installCaptureCloseGuard(failedWindow as unknown as BrowserWindow, {
       phase: () => "finalizing",
       confirmStopAndQuit: vi.fn(async () => true),
@@ -106,6 +113,7 @@ describe("capture close guard", () => {
       cancelBackgroundJobs: vi.fn(async () => undefined),
       shutdownCore: vi.fn(async () => undefined),
       reportFailure,
+      onCloseAborted,
     });
 
     failedGuard.requestClose();
@@ -113,6 +121,7 @@ describe("capture close guard", () => {
     expect(reportFailure).toHaveBeenCalledOnce();
     expect(failedGuard.approved()).toBe(false);
     expect(failedWindow.isDestroyed()).toBe(false);
+    expect(onCloseAborted).toHaveBeenCalledOnce();
   });
 
   it("requires an explicit choice when background jobs are active", async () => {

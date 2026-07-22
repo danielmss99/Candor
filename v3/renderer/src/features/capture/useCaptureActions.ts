@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { asBool, asObject, asString, type JsonObject, type RecordingSummary } from "../../core/contracts";
+import { asArray, asBool, asNumber, asObject, asString, type JsonObject, type RecordingSummary } from "../../core/contracts";
 import type { useCaptureSession } from "./useCaptureSession";
 import type { RunOperation } from "../jobs/useOperationRunner";
 
@@ -13,6 +13,8 @@ interface UseCaptureActionsOptions {
   consentStatus: JsonObject;
   activeCapture: boolean;
   combinedCaptureAvailable: boolean;
+  liveTranscriptRuntimeAvailable: boolean;
+  verifiedLiveModelIds: string[];
   recordingTitle: string;
   run: RunOperation;
   refreshCapture: () => Promise<void>;
@@ -28,10 +30,79 @@ interface UseCaptureActionsOptions {
 
 export type PreferredCaptureAction = "stop" | "combined" | "microphone";
 
+export interface ActiveMeetingProfile {
+  id: string;
+  version: number;
+  captureSource: "microphone" | "system-audio" | "combined";
+  localModelTier: "fast" | "balanced" | "maximum";
+  language: string;
+  dictionaryIds: string[];
+  liveTranscription: boolean;
+}
+
+export function liveModelIdForProfile(profile: ActiveMeetingProfile): string {
+  if (profile.localModelTier === "maximum") return "large-v3";
+  if (profile.localModelTier === "balanced") return "large-v3-turbo";
+  return /^en(?:-|$)/i.test(profile.language) ? "small.en" : "small";
+}
+
+export function profilePostStartActions(
+  profile: ActiveMeetingProfile,
+  runtimeAvailable: boolean,
+  verifiedModelIds: readonly string[],
+): Array<"live-transcription"> {
+  if (!runtimeAvailable || !verifiedModelIds.includes(liveModelIdForProfile(profile))) return [];
+  return profile.liveTranscription ? ["live-transcription"] : [];
+}
+
+export function profileCaptureBinding(profile: ActiveMeetingProfile | null | undefined) {
+  return profile ? { profileId: profile.id, profileVersion: profile.version } : {};
+}
+
+export function activeMeetingProfile(value: unknown): ActiveMeetingProfile | null {
+  const root = asObject(value);
+  const activeProfileId = asString(root.activeProfileId);
+  const profile = asArray(root.profiles)
+    .map(asObject)
+    .find((item) => asString(item.id) === activeProfileId);
+  if (!profile) return null;
+  const captureSource = asString(profile.captureSource);
+  const localModelTier = asString(profile.localModelTier);
+  const profileId = asString(profile.id);
+  const version = asNumber(profile.version);
+  if (
+    !profileId
+    || !Number.isSafeInteger(version)
+    || version < 1
+    || !["microphone", "system-audio", "combined"].includes(captureSource)
+    || !["fast", "balanced", "maximum"].includes(localModelTier)
+  ) return null;
+  return {
+    id: profileId,
+    version,
+    captureSource: captureSource as ActiveMeetingProfile["captureSource"],
+    localModelTier: localModelTier as ActiveMeetingProfile["localModelTier"],
+    language: asString(profile.language, "auto"),
+    dictionaryIds: asArray(profile.dictionaryIds).map((item) => asString(item)).filter(Boolean),
+    liveTranscription: asBool(profile.liveTranscription),
+  };
+}
+
 export function preferredCaptureAction(active: boolean, combinedAvailable: boolean, combinedConsent: boolean): PreferredCaptureAction {
   if (active) return "stop";
   if (combinedAvailable && combinedConsent) return "combined";
   return "microphone";
+}
+
+export function preferredCaptureActionForProfile(
+  profile: ActiveMeetingProfile | null,
+  combinedAvailable: boolean,
+  combinedConsent: boolean,
+): "system" | "combined" | "microphone" {
+  if (profile?.captureSource === "system-audio") return "system";
+  if (profile?.captureSource === "combined") return "combined";
+  if (profile?.captureSource === "microphone") return "microphone";
+  return combinedAvailable && combinedConsent ? "combined" : "microphone";
 }
 
 export function shouldDisableRecordControl(busy: string, activeCapture: boolean, recordingBlocked: boolean): boolean {
@@ -55,6 +126,8 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     consentStatus,
     activeCapture,
     combinedCaptureAvailable,
+    liveTranscriptRuntimeAvailable,
+    verifiedLiveModelIds,
     recordingTitle,
     run,
     refreshCapture,
@@ -80,7 +153,40 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
     await Promise.allSettled(refreshes);
   }, [refreshCapture, refreshLibrary]);
 
-  const startMicrophone = useCallback(async () => {
+  const loadActiveProfile = useCallback(async (): Promise<ActiveMeetingProfile | null> => {
+    if (!api) return null;
+    try {
+      return activeMeetingProfile(await api.profiles.list());
+    } catch {
+      return null;
+    }
+  }, [api]);
+
+  const applyProfileToRecording = useCallback(async (
+    recordingId: string,
+    suppliedProfile?: ActiveMeetingProfile | null,
+  ) => {
+    if (!api) return;
+    const profile = suppliedProfile ?? await loadActiveProfile();
+    if (!profile) return;
+    const profileResult = await Promise.allSettled(
+      profilePostStartActions(
+        profile,
+        liveTranscriptRuntimeAvailable,
+        verifiedLiveModelIds,
+      ).map(() =>
+        (async () => {
+          await api.liveTranscript.enable(recordingId);
+          await api.liveTranscript.start(recordingId);
+        })()
+      ),
+    );
+    if (profileResult.some((result) => result.status === "rejected")) {
+      onError("Recording started, but part of the active meeting profile could not be applied.");
+    }
+  }, [api, liveTranscriptRuntimeAvailable, loadActiveProfile, onError, verifiedLiveModelIds]);
+
+  const startMicrophone = useCallback(async (profile?: ActiveMeetingProfile | null) => {
     if (!api) return;
     captureSession.requestPermission();
     if (!asBool(consentStatus.readyForMicRecording)) {
@@ -91,19 +197,26 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
       return;
     }
     captureSession.permissionGranted();
+    const captureProfile = profile ?? await loadActiveProfile();
     let started = false;
     await run("record", async () => {
-      const result = await api.capture.start({ source: "microphone", label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
+      const result = await api.capture.start({
+        source: "microphone",
+        label: recordingTitle.trim() || "Untitled local meeting",
+        chunkMs: 500,
+        ...profileCaptureBinding(captureProfile),
+      });
       const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
+      await applyProfileToRecording(recordingId, captureProfile);
       onNotice(`Recording ${recordingId}`);
       onShowLive();
     }, "capture");
     await refreshAfterCaptureAction(started);
-  }, [api, captureSession, consentStatus.readyForMicRecording, failForConsent, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
+  }, [api, applyProfileToRecording, captureSession, consentStatus.readyForMicRecording, failForConsent, loadActiveProfile, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
 
-  const startSystem = useCallback(async () => {
+  const startSystem = useCallback(async (profile?: ActiveMeetingProfile | null) => {
     if (!api) return;
     captureSession.requestPermission();
     if (!asBool(asObject(asObject(captureStatus.sources).system).implemented)) {
@@ -119,19 +232,26 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
       return;
     }
     captureSession.permissionGranted();
+    const captureProfile = profile ?? await loadActiveProfile();
     let started = false;
     await run("record", async () => {
-      const result = await api.capture.start({ source: "system-audio", label: recordingTitle.trim() || "Untitled local system audio", chunkMs: 500 });
+      const result = await api.capture.start({
+        source: "system-audio",
+        label: recordingTitle.trim() || "Untitled local system audio",
+        chunkMs: 500,
+        ...profileCaptureBinding(captureProfile),
+      });
       const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
+      await applyProfileToRecording(recordingId, captureProfile);
       onNotice("System audio recording started locally");
       onShowLive();
     }, "capture");
     await refreshAfterCaptureAction(started);
-  }, [api, captureSession, captureStatus.sources, consentStatus.readyForSystemAudioRecording, failForConsent, onError, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
+  }, [api, applyProfileToRecording, captureSession, captureStatus.sources, consentStatus.readyForSystemAudioRecording, failForConsent, loadActiveProfile, onError, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
 
-  const startCombined = useCallback(async () => {
+  const startCombined = useCallback(async (profile?: ActiveMeetingProfile | null) => {
     if (!api) return;
     captureSession.requestPermission();
     if (!combinedCaptureAvailable) {
@@ -147,17 +267,24 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
       return;
     }
     captureSession.permissionGranted();
+    const captureProfile = profile ?? await loadActiveProfile();
     let started = false;
     await run("record", async () => {
-      const result = await api.capture.start({ source: "microphone-and-system-audio", label: recordingTitle.trim() || "Untitled local meeting", chunkMs: 500 });
+      const result = await api.capture.start({
+        source: "microphone-and-system-audio",
+        label: recordingTitle.trim() || "Untitled local meeting",
+        chunkMs: 500,
+        ...profileCaptureBinding(captureProfile),
+      });
       const recordingId = requireStartedRecordingId(result);
       started = true;
       captureSession.started(recordingId);
+      await applyProfileToRecording(recordingId, captureProfile);
       onNotice("Microphone and system audio recording started locally");
       onShowLive();
     }, "capture");
     await refreshAfterCaptureAction(started);
-  }, [api, captureSession, combinedCaptureAvailable, consentStatus.readyForMicAndSystemAudioRecording, failForConsent, onError, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
+  }, [api, applyProfileToRecording, captureSession, combinedCaptureAvailable, consentStatus.readyForMicAndSystemAudioRecording, failForConsent, loadActiveProfile, onError, onNotice, onShowLive, recordingTitle, refreshAfterCaptureAction, run]);
 
   const stop = useCallback(async () => {
     if (!api) return;
@@ -184,15 +311,20 @@ export function useCaptureActions(options: UseCaptureActionsOptions) {
   }, [api, captureSession, loadRecording, onError, onNotice, onPinRecording, onSelectRecording, refreshAfterCaptureAction, run]);
 
   const startPreferred = useCallback(async () => {
-    const action = preferredCaptureAction(
-      activeCapture,
+    if (activeCapture) {
+      await stop();
+      return;
+    }
+    const profile = await loadActiveProfile();
+    const action = preferredCaptureActionForProfile(
+      profile,
       combinedCaptureAvailable,
       asBool(consentStatus.readyForMicAndSystemAudioRecording),
     );
-    if (action === "stop") await stop();
-    else if (action === "combined") await startCombined();
-    else await startMicrophone();
-  }, [activeCapture, combinedCaptureAvailable, consentStatus.readyForMicAndSystemAudioRecording, startCombined, startMicrophone, stop]);
+    if (action === "system") await startSystem(profile);
+    else if (action === "combined") await startCombined(profile);
+    else await startMicrophone(profile);
+  }, [activeCapture, combinedCaptureAvailable, consentStatus.readyForMicAndSystemAudioRecording, loadActiveProfile, startCombined, startMicrophone, startSystem, stop]);
 
   return { startMicrophone, startSystem, startCombined, startPreferred, stop };
 }

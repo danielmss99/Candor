@@ -1,4 +1,20 @@
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+type CaptureStartCommon = {
+  label?: string;
+  chunkMs?: number;
+  profileId?: string;
+  profileVersion?: number;
+};
+type CaptureStartInput = CaptureStartCommon & (
+  | { source: "microphone" }
+  | { source: "system-audio"; deviceId?: string }
+  | { source: "microphone-and-system-audio"; systemDeviceId?: string }
+);
+
+interface RendererCustody {
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
 
 interface JobAccepted {
   jobId: string;
@@ -6,6 +22,7 @@ interface JobAccepted {
   state: "queued";
   createdAt: string;
   rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
 }
 
 interface CancelAllJobsResult {
@@ -13,10 +30,12 @@ interface CancelAllJobsResult {
   requestedCount: number;
   skippedCount: number;
   rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
 }
 
 type BackgroundTaskKind =
   | "transcription"
+  | "transcript-cleanup"
   | "recap"
   | "ask"
   | "export"
@@ -33,6 +52,7 @@ type AiExecutionMode = "local-llm" | "heuristic-fallback";
 type AiFallbackPolicy = "allow-disclosed" | "require-local-llm";
 type AiFallbackPreference = "ask-first" | "automatic" | "never";
 type AiJobIntent = "default" | "strict-retry" | "explicit-heuristic";
+type DesktopSetupStep = "license" | "microphone" | "shortcut" | "system-audio" | "storage" | "local-ai";
 
 interface AiProvenance {
   engine: "local-llm" | "heuristic";
@@ -88,10 +108,137 @@ interface BackgroundTask {
 interface BackgroundTaskList {
   jobs: BackgroundTask[];
   activeCount: number;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
 }
 
-interface CandorApiV3 {
-  version: 3;
+interface ShortcutTriggeredPayload {
+  action: "show-and-focus-recorder";
+  recordsAudio: false;
+  localOnly: true;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface MeetingProfileInput {
+  id?: string;
+  expectedVersion?: number;
+  name: string;
+  captureSource: "microphone" | "system-audio" | "combined";
+  language: string;
+  localModelTier: "fast" | "balanced" | "maximum";
+  speechModelId?: string;
+  cleanupModelId?: string;
+  summaryModelId?: string;
+  dictionaryIds: string[];
+  replacementRuleSetId: string | null;
+  recapTemplate: string;
+  liveTranscription: boolean;
+}
+
+interface ReplacementRuleInput {
+  id: string;
+  order: number;
+  matchMode: "exact" | "whole-word";
+  literal: string;
+  replacement: string;
+  protectedTermReview: boolean;
+  enabled: boolean;
+}
+
+interface LiveTranscriptPartialPayload {
+  event: "transcript.partial";
+  schemaVersion: 1;
+  recordingId: string;
+  sequence: number;
+  provisional: true;
+  isFinal: false;
+  startMs: number;
+  endMs: number;
+  text: string;
+  segmentCount: number;
+  localOnly: true;
+  networkAttempted: false;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+type LocalModelCapability = "speech" | "text-processing";
+type LocalModelReleaseState = "ready" | "manual-only" | "release-gated";
+
+interface LocalModelCatalogEntry {
+  modelId: string;
+  displayName: string;
+  capability: LocalModelCapability;
+  engine: string;
+  publisher: string;
+  distributionSource: string;
+  revision: string;
+  expectedSha256: string | null;
+  bytes: number | null;
+  licenseExpression: string;
+  languages: string[];
+  hardware: string;
+  releaseState: LocalModelReleaseState;
+  releaseNote: string;
+  defaultEligible: boolean;
+  downloadAvailable: boolean;
+  installed: boolean;
+  verified: boolean;
+  urlExposed: false;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface LocalModelCatalog {
+  schemaVersion: 1;
+  localOnly: true;
+  cloudModels: false;
+  remoteCatalog: false;
+  explicitDownloadsOnly: true;
+  activeDownloadModelId: string | null;
+  recommendedDefaultModelId: string | null;
+  models: LocalModelCatalogEntry[];
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface ModelDownloadProgressPayload {
+  modelId: string;
+  state: "downloading" | "verifying" | "verification-queued" | "canceled" | "failed";
+  bytesReceived: number;
+  totalBytes: number;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface CandorMediaImportStatus {
+  implemented: boolean;
+  supportedContainers: string[];
+  nativeImportReady: string[];
+  decoderUnavailable: string[];
+  pickerOwnedByMainProcess: boolean;
+  rendererPathAccepted: false;
+  localOnly: true;
+  networkAttempted: false;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface CandorMediaImportResult {
+  canceled: boolean;
+  imported: boolean;
+  failureCode: string | null;
+  recordingId: string | null;
+  jobId: string | null;
+  localOnly: true;
+  networkAttempted: false;
+  rawPathExposed: false;
+  keyMaterialExposedToRenderer: false;
+}
+
+interface CandorApiV4Definition {
+  version: 4;
   app: {
     getStatus(): Promise<JsonValue>;
     getConnectionStatus(): Promise<JsonValue>;
@@ -111,16 +258,16 @@ interface CandorApiV3 {
   capture: {
     getStatus(): Promise<JsonValue>;
     getDevices(): Promise<JsonValue>;
+    getPreferences(): Promise<JsonValue>;
+    setPreferredMicrophone(input: { deviceId: string; fingerprint?: string; ordinal?: number }): Promise<JsonValue>;
+    startMicTest(): Promise<JsonValue>;
+    getMicTestStatus(): Promise<JsonValue>;
+    getMicTestSample(): Promise<JsonValue>;
+    stopMicTest(): Promise<JsonValue>;
+    openMicrophoneSettings(): Promise<JsonValue>;
     getConsent(): Promise<JsonValue>;
     acknowledgeConsent(items: string[]): Promise<JsonValue>;
-    start(input: {
-      source: "microphone" | "system-audio" | "microphone-and-system-audio";
-      label?: string;
-      deviceId?: string;
-      micDeviceId?: string;
-      systemDeviceId?: string;
-      chunkMs?: number;
-    }): Promise<JsonValue>;
+    start(input: CaptureStartInput): Promise<JsonValue>;
     stop(): Promise<JsonValue>;
     recover(): Promise<JsonValue>;
   };
@@ -130,12 +277,23 @@ interface CandorApiV3 {
     get(recordingId: string): Promise<JsonValue>;
     getReplayManifest(recordingId: string): Promise<JsonValue>;
     getTranscript(recordingId: string, offset?: number, limit?: number): Promise<JsonValue>;
+    getTrustHistory(recordingId: string): Promise<JsonValue>;
+    getTranscriptRevision(recordingId: string, revisionId: string): Promise<JsonValue>;
+    selectTranscriptRevision(recordingId: string, revisionId: string): Promise<JsonValue>;
+    getProtectedTermReview(recordingId: string): Promise<JsonValue>;
+    applyProtectedTermReview(
+      recordingId: string,
+      revisionId: string,
+      previewToken: string,
+    ): Promise<JsonValue>;
     getPrivacyReceipt(recordingId: string): Promise<JsonValue>;
     readAudioChunk(recordingId: string, index: number): Promise<JsonValue>;
     search(query: string): Promise<JsonValue>;
     delete(recordingId: string): Promise<JsonValue>;
     getNotes(recordingId: string): Promise<JsonValue>;
     updateNotes(recordingId: string, markdown: string): Promise<JsonValue>;
+    getMediaImportStatus(): Promise<CandorMediaImportStatus>;
+    importMedia(): Promise<CandorMediaImportResult>;
     getImportStatus(): Promise<JsonValue>;
     importLegacy(): Promise<JsonValue>;
   };
@@ -145,7 +303,27 @@ interface CandorApiV3 {
     setQuality(input: { tier: "fast" | "balanced" | "maximum"; languagePreference?: "english" | "multilingual" }): Promise<JsonValue>;
     startQualityBenchmark(input: { tier: "balanced" | "maximum" }): Promise<JobAccepted>;
     start(input: { recordingId: string; channel?: string; modelId?: string }): Promise<JobAccepted>;
+    reprocess(input: { recordingId: string; channel?: string; modelId?: string }): Promise<JobAccepted>;
     cancel(jobId: string): Promise<JsonValue>;
+  };
+  liveTranscript: {
+    enable(recordingId: string): Promise<JsonValue>;
+    start(recordingId: string): Promise<JsonValue>;
+    snapshot(recordingId: string): Promise<JsonValue>;
+    clear(recordingId: string): Promise<JsonValue>;
+    stop(recordingId: string): Promise<JsonValue>;
+    eventsDrain(): Promise<JsonValue>;
+  };
+  diarization: {
+    getStatus(): Promise<JsonValue>;
+    setEnabled(enabled: boolean): Promise<JsonValue>;
+    getSpeakerNames(recordingId: string): Promise<JsonValue>;
+    assignSpeakerName(
+      recordingId: string,
+      anonymousSpeakerId: string,
+      displayName: string,
+    ): Promise<JsonValue>;
+    removeSpeakerName(recordingId: string, anonymousSpeakerId: string): Promise<JsonValue>;
   };
   terminology: {
     getStatus(recordingId?: string): Promise<JsonValue>;
@@ -159,6 +337,31 @@ interface CandorApiV3 {
       decision: "accepted" | "rejected",
     ): Promise<JsonValue>;
   };
+  profiles: {
+    list(): Promise<JsonValue>;
+    get(id: string): Promise<JsonValue>;
+    upsert(input: MeetingProfileInput): Promise<JsonValue>;
+    delete(id: string, expectedVersion: number): Promise<JsonValue>;
+    select(id: string): Promise<JsonValue>;
+  };
+  replacements: {
+    list(): Promise<JsonValue>;
+    get(id: string): Promise<JsonValue>;
+    upsert(input: {
+      id?: string;
+      expectedVersion?: number;
+      name: string;
+      rules: ReplacementRuleInput[];
+    }): Promise<JsonValue>;
+    delete(id: string, expectedVersion: number): Promise<JsonValue>;
+    preview(setId: string, input: string): Promise<JsonValue>;
+    apply(input: {
+      setId: string;
+      input: string;
+      previewToken: string;
+      approveProtectedTerms?: boolean;
+    }): Promise<JsonValue>;
+  };
   ai: {
     getStatus(): Promise<JsonValue>;
     getBundledAssetsStatus(): Promise<JsonValue>;
@@ -168,10 +371,14 @@ interface CandorApiV3 {
     setFallbackPreference(preference: AiFallbackPreference): Promise<JsonValue>;
     getWorkloadStatus(): Promise<JsonValue>;
     listSpeechModels(): Promise<JsonValue>;
+    getModelCatalog(): Promise<LocalModelCatalog>;
+    downloadModel(modelId: string): Promise<JobAccepted & { modelId: string; bytesReceived: number; expectedBytes: number; integrityVerifiedBeforeInstall: true }>;
+    cancelModelDownload(modelId?: string): Promise<JsonValue>;
     verifySpeechModel(modelId?: string): Promise<JobAccepted>;
     chooseSpeechModel(modelId: string): Promise<JobAccepted | JsonValue>;
     chooseEnhancedComponent(input: { component: "engine" | "model"; expectedSha256: string }): Promise<JobAccepted | JsonValue>;
-    generateRecap(input: { recordingId: string; intent?: AiJobIntent }): Promise<JobAccepted>;
+    cleanupTranscript(recordingId: string): Promise<JobAccepted>;
+    generateRecap(input: { recordingId: string; intent?: AiJobIntent; recapTemplate?: string }): Promise<JobAccepted>;
     ask(input: { recordingId: string; question: string; intent?: AiJobIntent }): Promise<JobAccepted>;
     cancel(jobId: string): Promise<JsonValue>;
   };
@@ -195,11 +402,49 @@ interface CandorApiV3 {
     deactivate(): Promise<JsonValue>;
     getPortalInfo(): Promise<JsonValue>;
   };
+  setup: {
+    getStatus(): Promise<JsonValue>;
+    visit(input: { step: DesktopSetupStep }): Promise<JsonValue>;
+    updateStep(input: { step: DesktopSetupStep; visit?: DesktopSetupStep }): Promise<JsonValue>;
+    defer(input: { step: DesktopSetupStep }): Promise<JsonValue>;
+    complete(): Promise<JsonValue>;
+    markExistingUserPromptShown(): Promise<JsonValue>;
+  };
+  shortcuts: {
+    getStatus(): Promise<JsonValue>;
+    update(input: { enabled: boolean; accelerator?: string }): Promise<JsonValue>;
+    reset(): Promise<JsonValue>;
+  };
   events: {
     subscribe(eventName: "jobs.changed", listener: (payload: BackgroundTask) => void): () => void;
+    subscribe(eventName: "shortcut.triggered", listener: (payload: ShortcutTriggeredPayload) => void): () => void;
+    subscribe(eventName: "transcript.partial", listener: (payload: LiveTranscriptPartialPayload) => void): () => void;
+    subscribe(eventName: "model.downloadProgress", listener: (payload: ModelDownloadProgressPayload) => void): () => void;
   };
 }
 
+type WithRendererCustody<T> = T extends (...args: infer Args) => Promise<infer Result>
+  ? (...args: Args) => Promise<Result & RendererCustody>
+  : T;
+
+type RendererCustodyDomain<T> = {
+  [Key in keyof T]: WithRendererCustody<T[Key]>;
+};
+
+type CandorApiV4 = {
+  [Domain in keyof CandorApiV4Definition]: Domain extends "version" | "events"
+    ? CandorApiV4Definition[Domain]
+    : RendererCustodyDomain<CandorApiV4Definition[Domain]>;
+};
+
+type AsyncMethodResult<T> = T extends (...args: infer _Arguments) => Promise<infer Result> ? Result : never;
+type DomainResponseUnion<T> = AsyncMethodResult<T[keyof T]>;
+type CandorApiV4ResponseUnion = {
+  [Domain in Exclude<keyof CandorApiV4, "version" | "events">]: DomainResponseUnion<CandorApiV4[Domain]>;
+}[Exclude<keyof CandorApiV4, "version" | "events">];
+type AssertRendererCustody<T extends RendererCustody> = T;
+type CandorApiV4CustodyContract = AssertRendererCustody<CandorApiV4ResponseUnion>;
+
 interface Window {
-  candor?: CandorApiV3;
+  candor?: CandorApiV4;
 }

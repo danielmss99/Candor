@@ -284,7 +284,12 @@ export class CoreClient {
       return Promise.reject(error);
     }
     const child = this.child;
-    if (!child || child.killed || !child.stdin.writable) {
+    if (
+      !child ||
+      child.exitCode !== null ||
+      child.signalCode !== null ||
+      !child.stdin.writable
+    ) {
       return Promise.reject(new CoreClientError("CORE_UNAVAILABLE", "candor-core is not available", true));
     }
 
@@ -337,14 +342,14 @@ export class CoreClient {
       );
     }
     const child = this.child;
-    if (!child || child.killed) return;
+    if (!child || child.exitCode !== null || child.signalCode !== null) return;
     this.supervisor.state = "stopping";
     void this.call("core.shutdown").catch(() => undefined);
     try {
       await this.waitForExit(child, 5000);
     } catch {
       child.kill("SIGKILL");
-      await this.waitForExit(child, 2000).catch(() => undefined);
+      await this.waitForExit(child, 2000);
     }
   }
 
@@ -392,6 +397,7 @@ export class CoreClient {
       const environment = {
         ...process.env,
         ...(this.options.environment?.() ?? {}),
+        CANDOR_AUTOMATION_MODE: "0",
         CANDOR_CORE_TRANSPORT: "stdio-json-lines",
       };
       child = (this.options.spawnCore ?? defaultSpawnCore)(executable, environment);

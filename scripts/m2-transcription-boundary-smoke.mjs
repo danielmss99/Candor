@@ -1,5 +1,7 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
-import { spawn } from "node:child_process";
+import { searchWhenReady } from "./core-rpc-search-retry.mjs";
+import { removeTemporaryDirectory } from "./child-process-cleanup.mjs";
+import { spawn, spawnSync } from "node:child_process";
 import { createInterface } from "node:readline";
 import {
   createReadStream,
@@ -7,7 +9,6 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -22,6 +23,10 @@ const exe = process.platform === "win32" ? "candor-core.exe" : "candor-core";
 const realLocalRequested =
   process.argv.includes("--real-local") || process.env.CANDOR_M2_REAL_LOCAL_WHISPER === "1";
 const rpcTimeoutMs = realLocalRequested ? 180000 : 5000;
+// The encrypted FTS search may synchronously finish a local index build under
+// verifier load. This remains one bounded response wait. searchWhenReady only
+// retries the core's explicit RECORDING_SEARCH_INDEX_BUILDING response.
+const searchResponseTimeoutMs = Math.max(rpcTimeoutMs, 30_000);
 const coreArg = argValue("--core", firstPositional());
 const corePath = coreArg
   ? path.resolve(coreArg)
@@ -98,10 +103,19 @@ function call(method, params = null) {
   const id = request.requestId;
   const payload = JSON.stringify(request);
   return new Promise((resolve, reject) => {
+    const responseTimeoutMs = method === "recording.durable.search"
+      ? searchResponseTimeoutMs
+      : rpcTimeoutMs;
     const timeout = setTimeout(() => {
       pending.delete(id);
-      reject(new Error(`timeout waiting for ${method}`));
-    }, rpcTimeoutMs);
+      const error = new Error(
+        `timeout waiting ${responseTimeoutMs}ms for ${method}`,
+      );
+      error.code = "RPC_RESPONSE_TIMEOUT";
+      error.method = method;
+      error.timeoutMs = responseTimeoutMs;
+      reject(error);
+    }, responseTimeoutMs);
     pending.set(id, {
       resolve: (value) => {
         clearTimeout(timeout);
@@ -114,6 +128,37 @@ function call(method, params = null) {
     });
     child.stdin.write(`${payload}\n`);
   });
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function waitForChildExit(processHandle, timeoutMs) {
+  if (processHandle.exitCode !== null || processHandle.signalCode !== null) return true;
+  let exited = false;
+  await Promise.race([
+    new Promise((resolve) => {
+      processHandle.once("exit", () => {
+        exited = true;
+        resolve();
+      });
+    }),
+    delay(timeoutMs),
+  ]);
+  return exited || processHandle.exitCode !== null || processHandle.signalCode !== null;
+}
+
+async function stopCoreProcess(processHandle) {
+  if (await waitForChildExit(processHandle, 5_000)) return;
+  if (process.platform === "win32" && processHandle.pid) {
+    spawnSync("taskkill", ["/PID", String(processHandle.pid), "/T", "/F"], { stdio: "ignore" });
+  } else {
+    processHandle.kill("SIGKILL");
+  }
+  if (!(await waitForChildExit(processHandle, 5_000))) {
+    throw new Error("candor-core did not exit during transcription smoke cleanup");
+  }
 }
 
 function argValue(name, fallback = null) {
@@ -452,7 +497,7 @@ try {
   proofReceipt.synthetic.tracks = Array.isArray(proof?.replay?.tracks) ? proof.replay.tracks : [];
 
   const recordingId = proof.recording?.recordingId;
-  const search = await call("recording.durable.search", { query: "pathless" });
+  const search = await searchWhenReady(call, { query: "pathless" });
   assertCustody(search, "transcription search");
   if (search?.matchCount !== 1 || search?.matches?.[0]?.recordingId !== recordingId) {
     throw new Error("search did not index the transcription proof output");
@@ -615,6 +660,7 @@ try {
   writeProof(proofReceipt);
   throw error;
 } finally {
-  if (!child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  await stopCoreProcess(child);
+  lines.close();
+  removeTemporaryDirectory(dataDir);
 }

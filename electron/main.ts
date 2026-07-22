@@ -1,18 +1,23 @@
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow, globalShortcut } from "electron";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { CoreClient } from "./core/core-client.js";
 import { CaptureRecoveryStore } from "./core/capture-recovery-store.js";
 import { errorMessage } from "./core/core-errors.js";
+import { LiveTranscriptEventBridge } from "./core/live-transcript-event-bridge.js";
 import { privateCoreMethods } from "./core/protocol.js";
+import { createDesktopSetupShortcutServices, showAndFocusDesktopWindow } from "./desktop-setup-shortcuts.js";
 import { registerIpcHandlers } from "./ipc/register-ipc.js";
 import { LicenseService } from "./license-service.js";
 import { applyChromiumNetworkPolicy, installSessionHardening, NetworkGuard } from "./security/network-policy.js";
 import { runM0Smoke } from "./smoke/m0-smoke.js";
 import { createMainWindow } from "./window/create-main-window.js";
-import { installCaptureCloseGuard } from "./window/capture-close-guard.js";
+import { installDesktopCloseGuard } from "./window/install-desktop-close-guard.js";
+import { DesktopQuitLifecycle } from "./window/desktop-quit-lifecycle.js";
 import { createRendererNavigationPolicy } from "./window/navigation-policy.js";
+import { SETUP_STEPS } from "./preferences/desktop-preferences.js";
+import { ModelAcquisitionService } from "./models/model-acquisition-service.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -42,6 +47,9 @@ if ((isSmokeMode || isE2EMode) && process.env.CANDOR_V3_DATA_DIR) {
     path.join(process.env.CANDOR_V3_DATA_DIR, isSmokeMode ? "electron-smoke" : "electron-e2e"),
   );
 }
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+
+if (!hasSingleInstanceLock) app.quit();
 
 const rendererNavigation = createRendererNavigationPolicy({
   isDev,
@@ -79,12 +87,40 @@ const coreClient = new CoreClient({
   executablePath: corePath,
   allowedMethods: privateCoreMethods,
   isDev,
-  environment: () => ({ CANDOR_AI_BUNDLE_ROOT: aiBundleRoot() }),
+  environment: () => ({
+    CANDOR_AI_BUNDLE_ROOT: aiBundleRoot(),
+    CANDOR_AUTOMATION_MODE: "0",
+  }),
   onCaptureConnectionDegraded: (metadata) => captureRecoveryStore.persist(metadata),
   onCaptureRecoveryResolved: () => captureRecoveryStore.clear(),
 });
 let mainWindow: BrowserWindow | null = null;
 let licenseService: LicenseService | null = null;
+const quitLifecycle = new DesktopQuitLifecycle();
+
+const { preferences: desktopPreferences, shortcuts: shortcutService } = createDesktopSetupShortcutServices({
+  userDataPath: () => app.getPath("userData"),
+  // Test harnesses create their override root before Electron starts. In
+  // those modes only a known Candor child is evidence of an existing install.
+  coreRootExistenceIsEvidence: !isSmokeMode && !isE2EMode,
+  shortcutAdapter: {
+    register: (accelerator, callback) => globalShortcut.register(accelerator, callback),
+    unregister: (accelerator) => globalShortcut.unregister(accelerator),
+  },
+  shortcutTarget: { showAndFocusRecorder: () => showAndFocusWindow(true) },
+  onShortcutActivationError: () => console.error("[candor-shortcut] recorder focus failed"),
+});
+
+function showAndFocusWindow(sendRecorderEvent: boolean): void {
+  const window = mainWindow && !mainWindow.isDestroyed() ? mainWindow : createWindow();
+  showAndFocusDesktopWindow(window, sendRecorderEvent);
+}
+
+const liveTranscriptEvents = new LiveTranscriptEventBridge({
+  core: coreClient,
+  getMainWindow: () => mainWindow,
+});
+const modelAcquisition = new ModelAcquisitionService(coreClient, () => mainWindow);
 
 function getLicenseService(): LicenseService {
   licenseService ??= new LicenseService({ isDev });
@@ -92,7 +128,7 @@ function getLicenseService(): LicenseService {
 }
 
 function createWindow(smoke = false): BrowserWindow {
-  mainWindow = createMainWindow({
+  const createdWindow = createMainWindow({
     preloadPath: path.join(__dirname, "preload.cjs"),
     navigation: rendererNavigation,
     networkGuard,
@@ -100,91 +136,46 @@ function createWindow(smoke = false): BrowserWindow {
     smokeWidth: smokeWindowWidth,
     smokeHeight: smokeWindowHeight,
   });
-  if (!smoke) {
-    installCaptureCloseGuard(mainWindow, {
-      phase: () => coreClient.captureGuardPhase(),
-      confirmStopAndQuit: async (window, phase) => {
-        const detail = phase === "recording"
-          ? "Candor is recording. Stop and save the recording before quitting?"
-          : "Candor is changing recording state. Wait for a durable save before quitting?";
-        const result = await dialog.showMessageBox(window, {
-          type: "warning",
-          title: "Recording in progress",
-          message: "Keep Candor open until the recording is safe.",
-          detail,
-          buttons: ["Keep recording", "Stop, save, and quit"],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true,
-        });
-        return result.response === 1;
-      },
-      finalizeCapture: () => coreClient.finalizeCaptureForClose(),
-      activeBackgroundJobCount: async () => {
-        if (isE2EMode) return 0;
-        const response = await coreClient.call("jobs.activeSummary", null);
-        if (!response.ok) throw new Error(response.error?.code ?? "JOB_SUMMARY_FAILED");
-        const value = response.result;
-        if (!value || typeof value !== "object" || Array.isArray(value)) return 0;
-        const activeCount = (value as Record<string, unknown>).activeCount;
-        return typeof activeCount === "number" && Number.isSafeInteger(activeCount)
-          ? activeCount
-          : 0;
-      },
-      confirmBackgroundJobs: async (window, activeCount) => {
-        const noun = activeCount === 1 ? "job is" : "jobs are";
-        const result = await dialog.showMessageBox(window, {
-          type: "question",
-          title: "Background processing is still in progress",
-          message: `${activeCount} local ${noun} still running.`,
-          detail: "Keep Candor open to finish now, pause safely until the next launch, or cancel the jobs without deleting meeting data.",
-          buttons: ["Keep Candor running", "Pause and close", "Cancel jobs and close"],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true,
-        });
-        if (result.response === 1) return "pause-and-quit";
-        if (result.response === 2) return "cancel-and-quit";
-        return "keep-open";
-      },
-      pauseBackgroundJobs: async () => {
-        const response = await coreClient.call("jobs.pauseAll", null);
-        if (!response.ok) throw new Error(response.error?.code ?? "JOB_PAUSE_FAILED");
-      },
-      cancelBackgroundJobs: async () => {
-        const response = await coreClient.call("jobs.cancelAll", null);
-        if (!response.ok) throw new Error(response.error?.code ?? "JOB_CANCEL_FAILED");
-      },
-      shutdownCore: () => coreClient.shutdown(),
-      reportFailure: async (window, message) => {
-        await dialog.showMessageBox(window, {
-          type: "error",
-          title: "Recording not yet safe to close",
-          message,
-          buttons: ["Keep Candor open"],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true,
-        });
-      },
-    });
-  }
-  return mainWindow;
+  mainWindow = createdWindow;
+  createdWindow.once("closed", () => {
+    if (mainWindow === createdWindow) mainWindow = null;
+  });
+  if (!smoke) installDesktopCloseGuard(createdWindow, {
+    core: coreClient,
+    shortcuts: shortcutService,
+    e2eMode: isE2EMode,
+    shouldShutdownServicesOnClose: () => quitLifecycle.shouldShutdownServicesOnClose(process.platform),
+    onCloseAborted: () => quitLifecycle.cancelQuit(),
+  });
+  return createdWindow;
 }
 
 function hardenSession(): void {
   installSessionHardening(networkGuard, (value) => rendererNavigation.isDevRequest(value));
 }
 
-registerIpcHandlers({ core: coreClient, getMainWindow: () => mainWindow, getLicenseService });
+registerIpcHandlers({
+  core: coreClient,
+  preferences: desktopPreferences,
+  shortcuts: shortcutService,
+  modelAcquisition,
+  liveTranscriptEvents,
+  getMainWindow: () => mainWindow,
+  getLicenseService,
+});
 
 app.on("web-contents-created", (_event, contents) => {
   contents.on("will-attach-webview", (event) => event.preventDefault());
   contents.setWindowOpenHandler(() => ({ action: "deny" }));
 });
 
-app.whenReady().then(async () => {
+if (hasSingleInstanceLock) app.whenReady().then(async () => {
   app.setAppUserModelId("com.candor.v3");
+  // This must precede the core handshake. A genuine first launch can create
+  // the Candor core root during handshake and must remain classified as new.
+  await desktopPreferences.initialize().catch((error) => {
+    console.error(`[candor-setup] upgrade migration snapshot failed: ${errorMessage(error)}`);
+  });
   const pendingCaptureRecovery = await captureRecoveryStore.read();
   if (pendingCaptureRecovery) {
     coreClient.restoreCaptureRecovery({
@@ -199,6 +190,10 @@ app.whenReady().then(async () => {
       networkGuard,
       createSmokeWindow: () => createWindow(true),
       getLicenseService,
+      prepareRendererSetup: async () => {
+        for (const step of SETUP_STEPS) await desktopPreferences.deferStep(step);
+        await desktopPreferences.completeSetup();
+      },
       installSessionHardening: hardenSession,
       corePath,
       outputPath: smokeOutputPath,
@@ -217,6 +212,19 @@ app.whenReady().then(async () => {
     console.error(`[candor-core] startup handshake failed: ${errorMessage(error)}`);
   }
   createWindow();
+  try {
+    await shortcutService.initialize();
+  } catch (error) {
+    console.error(`[candor-shortcut] initialization failed: ${errorMessage(error)}`);
+  }
+});
+
+app.on("before-quit", () => {
+  quitLifecycle.markBeforeQuit();
+});
+
+app.on("second-instance", () => {
+  if (hasSingleInstanceLock && app.isReady() && !isSmokeMode) showAndFocusWindow(false);
 });
 
 app.on("window-all-closed", () => {
@@ -227,6 +235,14 @@ app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-app.on("will-quit", () => {
-  void coreClient.shutdown().catch(() => undefined);
+app.on("will-quit", (event) => {
+  modelAcquisition.cancel();
+  void quitLifecycle.holdFinalQuit({
+    liveTranscriptEvents,
+    shortcuts: shortcutService,
+    core: coreClient,
+  }, {
+    preventQuit: () => event.preventDefault(),
+    requestQuit: () => app.quit(),
+  });
 });

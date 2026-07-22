@@ -7,6 +7,12 @@ import { validModelId } from "../security/input-limits.js";
 import { validateIpcSender } from "../security/validate-sender.js";
 import type { IpcDependencies } from "./ipc-types.js";
 
+export const MODEL_CATALOG_IPC_CHANNELS = Object.freeze({
+  getCatalog: "candor-models:getCatalog",
+  download: "candor-models:download",
+  cancelDownload: "candor-models:cancelDownload",
+});
+
 async function requireResult(dependencies: IpcDependencies, method: string, params: JsonValue) {
   const response = await dependencies.core.call(method, params);
   if (!response.ok) throw new Error(response.error?.message ?? `${method} failed`);
@@ -14,6 +20,26 @@ async function requireResult(dependencies: IpcDependencies, method: string, para
 }
 
 export function registerModelsIpc(dependencies: IpcDependencies): void {
+  ipcMain.handle(MODEL_CATALOG_IPC_CHANNELS.getCatalog, async (event) => {
+    validateIpcSender(event, dependencies.getMainWindow);
+    return dependencies.modelAcquisition.catalog();
+  });
+
+  ipcMain.handle(MODEL_CATALOG_IPC_CHANNELS.download, async (event, params?: JsonValue) => {
+    validateIpcSender(event, dependencies.getMainWindow);
+    const input = objectValue(params ?? null);
+    if (!validModelId(input.modelId)) throw new Error("A valid packaged model id is required.");
+    return dependencies.modelAcquisition.download(input.modelId);
+  });
+
+  ipcMain.handle(MODEL_CATALOG_IPC_CHANNELS.cancelDownload, async (event, params?: JsonValue) => {
+    validateIpcSender(event, dependencies.getMainWindow);
+    const input = objectValue(params ?? null);
+    const modelId = input.modelId === undefined ? undefined : input.modelId;
+    if (modelId !== undefined && !validModelId(modelId)) throw new Error("A valid packaged model id is required.");
+    return dependencies.modelAcquisition.cancel(modelId);
+  });
+
   ipcMain.handle("candor-models:importFromFile", async (event, params?: JsonValue) => {
     validateIpcSender(event, dependencies.getMainWindow);
     const input = objectValue(params ?? null);

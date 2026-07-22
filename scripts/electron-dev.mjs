@@ -97,6 +97,8 @@ async function buildDevelopmentRuntime() {
     "build",
     "--manifest-path",
     "crates/candor-core/Cargo.toml",
+    "--features",
+    "sqlcipher-vault,local-whisper",
   ]);
   await runStep("Electron main build", process.execPath, ["scripts/m0-build-electron.mjs"]);
 }

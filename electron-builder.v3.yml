@@ -13,10 +13,20 @@ extraResources:
     filter:
       - candor-core
       - candor-core.exe
+      - candorctl
+      - candorctl.exe
+      - candor-mcp
+      - candor-mcp.exe
   - from: build/ai-bundle
     to: ai
     filter:
       - "**/*"
+  - from: THIRD_PARTY_NOTICES.md
+    to: THIRD_PARTY_NOTICES.md
+  - from: licenses/MPL-2.0.txt
+    to: licenses/MPL-2.0.txt
+  - from: LICENSE
+    to: LICENSE.txt
 asar: true
 npmRebuild: false
 publish: null
@@ -35,6 +45,8 @@ mac:
   entitlementsInherit: build/entitlements.mac.inherit.plist
   binaries:
     - Contents/Resources/bin/candor-core
+    - Contents/Resources/bin/candorctl
+    - Contents/Resources/bin/candor-mcp
   extendInfo:
     NSMicrophoneUsageDescription: Candor records your microphone only when you start a local recording.
     NSScreenCaptureUsageDescription: Candor uses Screen & System Audio Recording permission to capture meeting audio only when you start a local recording. Audio stays on this Mac.

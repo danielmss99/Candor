@@ -1,7 +1,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
-import { launchCandor } from "./candor-electron";
+import { cleanupDeferredCandorDataDirs, launchCandor } from "./candor-electron";
+
+test.afterAll(() => cleanupDeferredCandorDataDirs());
 
 const repoRoot = path.resolve(import.meta.dirname, "..", "..");
 const evidenceRoot = path.join(repoRoot, "release-v3", "proofs", "licensing-formatting");

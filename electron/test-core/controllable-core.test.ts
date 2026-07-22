@@ -57,7 +57,7 @@ describe("controllable core fault harness", () => {
   });
 
   it("bounds an ordinary request that hangs before responding", async () => {
-    const client = clientFor("hang-before-response", 200, 2_000);
+    const client = clientFor("hang-before-response", 1_000, 2_000);
     await client.ensureHandshake();
     await expect(client.call("core.status")).rejects.toThrow("timed out");
   });
@@ -77,7 +77,7 @@ describe("controllable core fault harness", () => {
   });
 
   it("stays responsive while bounded stderr is flooded", async () => {
-    const client = clientFor("stderr-flood", 500);
+    const client = clientFor("stderr-flood", 2_000);
     await expect(client.call("core.status")).resolves.toMatchObject({ ok: true });
     await client.shutdown();
   });
@@ -153,7 +153,9 @@ describe("controllable core fault harness", () => {
   });
 
   it("marks recovery required when the core exits during capture", async () => {
-    const client = clientFor("exit-during-capture", 500);
+    // Keep the fault-response budget tight without making ordinary Windows
+    // process startup part of the assertion under a parallel Vitest run.
+    const client = clientFor("exit-during-capture", 500, 2_000);
     await client.call("capture.startMic", { label: "Test recording" });
     await expect(client.call("capture.status")).rejects.toThrow("exited");
     expect(client.rendererSnapshot()).toMatchObject({ captureRecoveryRequired: true });

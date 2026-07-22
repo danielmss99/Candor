@@ -4,7 +4,11 @@ import type { JobKind } from "../../state/operation-machines";
 import { ExclusiveActionRegistry } from "../../state/request-coordinator";
 
 export function operationErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const message = error instanceof Error ? error.message : String(error);
+  if (message.includes("CANDOR_CORE_ERROR:RECORDING_SEARCH_INDEX_BUILDING")) {
+    return "Preparing encrypted search. Try again shortly.";
+  }
+  return message;
 }
 
 export type RunOperation = (

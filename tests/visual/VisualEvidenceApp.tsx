@@ -23,6 +23,7 @@ import { ActivationGate, OnboardingSetup } from "../../v3/renderer/src/features/
 import { ReviewView } from "../../v3/renderer/src/features/review/ReviewView";
 import { SettingsView } from "../../v3/renderer/src/features/settings/SettingsView";
 import { StartupRecovery } from "../../v3/renderer/src/features/startup/StartupState";
+import type { LocalModelCatalogState } from "../../v3/renderer/src/features/models/model-library";
 import { AnimatedTranscript, type MotionTranscriptSegment } from "../../v3/renderer/src/meeting-motion";
 
 export const VISUAL_SCENARIOS = [
@@ -70,6 +71,73 @@ const bundledAiReady: BundledAiStatus = {
   repairAction: "none",
   speech: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "large-v3-turbo", failureCode: null },
   language: { state: "ready", ready: true, available: true, requiredAssets: 2, verifiedAssets: 2, modelId: "Qwen3-4B-GGUF-Q4_K_M", failureCode: null },
+};
+
+const localModelCatalog: LocalModelCatalogState = {
+  loaded: true,
+  activeDownloadModelId: null,
+  models: [
+    {
+      modelId: "small.en",
+      displayName: "Whisper Small English",
+      capability: "speech",
+      engine: "whisper.cpp",
+      publisher: "OpenAI",
+      distributionSource: "ggerganov/whisper.cpp",
+      revision: "5359861c739e955e79d9a303bcbc70fb988958b1",
+      expectedSha256: "c6138d6d58ecc8322097e0f987c32f1be8bb0a18532a3f88f734d1bbf9c41e5d",
+      bytes: 487_614_201,
+      licenseExpression: "MIT",
+      languages: ["English"],
+      hardware: "Local CPU",
+      releaseState: "ready",
+      releaseNote: "Verified English speech model",
+      defaultEligible: false,
+      downloadAvailable: true,
+      installed: true,
+      verified: true,
+    },
+    {
+      modelId: "qwen3-4b-official-q4_k_m",
+      displayName: "Qwen3 4B",
+      capability: "text-processing",
+      engine: "llama.cpp",
+      publisher: "Qwen",
+      distributionSource: "Qwen/Qwen3-4B-GGUF",
+      revision: "bc640142c66e1fdd12af0bd68f40445458f3869b",
+      expectedSha256: "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5",
+      bytes: 2_497_280_256,
+      licenseExpression: "Apache-2.0",
+      languages: ["Multilingual text"],
+      hardware: "Recommended 16 GB system memory",
+      releaseState: "manual-only",
+      releaseNote: "Cleanup and summary model; verified download transport is pending",
+      defaultEligible: true,
+      downloadAvailable: false,
+      installed: true,
+      verified: true,
+    },
+    {
+      modelId: "parakeet-tdt-0.6b-v3-int8",
+      displayName: "NVIDIA Parakeet V3",
+      capability: "speech",
+      engine: "sherpa-onnx",
+      publisher: "NVIDIA",
+      distributionSource: "k2-fsa/sherpa-onnx conversion",
+      revision: "release-gate-pending",
+      expectedSha256: null,
+      bytes: null,
+      licenseExpression: "CC-BY-4.0 model; runtime review pending",
+      languages: ["25 European languages"],
+      hardware: "Windows CPU benchmark required",
+      releaseState: "release-gated",
+      releaseNote: "Not downloadable or selectable until runtime, conversion, license, and benchmark proofs pass",
+      defaultEligible: false,
+      downloadAvailable: false,
+      installed: false,
+      verified: false,
+    },
+  ],
 };
 
 const transcriptionQuality: TranscriptionQualityStatus = {
@@ -440,6 +508,7 @@ function MeetingDetail({ long = false, empty = false, fallback = false }: { long
       onAskQuestionChange={noop}
       onAsk={noop}
       onRetryAskWithLocalAi={noop}
+      onTranscriptRevisionChanged={noop}
     />
   );
 }
@@ -536,14 +605,19 @@ function Settings({ advanced, repair = false, checking = false, localAi = false 
         speech: { ...bundledAiReady.speech, state: "corrupt", ready: false, verifiedAssets: 0, failureCode: "BUNDLED_AI_ASSET_HASH_MISMATCH" },
       } : bundledAiReady}
       transcriptionQuality={transcriptionQuality}
+      transcriptionBenchmarkActive={false}
+      transcriptionBenchmarkNeedsRetry={false}
       terminologyStatus={terminologyStatus}
       terminologyProposals={[]}
       selectedRecordingId={primaryMeeting.recordingId}
       models={baselineUnavailable ? [] : [{ modelId: "base.en", language: "English", installed: true, verified: true, bytes: 148_000_000, failureCode: "" }]}
+      modelCatalog={localModelCatalog}
+      modelDownloadProgress={null}
       selectedModel="base.en"
       defaultModel="base.en"
       aiMode={baselineUnavailable ? "heuristic-fallback" : "local-llm"}
       aiModeStatus={baselineUnavailable ? "Quick fallback available" : "Local AI ready"}
+      aiFallbackPreference="ask-first"
       instructSetupOpen={false}
       instructReady={!baselineUnavailable}
       instructRunnerAsset={{ verified: !baselineUnavailable, bytes: baselineUnavailable ? 0 : 4_000_000 }}
@@ -562,9 +636,14 @@ function Settings({ advanced, repair = false, checking = false, localAi = false 
       onToggleAdvanced={noop}
       onVerifyModel={noop}
       onImportModel={noop}
+      onImportCatalogModel={noop}
+      onDownloadModel={noop}
+      onCancelModelDownload={noop}
       onSelectedModelChange={noop}
       onAiModeChange={noop}
+      onAiFallbackPreferenceChange={noop}
       onTranscriptionQualityChange={noop}
+      onRunTranscriptionBenchmark={noop}
       onImportDictionary={noop}
       onSetDictionaryEnabled={noop}
       onAssignDictionary={noop}

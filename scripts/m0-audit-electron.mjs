@@ -8,15 +8,18 @@ const repoRoot = path.resolve(__dirname, "..");
 
 const files = [
   "electron/main.ts",
+  "electron/preload-event-buffer.cjs",
   "electron/core/json.ts",
   "electron/core/core-client.ts",
   "electron/core/core-errors.ts",
+  "electron/core/live-transcript-event-bridge.ts",
   "electron/core/operation-registry.ts",
   "electron/core/protocol.ts",
   "electron/core/renderer-boundary.ts",
   "electron/core/request-registry.ts",
   "electron/diagnostics/diagnostic-report.ts",
   "electron/export/local-report.ts",
+  "electron/ipc/capture-settings-ipc.ts",
   "electron/ipc/core-ipc.ts",
   "electron/ipc/diagnostics-ipc.ts",
   "electron/ipc/export-ipc.ts",
@@ -24,15 +27,29 @@ const files = [
   "electron/ipc/jobs-ipc.ts",
   "electron/ipc/ipc-types.ts",
   "electron/ipc/licensing-ipc.ts",
+  "electron/ipc/media-import-ipc.ts",
   "electron/ipc/models-ipc.ts",
+  "electron/ipc/recordings-ipc.ts",
   "electron/ipc/register-ipc.ts",
+  "electron/ipc/setup-ipc.ts",
+  "electron/ipc/shortcuts-ipc.ts",
+  "electron/ipc/terminology-ipc.ts",
+  "electron/preferences/atomic-json-file.ts",
+  "electron/preferences/desktop-preferences.ts",
   "electron/security/input-limits.ts",
   "electron/security/validate-core-input.ts",
+  "electron/security/validate-private-core-input.ts",
   "electron/security/validate-sender.ts",
+  "electron/shortcuts/accelerator-policy.ts",
+  "electron/shortcuts/global-shortcut-service.ts",
+  "electron/shortcuts/shortcut-store.ts",
   "electron/smoke/m0-smoke.ts",
   "electron/security/network-policy.ts",
   "electron/window/create-main-window.ts",
   "electron/window/capture-close-guard.ts",
+  "electron/window/desktop-quit-lifecycle.ts",
+  "electron/window/install-desktop-close-guard.ts",
+  "electron/window/desktop-service-shutdown.ts",
   "electron/window/navigation-policy.ts",
   "electron/preload.cts",
   "v3/renderer/index.html",
@@ -138,6 +155,8 @@ const requiredMainPatterns = [
 ];
 
 const requiredPreloadPatterns = [
+  "BoundedLatestEventBuffer",
+  "shortcutEventBuffer.subscribe",
   "getConsent",
   "acknowledgeConsent",
   "capture:",
@@ -239,6 +258,10 @@ for (const pattern of requiredPackagedSmokePatterns) {
 
 if (!contents["v3/renderer/index.html"].includes("connect-src 'none'")) {
   throw new Error("Renderer CSP must block network connections in packaged M0.");
+}
+
+if (!contents["v3/renderer/index.html"].includes("media-src 'self' blob:")) {
+  throw new Error("Renderer CSP must allow only local and memory-backed audio playback.");
 }
 
 if (!contents["vite.v3.config.ts"].includes('base: "./"')) {

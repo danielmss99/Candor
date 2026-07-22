@@ -9,9 +9,21 @@ export function rendererSafeCoreError(code: unknown): Error {
   return new Error(`CANDOR_CORE_ERROR:${safeCode}`);
 }
 
-export function sanitizeCoreResultForRenderer(method: string, result: JsonValue): JsonValue {
+export function sanitizeCoreResultForRenderer(
+  method: string,
+  result: JsonValue,
+  allowedFields?: readonly string[],
+): JsonValue {
+  const source = objectValue(result);
+  if (allowedFields) {
+    return Object.fromEntries(
+      allowedFields
+        .filter((field) => Object.hasOwn(source, field))
+        .map((field) => [field, source[field]]),
+    );
+  }
   if (method !== "core.status") return result;
-  const status = { ...objectValue(result) };
+  const status = { ...source };
   delete status.pid;
   return status;
 }

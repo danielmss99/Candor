@@ -4,6 +4,8 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,
+    "allowJs": true,
+    "checkJs": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
@@ -12,5 +14,5 @@
     "types": ["node", "electron"],
     "outDir": "../dist-v3/electron"
   },
-  "include": ["**/*.ts", "**/*.cts"]
+  "include": ["**/*.ts", "**/*.cts", "**/*.cjs"]
 }

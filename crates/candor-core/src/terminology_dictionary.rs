@@ -760,10 +760,51 @@ impl TerminologyService {
         }))
     }
 
+    pub fn remove_recording(&self, recording_id: &str) -> Result<Value, TerminologyError> {
+        validate_id(recording_id, "TERMINOLOGY_RECORDING_ID_INVALID")?;
+        let _guard = self.lock_storage()?;
+        let mut document = self.load_document_unlocked()?;
+        let assignment_count_before = document.assignments.len();
+        let decision_count_before = document.decisions.len();
+        document
+            .assignments
+            .retain(|assignment| assignment.recording_id != recording_id);
+        document
+            .decisions
+            .retain(|decision| decision.recording_id != recording_id);
+        let removed_assignments =
+            assignment_count_before.saturating_sub(document.assignments.len());
+        let removed_decisions = decision_count_before.saturating_sub(document.decisions.len());
+        // Always rewrite during deletion. If startup recovered from the backup
+        // because the primary was absent, this promotes the sanitized document
+        // before the prior-state backup is removed.
+        self.write_document_unlocked(&document)?;
+        Ok(json!({
+            "recordingId": recording_id,
+            "removedAssignmentCount": removed_assignments,
+            "removedDecisionCount": removed_decisions,
+            "savedLocally": true,
+            "priorStateBackupRemoved": true,
+            "encryptedAtRest": true,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    #[cfg(test)]
     pub fn whisper_prompt(
         &self,
         store: &RecordingStore,
         recording_id: &str,
+    ) -> Result<Option<String>, TerminologyError> {
+        self.whisper_prompt_with_dictionary_ids(store, recording_id, &[])
+    }
+
+    pub(crate) fn whisper_prompt_with_dictionary_ids(
+        &self,
+        store: &RecordingStore,
+        recording_id: &str,
+        dictionary_ids: &[String],
     ) -> Result<Option<String>, TerminologyError> {
         let document = self.load_document()?;
         let recording = store.read(RecordingIdParams {
@@ -774,7 +815,13 @@ impl TerminologyService {
             .and_then(|value| value.get("label"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let selected = selected_entries(&document, Some(recording_id), label, MAX_PROMPT_TERMS);
+        let selected = selected_entries_with_profile_ids(
+            &document,
+            Some(recording_id),
+            dictionary_ids,
+            label,
+            MAX_PROMPT_TERMS,
+        );
         let mut prompt = String::from("Preferred terminology: ");
         let prefix_bytes = prompt.len();
         let mut count = 0;
@@ -795,19 +842,38 @@ impl TerminologyService {
         }
     }
 
-    pub fn apply_accepted_corrections(
+    pub fn apply_accepted_corrections(&self, transcript: Value) -> Result<Value, TerminologyError> {
+        let document = self.load_document()?;
+        Ok(Self::apply_accepted_corrections_from_document(
+            transcript, &document,
+        ))
+    }
+
+    /// Applies the accepted terminology overlay without creating a missing OS
+    /// key or writing any terminology state. Read-only automation companions
+    /// use this path so transcript reads stay observational.
+    pub fn apply_accepted_corrections_read_only(
         &self,
-        mut transcript: Value,
+        transcript: Value,
     ) -> Result<Value, TerminologyError> {
+        let document = self.load_document_read_only()?;
+        Ok(Self::apply_accepted_corrections_from_document(
+            transcript, &document,
+        ))
+    }
+
+    fn apply_accepted_corrections_from_document(
+        mut transcript: Value,
+        document: &TerminologyDocument,
+    ) -> Value {
         let recording_id = transcript
             .get("recordingId")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
         if recording_id.is_empty() {
-            return Ok(transcript);
+            return transcript;
         }
-        let document = self.load_document()?;
         let accepted = document
             .decisions
             .iter()
@@ -849,7 +915,7 @@ impl TerminologyService {
         }
         transcript["terminologyCorrectionsApplied"] = Value::from(applied);
         transcript["originalTranscriptPreserved"] = Value::Bool(true);
-        Ok(transcript)
+        transcript
     }
 
     pub fn glossary_context(&self, transcript: &Value) -> Result<Option<String>, TerminologyError> {
@@ -1081,6 +1147,11 @@ impl TerminologyService {
         self.load_document_unlocked()
     }
 
+    fn load_document_read_only(&self) -> Result<TerminologyDocument, TerminologyError> {
+        let _guard = self.lock_storage()?;
+        self.load_document_read_only_unlocked()
+    }
+
     fn load_document_unlocked(&self) -> Result<TerminologyDocument, TerminologyError> {
         let root = self.root.as_ref().ok_or_else(|| {
             TerminologyError::new(
@@ -1099,9 +1170,35 @@ impl TerminologyService {
         Ok(TerminologyDocument::default())
     }
 
+    fn load_document_read_only_unlocked(&self) -> Result<TerminologyDocument, TerminologyError> {
+        let root = self.root.as_ref().ok_or_else(|| {
+            TerminologyError::new(
+                "TERMINOLOGY_STORE_UNAVAILABLE",
+                "local terminology storage is unavailable",
+            )
+        })?;
+        let target = root.join(STORE_FILE);
+        let backup = root.join(STORE_BACKUP_FILE);
+        if target.exists() {
+            return self.read_encrypted_document_with_key_access(&target, false);
+        }
+        if backup.exists() {
+            return self.read_encrypted_document_with_key_access(&backup, false);
+        }
+        Ok(TerminologyDocument::default())
+    }
+
     fn read_encrypted_document(
         &self,
         path: &Path,
+    ) -> Result<TerminologyDocument, TerminologyError> {
+        self.read_encrypted_document_with_key_access(path, true)
+    }
+
+    fn read_encrypted_document_with_key_access(
+        &self,
+        path: &Path,
+        create_key_if_missing: bool,
     ) -> Result<TerminologyDocument, TerminologyError> {
         let metadata = fs::metadata(path).map_err(|_| {
             TerminologyError::new(
@@ -1138,7 +1235,11 @@ impl TerminologyService {
         }
         let nonce_start = STORE_MAGIC.len();
         let payload_start = nonce_start + NONCE_BYTES;
-        let key = self.encryption_key()?;
+        let key = if create_key_if_missing {
+            self.encryption_key()
+        } else {
+            self.encryption_key_read_only()
+        }?;
         let cipher = ChaCha20Poly1305::new_from_slice(&key).map_err(|_| {
             TerminologyError::new(
                 "TERMINOLOGY_KEY_INVALID",
@@ -1290,6 +1391,14 @@ impl TerminologyService {
                 "the terminology update could not be committed",
             ));
         }
+        if backup.exists() {
+            fs::remove_file(&backup).map_err(|_| {
+                TerminologyError::new(
+                    "TERMINOLOGY_STORE_BACKUP_CLEANUP_FAILED",
+                    "the prior terminology backup could not be removed after commit",
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -1306,6 +1415,27 @@ impl TerminologyService {
             )
         })?;
         let key = os_key_store::get_or_create_key(key_root).map_err(|_| {
+            TerminologyError::new(
+                "TERMINOLOGY_KEY_UNAVAILABLE",
+                "local terminology encryption is unavailable",
+            )
+        })?;
+        Ok(key.derive_key(STORE_KEY_LABEL))
+    }
+
+    fn encryption_key_read_only(&self) -> Result<[u8; 32], TerminologyError> {
+        #[cfg(test)]
+        if let Some(key) = self.test_encryption_key {
+            return Ok(key);
+        }
+
+        let key_root = self.key_root.as_ref().ok_or_else(|| {
+            TerminologyError::new(
+                "TERMINOLOGY_KEY_UNAVAILABLE",
+                "local terminology encryption is unavailable",
+            )
+        })?;
+        let key = os_key_store::get_existing_key(key_root).map_err(|_| {
             TerminologyError::new(
                 "TERMINOLOGY_KEY_UNAVAILABLE",
                 "local terminology encryption is unavailable",
@@ -1638,8 +1768,18 @@ fn selected_entries(
     context: &str,
     limit: usize,
 ) -> Vec<SelectedEntry> {
+    selected_entries_with_profile_ids(document, recording_id, &[], context, limit)
+}
+
+fn selected_entries_with_profile_ids(
+    document: &TerminologyDocument,
+    recording_id: Option<&str>,
+    profile_dictionary_ids: &[String],
+    context: &str,
+    limit: usize,
+) -> Vec<SelectedEntry> {
     let context_lower = context.to_lowercase();
-    let assigned = recording_id
+    let mut assigned = recording_id
         .map(|recording_id| {
             document
                 .assignments
@@ -1649,6 +1789,7 @@ fn selected_entries(
                 .collect::<HashSet<_>>()
         })
         .unwrap_or_default();
+    assigned.extend(profile_dictionary_ids.iter().map(String::as_str));
     let mut selected = document
         .dictionaries
         .iter()
@@ -1999,6 +2140,59 @@ mod tests {
             explicit_preference: preference,
             approved_correction_count: approved,
         }
+    }
+
+    #[test]
+    fn remove_recording_purges_assignments_and_correction_text() {
+        let (root, key_root) = roots("remove-recording");
+        let service = TerminologyService::with_test_roots(root.clone(), key_root);
+        let imported = import(
+            &service,
+            r#"{"name":"Fixture","entries":[{"canonicalTerm":"Candor"}]}"#,
+        );
+        let dictionary_id = imported["dictionaryId"]
+            .as_str()
+            .expect("dictionary id")
+            .to_string();
+        let mut document = service.load_document_unlocked().expect("load document");
+        document.assignments.push(DictionaryAssignment {
+            recording_id: "recording-delete".to_string(),
+            dictionary_id,
+            enabled: true,
+        });
+        document.decisions.push(CorrectionDecision {
+            recording_id: "recording-delete".to_string(),
+            proposal_id: "proposal-delete".to_string(),
+            source_segment_id: "segment-delete".to_string(),
+            source_segment_index: 0,
+            start_ms: 0,
+            original: "private mistaken text".to_string(),
+            proposed: "private corrected text".to_string(),
+            decision: CorrectionDecisionValue::Accepted,
+            decided_at_ms: now_ms(),
+        });
+        service
+            .write_document_unlocked(&document)
+            .expect("seed recording metadata");
+        fs::copy(root.join(STORE_FILE), root.join(STORE_BACKUP_FILE))
+            .expect("seed prior-state backup");
+
+        let removed = service
+            .remove_recording("recording-delete")
+            .expect("purge recording metadata");
+        assert_eq!(removed["removedAssignmentCount"], 1);
+        assert_eq!(removed["removedDecisionCount"], 1);
+        assert_eq!(removed["priorStateBackupRemoved"], true);
+        assert!(!root.join(STORE_BACKUP_FILE).exists());
+        let reloaded = service.load_document_unlocked().expect("reload document");
+        assert!(reloaded
+            .assignments
+            .iter()
+            .all(|value| value.recording_id != "recording-delete"));
+        assert!(reloaded
+            .decisions
+            .iter()
+            .all(|value| value.recording_id != "recording-delete"));
     }
 
     #[test]
@@ -2392,6 +2586,9 @@ mod tests {
         let corrected = service
             .apply_accepted_corrections(original.clone())
             .expect("corrected transcript");
+        let corrected_read_only = service
+            .apply_accepted_corrections_read_only(original.clone())
+            .expect("read-only corrected transcript");
         assert_eq!(
             original["segments"][0]["text"],
             "The pharmacokinetic results need review."
@@ -2402,6 +2599,7 @@ mod tests {
         );
         assert_eq!(corrected["originalTranscriptPreserved"], true);
         assert_eq!(corrected["terminologyCorrectionsApplied"], 1);
+        assert_eq!(corrected_read_only, corrected);
     }
 
     #[test]

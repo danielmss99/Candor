@@ -46,6 +46,11 @@ export function nextOpenMeetingIds(current: string[], recordingId: string): stri
   return [recordingId, ...current.filter((id) => id !== recordingId)].slice(0, 3);
 }
 
+export function queuedDeletionNotice(result: JsonObject): string | null {
+  if (asBool(result.recordingDataRemoved) || !asBool(result.confirmationRetained)) return null;
+  return "Deletion confirmed and queued. Candor will finish it locally without asking again.";
+}
+
 export function useMeetingActions(options: UseMeetingActionsOptions) {
   const {
     api,
@@ -189,6 +194,12 @@ export function useMeetingActions(options: UseMeetingActionsOptions) {
       }
       const dataRemoved = asBool(result.recordingDataRemoved);
       if (!dataRemoved) {
+        const queuedNotice = queuedDeletionNotice(result);
+        if (queuedNotice) {
+          await refreshLibrary(0);
+          setNotice(queuedNotice);
+          return;
+        }
         setOpenMeetingIds((current) => current.filter((id) => id !== recordingId));
         setSelectedRecordingId("");
         resetMeetingAi();

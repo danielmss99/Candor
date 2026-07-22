@@ -41,6 +41,7 @@ export function registerJobsIpc(dependencies: IpcDependencies): void {
   register("candor-transcript:startQualityBenchmark", "transcription.quality.benchmark.start");
   register("candor-transcript:start", "transcription.start");
   register("candor-ai:ask", "ai.ask.start");
+  register("candor-ai:cleanup", "ai.cleanup.start");
   register("candor-ai:recap", "ai.recap.start");
   register("candor-export:start", "export.start");
   register("candor-models:verify", "models.verify.start");

@@ -1,8 +1,12 @@
+#[cfg(feature = "sqlcipher-vault")]
+use std::collections::HashSet;
 use std::env;
 #[cfg(feature = "sqlcipher-vault")]
 use std::fs::{self, File, OpenOptions};
 #[cfg(feature = "sqlcipher-vault")]
 use std::io::{Read, Write};
+#[cfg(all(windows, feature = "sqlcipher-vault"))]
+use std::os::windows::fs::MetadataExt;
 #[cfg(feature = "sqlcipher-vault")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -28,6 +32,10 @@ const MIN_PASSPHRASE_BYTES: usize = 12;
 const CURRENT_VAULT_SCHEMA_VERSION: u32 = 2;
 #[cfg(feature = "sqlcipher-vault")]
 const V1_TO_V2_MIGRATION_ID: &str = "vault-schema-1-to-2";
+#[cfg(feature = "sqlcipher-vault")]
+const MAX_LEGACY_DELETE_REPAIR_ROWS: i64 = 100_000;
+#[cfg(feature = "sqlcipher-vault")]
+const LEGACY_DELETE_REPAIR_PENDING: &str = "legacy-delete-repair-pending";
 
 #[derive(Debug)]
 pub struct VaultStoreError {
@@ -449,16 +457,12 @@ impl VaultStore {
                     "keyMaterialExposedToRenderer": false
                 }));
             }
-            let opened = self.open_os_key_connection()?;
-            let removed = opened
-                .connection
-                .execute(
-                    "DELETE FROM candor_recordings WHERE recording_id = ?1",
-                    [recording_id],
-                )
-                .map_err(|err| {
-                    VaultStoreError::new("VAULT_RECORDING_INDEX_DELETE_FAILED", err.to_string())
-                })?;
+            let mut opened = self.open_os_key_connection()?;
+            let removed = self.delete_recording_index_from_opened_vault(
+                &mut opened.connection,
+                &self.vault_path(),
+                recording_id,
+            )?;
             Ok(json!({
                 "cleanupComplete": true,
                 "state": "deleted",
@@ -500,7 +504,14 @@ impl VaultStore {
             }
             Some(CURRENT_VAULT_SCHEMA_VERSION) => {
                 let invariants = verify_current_schema(&conn, None)?;
-                reconcile_retained_backup(&conn, path, &self.launch_id, &invariants)?
+                reconcile_retained_backup(
+                    &conn,
+                    path,
+                    &self.launch_id,
+                    &invariants,
+                    false,
+                    Some(passphrase),
+                )?
             }
             Some(1) => {
                 let before = collect_vault_invariants(&conn)?;
@@ -571,6 +582,46 @@ impl VaultStore {
         let path = self.vault_path();
         let passphrase = key.sqlcipher_passphrase();
         self.open_keyed_vault(&path, &passphrase)
+    }
+
+    fn delete_recording_index_from_opened_vault(
+        &self,
+        conn: &mut Connection,
+        vault_path: &Path,
+        recording_id: &str,
+    ) -> Result<usize, VaultStoreError> {
+        let invariants = collect_vault_invariants(conn)?;
+        reconcile_retained_backup(conn, vault_path, &self.launch_id, &invariants, true, None)?;
+
+        let transaction = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|err| {
+                VaultStoreError::new("VAULT_RECORDING_INDEX_DELETE_FAILED", err.to_string())
+            })?;
+        let removed = transaction
+            .execute(
+                "DELETE FROM candor_recordings WHERE recording_id = ?1",
+                [recording_id],
+            )
+            .map_err(|err| {
+                VaultStoreError::new("VAULT_RECORDING_INDEX_DELETE_FAILED", err.to_string())
+            })?;
+        transaction
+            .execute(
+                "
+                UPDATE candor_migrations
+                SET recording_count = (SELECT COUNT(*) FROM candor_recordings)
+                WHERE migration_id = ?1
+                ",
+                [V1_TO_V2_MIGRATION_ID],
+            )
+            .map_err(|err| {
+                VaultStoreError::new("VAULT_RECORDING_INDEX_DELETE_FAILED", err.to_string())
+            })?;
+        transaction.commit().map_err(|err| {
+            VaultStoreError::new("VAULT_RECORDING_INDEX_DELETE_FAILED", err.to_string())
+        })?;
+        Ok(removed)
     }
 
     fn open_os_key_vault(&self, verify_reopen: bool) -> Result<Value, VaultStoreError> {
@@ -1087,6 +1138,8 @@ fn reconcile_retained_backup(
     vault_path: &Path,
     launch_id: &str,
     actual: &VaultInvariants,
+    retire_before_destructive_mutation: bool,
+    backup_passphrase: Option<&str>,
 ) -> Result<VaultMigrationReport, VaultStoreError> {
     let receipt = conn
         .query_row(
@@ -1130,17 +1183,28 @@ fn reconcile_retained_backup(
         });
     };
 
-    if actual.recording_count < recording_count
-        || actual.kdf_iter != kdf_iter
-        || actual.cipher_page_size != cipher_page_size
-    {
+    if actual.kdf_iter != kdf_iter || actual.cipher_page_size != cipher_page_size {
         return Err(VaultStoreError::new(
             "VAULT_MIGRATION_VERIFY_FAILED",
-            "vault lost indexed records or changed SQLCipher settings after migration",
+            "vault changed SQLCipher settings after migration",
         ));
     }
+    let receipt_invariants = VaultInvariants {
+        recording_count,
+        kdf_iter: kdf_iter.clone(),
+        cipher_page_size: cipher_page_size.clone(),
+    };
 
     if backup_state == "confirmed-removed" {
+        let backup_path = vault_backup_path(vault_path);
+        if retire_before_destructive_mutation && backup_path.exists() {
+            fs::remove_file(&backup_path).map_err(|err| {
+                VaultStoreError::new(
+                    "VAULT_MIGRATION_BACKUP_DELETE_FAILED",
+                    format!("retained migration backup could not be removed: {err}"),
+                )
+            })?;
+        }
         return Ok(VaultMigrationReport {
             state: "current",
             from_schema_version: Some(CURRENT_VAULT_SCHEMA_VERSION),
@@ -1150,7 +1214,65 @@ fn reconcile_retained_backup(
         });
     }
 
-    if migration_launch_id == launch_id {
+    let repair_was_pending = backup_state == LEGACY_DELETE_REPAIR_PENDING;
+    let mut legacy_delete_repair_started = false;
+    if actual.recording_count < recording_count {
+        let backup_path = vault_backup_path(vault_path);
+        let repair_id = match (backup_passphrase, backup_state.as_str()) {
+            (Some(passphrase), "retained" | "verified-pending-removal") => {
+                legacy_delete_repair_candidate(
+                    conn,
+                    &backup_path,
+                    vault_path.parent(),
+                    passphrase,
+                    actual,
+                    &receipt_invariants,
+                )?
+            }
+            _ => None,
+        };
+        if repair_id.is_none() {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_VERIFY_FAILED",
+                "vault lost indexed records without bounded evidence of a completed legacy deletion",
+            ));
+        }
+        let updated = conn
+            .execute(
+                "
+                UPDATE candor_migrations
+                SET recording_count = ?1,
+                    backup_state = ?2,
+                    confirmed_launch_id = ?3
+                WHERE migration_id = ?4
+                  AND recording_count = ?5
+                  AND backup_state IN ('retained', 'verified-pending-removal')
+                ",
+                (
+                    actual.recording_count,
+                    LEGACY_DELETE_REPAIR_PENDING,
+                    launch_id,
+                    V1_TO_V2_MIGRATION_ID,
+                    recording_count,
+                ),
+            )
+            .map_err(|err| {
+                VaultStoreError::new("VAULT_MIGRATION_RECEIPT_WRITE_FAILED", err.to_string())
+            })?;
+        if updated != 1 {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_RECEIPT_WRITE_FAILED",
+                "legacy deletion repair receipt changed before it could be committed",
+            ));
+        }
+        legacy_delete_repair_started = true;
+    }
+
+    if migration_launch_id == launch_id
+        && !retire_before_destructive_mutation
+        && !legacy_delete_repair_started
+        && !repair_was_pending
+    {
         return Ok(VaultMigrationReport {
             state: "current",
             from_schema_version: Some(CURRENT_VAULT_SCHEMA_VERSION),
@@ -1162,6 +1284,27 @@ fn reconcile_retained_backup(
 
     let backup_path = vault_backup_path(vault_path);
     if !backup_path.exists() {
+        if retire_before_destructive_mutation || legacy_delete_repair_started || repair_was_pending
+        {
+            conn.execute(
+                "
+                UPDATE candor_migrations
+                SET backup_state = 'confirmed-removed', confirmed_launch_id = ?1
+                WHERE migration_id = ?2
+                ",
+                (launch_id, V1_TO_V2_MIGRATION_ID),
+            )
+            .map_err(|err| {
+                VaultStoreError::new("VAULT_MIGRATION_RECEIPT_WRITE_FAILED", err.to_string())
+            })?;
+            return Ok(VaultMigrationReport {
+                state: "current",
+                from_schema_version: Some(CURRENT_VAULT_SCHEMA_VERSION),
+                to_schema_version: CURRENT_VAULT_SCHEMA_VERSION,
+                backup_state: "confirmed-removed",
+                journal_mode_at_backup: Some(journal_mode),
+            });
+        }
         return Ok(VaultMigrationReport {
             state: "current",
             from_schema_version: Some(CURRENT_VAULT_SCHEMA_VERSION),
@@ -1171,17 +1314,28 @@ fn reconcile_retained_backup(
         });
     }
 
-    conn.execute(
-        "
-        UPDATE candor_migrations
-        SET backup_state = 'verified-pending-removal', confirmed_launch_id = ?1
-        WHERE migration_id = ?2
-        ",
-        (launch_id, V1_TO_V2_MIGRATION_ID),
-    )
-    .map_err(|err| VaultStoreError::new("VAULT_MIGRATION_RECEIPT_WRITE_FAILED", err.to_string()))?;
+    if !legacy_delete_repair_started && !repair_was_pending {
+        conn.execute(
+            "
+            UPDATE candor_migrations
+            SET backup_state = 'verified-pending-removal', confirmed_launch_id = ?1
+            WHERE migration_id = ?2
+            ",
+            (launch_id, V1_TO_V2_MIGRATION_ID),
+        )
+        .map_err(|err| {
+            VaultStoreError::new("VAULT_MIGRATION_RECEIPT_WRITE_FAILED", err.to_string())
+        })?;
+    }
 
-    if fs::remove_file(&backup_path).is_err() {
+    if let Err(error) = fs::remove_file(&backup_path) {
+        if retire_before_destructive_mutation || legacy_delete_repair_started || repair_was_pending
+        {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_BACKUP_DELETE_FAILED",
+                format!("retained migration backup could not be removed: {error}"),
+            ));
+        }
         return Ok(VaultMigrationReport {
             state: "current",
             from_schema_version: Some(CURRENT_VAULT_SCHEMA_VERSION),
@@ -1204,6 +1358,188 @@ fn reconcile_retained_backup(
         backup_state: "confirmed-removed",
         journal_mode_at_backup: Some(journal_mode),
     })
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn legacy_delete_repair_candidate(
+    live_conn: &Connection,
+    backup_path: &Path,
+    vault_root: Option<&Path>,
+    passphrase: &str,
+    actual: &VaultInvariants,
+    receipt: &VaultInvariants,
+) -> Result<Option<String>, VaultStoreError> {
+    if receipt.recording_count <= 0
+        || receipt.recording_count > MAX_LEGACY_DELETE_REPAIR_ROWS
+        || actual.recording_count.checked_add(1) != Some(receipt.recording_count)
+    {
+        return Ok(None);
+    }
+    if !owned_regular_file(backup_path)? {
+        return Ok(None);
+    }
+    let Some(vault_root) = vault_root else {
+        return Ok(None);
+    };
+
+    let backup_conn = open_keyed_connection(backup_path, passphrase)?;
+    if read_schema_version(&backup_conn)? != 1
+        || collect_vault_invariants(&backup_conn)? != *receipt
+    {
+        return Ok(None);
+    }
+
+    let backup_ids = bounded_recording_ids(&backup_conn, receipt.recording_count)?;
+    let live_ids = bounded_recording_ids(live_conn, actual.recording_count)?;
+    if live_ids.len().checked_add(1) != Some(backup_ids.len()) || !live_ids.is_subset(&backup_ids) {
+        return Ok(None);
+    }
+    for recording_id in &live_ids {
+        if !owned_recording_directory(vault_root.join("recordings").join(recording_id))? {
+            return Ok(None);
+        }
+    }
+
+    let mut missing = backup_ids.difference(&live_ids);
+    let Some(recording_id) = missing.next().cloned() else {
+        return Ok(None);
+    };
+    if missing.next().is_some()
+        || !legacy_deleted_recording_artifacts_absent(vault_root, &recording_id)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(recording_id))
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn bounded_recording_ids(
+    conn: &Connection,
+    expected_count: i64,
+) -> Result<HashSet<String>, VaultStoreError> {
+    if !(0..=MAX_LEGACY_DELETE_REPAIR_ROWS).contains(&expected_count) {
+        return Err(VaultStoreError::new(
+            "VAULT_MIGRATION_VERIFY_FAILED",
+            "vault recording count exceeded the bounded legacy deletion repair limit",
+        ));
+    }
+    let mut statement = conn
+        .prepare("SELECT recording_id FROM candor_recordings ORDER BY recording_id")
+        .map_err(|err| VaultStoreError::new("VAULT_MIGRATION_VERIFY_FAILED", err.to_string()))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| VaultStoreError::new("VAULT_MIGRATION_VERIFY_FAILED", err.to_string()))?;
+    let mut ids = HashSet::with_capacity(expected_count as usize);
+    for row in rows {
+        let recording_id = row.map_err(|err| {
+            VaultStoreError::new("VAULT_MIGRATION_VERIFY_FAILED", err.to_string())
+        })?;
+        if !valid_recording_id(&recording_id) || !ids.insert(recording_id) {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_VERIFY_FAILED",
+                "vault contained an invalid or duplicate recording identifier",
+            ));
+        }
+        if ids.len() > MAX_LEGACY_DELETE_REPAIR_ROWS as usize {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_VERIFY_FAILED",
+                "vault exceeded the bounded legacy deletion repair limit",
+            ));
+        }
+    }
+    if ids.len() != expected_count as usize {
+        return Err(VaultStoreError::new(
+            "VAULT_MIGRATION_VERIFY_FAILED",
+            "vault recording identifiers did not match the verified row count",
+        ));
+    }
+    Ok(ids)
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn legacy_deleted_recording_artifacts_absent(
+    root: &Path,
+    recording_id: &str,
+) -> Result<bool, VaultStoreError> {
+    let paths = [
+        root.join("recordings").join(recording_id),
+        root.join("deletions").join("data").join(recording_id),
+        root.join("deletions")
+            .join("pending")
+            .join(format!("{recording_id}.json")),
+        root.join("deletions")
+            .join("pending")
+            .join(format!("{recording_id}.json.tmp")),
+        root.join("recovery")
+            .join("quarantine")
+            .join(format!("{recording_id}.json")),
+    ];
+    for path in paths {
+        match fs::symlink_metadata(path) {
+            Ok(_) => return Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(VaultStoreError::new(
+                    "VAULT_MIGRATION_VERIFY_FAILED",
+                    error.to_string(),
+                ))
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn owned_recording_directory(path: PathBuf) -> Result<bool, VaultStoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_VERIFY_FAILED",
+                error.to_string(),
+            ))
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x400 != 0 {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn owned_regular_file(path: &Path) -> Result<bool, VaultStoreError> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(VaultStoreError::new(
+                "VAULT_MIGRATION_VERIFY_FAILED",
+                error.to_string(),
+            ))
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    if metadata.file_attributes() & 0x400 != 0 {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn valid_recording_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
 }
 
 #[cfg(feature = "sqlcipher-vault")]
@@ -1593,6 +1929,218 @@ mod tests {
         let opened = open_test_vault(&second_launch).expect("verify on second launch");
         assert_eq!(opened["migration"]["backupState"], "confirmed-removed");
         assert!(!backup.exists());
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    #[test]
+    fn deletion_during_migration_launch_retires_backup_and_reconciles_receipt() {
+        let root = temp_store().root;
+        let first_launch = VaultStore::with_root_and_launch_id(root.clone(), "launch-a");
+        let path = create_legacy_v1_vault(&first_launch, None);
+        let legacy_conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("open legacy vault for seeding");
+        for suffix in ["two", "three"] {
+            legacy_conn
+                .execute(
+                    "
+                    INSERT INTO candor_recordings (
+                        recording_id, state, chunk_count, total_bytes, stored_bytes,
+                        encrypted_at_rest, encrypted_chunk_count, created_at_ms, updated_at_ms
+                    ) VALUES (?1, 'finished', 1, 1, 1, 1, 1, 3, 3)
+                    ",
+                    [format!("legacy-recording-{suffix}")],
+                )
+                .expect("seed legacy recording");
+        }
+        drop(legacy_conn);
+
+        open_test_vault(&first_launch).expect("migrate on first launch");
+        let backup = vault_backup_path(&path);
+        assert!(backup.exists());
+        let mut conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("open migrated vault for delete");
+
+        let removed = first_launch
+            .delete_recording_index_from_opened_vault(&mut conn, &path, "legacy-recording")
+            .expect("delete migrated recording index");
+
+        assert_eq!(removed, 1);
+        assert!(!backup.exists());
+        let receipt = conn
+            .query_row(
+                "
+                SELECT backup_state, recording_count
+                FROM candor_migrations WHERE migration_id = ?1
+                ",
+                [V1_TO_V2_MIGRATION_ID],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read reconciled migration receipt");
+        assert_eq!(receipt, ("confirmed-removed".to_string(), 2));
+        drop(conn);
+
+        let second_launch = VaultStore::with_root_and_launch_id(root, "launch-b");
+        let reopened = open_test_vault(&second_launch).expect("reopen after migrated row deletion");
+        assert_eq!(reopened["migration"]["backupState"], "confirmed-removed");
+        let reopened_conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("inspect reopened vault");
+        assert_eq!(
+            recording_index_count(&reopened_conn).expect("reopened recording count"),
+            2
+        );
+        assert_eq!(
+            reopened_conn
+                .query_row(
+                    "SELECT COUNT(*) FROM candor_recordings WHERE recording_id = 'legacy-recording'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("deleted recording lookup"),
+            0
+        );
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    #[test]
+    fn retained_backup_repairs_one_completed_legacy_deletion_and_preserves_remaining_rows() {
+        let root = temp_store().root;
+        let first_launch = VaultStore::with_root_and_launch_id(root.clone(), "launch-a");
+        let path = create_legacy_v1_vault(&first_launch, None);
+        let legacy_conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("open legacy vault for seeding");
+        for suffix in ["two", "three"] {
+            legacy_conn
+                .execute(
+                    "
+                    INSERT INTO candor_recordings (
+                        recording_id, state, chunk_count, total_bytes, stored_bytes,
+                        encrypted_at_rest, encrypted_chunk_count, created_at_ms, updated_at_ms
+                    ) VALUES (?1, 'finished', 1, 1, 1, 1, 1, 3, 3)
+                    ",
+                    [format!("legacy-recording-{suffix}")],
+                )
+                .expect("seed legacy recording");
+        }
+        drop(legacy_conn);
+        for recording_id in ["legacy-recording-two", "legacy-recording-three"] {
+            fs::create_dir_all(root.join("recordings").join(recording_id))
+                .expect("seed remaining owned recording directory");
+        }
+
+        open_test_vault(&first_launch).expect("migrate first launch");
+        let backup = vault_backup_path(&path);
+        assert!(backup.exists());
+        let conn = open_keyed_connection(&path, TEST_PASSPHRASE)
+            .expect("open migrated vault for old delete");
+        conn.execute(
+            "DELETE FROM candor_recordings WHERE recording_id = 'legacy-recording'",
+            [],
+        )
+        .expect("simulate old completed index deletion");
+        drop(conn);
+        assert!(!root
+            .join("deletions")
+            .join("pending")
+            .join("legacy-recording.json")
+            .exists());
+
+        let second_launch = VaultStore::with_root_and_launch_id(root, "launch-b");
+        let reopened =
+            open_test_vault(&second_launch).expect("repair old retained-backup deletion");
+
+        assert_eq!(reopened["migration"]["backupState"], "confirmed-removed");
+        assert!(!backup.exists());
+        let reopened_conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("inspect repaired vault");
+        assert_eq!(
+            recording_index_count(&reopened_conn).expect("repaired recording count"),
+            2
+        );
+        let receipt = reopened_conn
+            .query_row(
+                "SELECT backup_state, recording_count FROM candor_migrations WHERE migration_id = ?1",
+                [V1_TO_V2_MIGRATION_ID],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read repaired migration receipt");
+        assert_eq!(receipt, ("confirmed-removed".to_string(), 2));
+        let remaining = bounded_recording_ids(&reopened_conn, 2).expect("read remaining ids");
+        assert_eq!(
+            remaining,
+            HashSet::from([
+                "legacy-recording-two".to_string(),
+                "legacy-recording-three".to_string(),
+            ])
+        );
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    #[test]
+    fn retained_backup_repair_rejects_missing_index_when_recording_data_remains() {
+        let root = temp_store().root;
+        let first_launch = VaultStore::with_root_and_launch_id(root.clone(), "launch-a");
+        let path = create_legacy_v1_vault(&first_launch, None);
+        fs::create_dir_all(root.join("recordings").join("legacy-recording"))
+            .expect("seed still-present recording directory");
+        open_test_vault(&first_launch).expect("migrate first launch");
+        let backup = vault_backup_path(&path);
+        let conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("open migrated vault for loss");
+        conn.execute(
+            "DELETE FROM candor_recordings WHERE recording_id = 'legacy-recording'",
+            [],
+        )
+        .expect("simulate unexplained index loss");
+        drop(conn);
+
+        let second_launch = VaultStore::with_root_and_launch_id(root, "launch-b");
+        let error = open_test_vault(&second_launch).expect_err("unexplained loss must fail closed");
+
+        assert_eq!(error.code, "VAULT_MIGRATION_VERIFY_FAILED");
+        assert!(backup.exists());
+        let failed_conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("inspect failed repair receipt");
+        let receipt = failed_conn
+            .query_row(
+                "SELECT backup_state, recording_count FROM candor_migrations WHERE migration_id = ?1",
+                [V1_TO_V2_MIGRATION_ID],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read unchanged migration receipt");
+        assert_eq!(receipt, ("retained".to_string(), 1));
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    #[test]
+    fn confirmed_backup_removal_allows_pre_fix_legitimate_deletion_on_reopen() {
+        let root = temp_store().root;
+        let first_launch = VaultStore::with_root_and_launch_id(root.clone(), "launch-a");
+        let path = create_legacy_v1_vault(&first_launch, None);
+        open_test_vault(&first_launch).expect("migrate first launch");
+
+        let second_launch = VaultStore::with_root_and_launch_id(root.clone(), "launch-b");
+        open_test_vault(&second_launch).expect("retire backup on second launch");
+        assert!(!vault_backup_path(&path).exists());
+
+        let conn = open_keyed_connection(&path, TEST_PASSPHRASE)
+            .expect("open migrated vault for pre-fix deletion");
+        conn.execute(
+            "DELETE FROM candor_recordings WHERE recording_id = 'legacy-recording'",
+            [],
+        )
+        .expect("simulate legitimate deletion from a pre-fix build");
+        drop(conn);
+
+        let third_launch = VaultStore::with_root_and_launch_id(root, "launch-c");
+        let reopened = open_test_vault(&third_launch)
+            .expect("confirmed backup removal should allow later legitimate deletion");
+        assert_eq!(reopened["migration"]["backupState"], "confirmed-removed");
+        let reopened_conn =
+            open_keyed_connection(&path, TEST_PASSPHRASE).expect("inspect reopened vault");
+        assert_eq!(
+            recording_index_count(&reopened_conn).expect("reopened recording count"),
+            0
+        );
     }
 
     #[cfg(feature = "sqlcipher-vault")]

@@ -1,11 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use chacha20poly1305::aead::{Aead, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce};
@@ -24,6 +25,7 @@ const JOB_STORE_FILE: &str = "background-jobs.bin";
 const JOB_STORE_BACKUP_FILE: &str = "background-jobs.bin.bak";
 const JOB_STORE_TEMP_FILE: &str = "background-jobs.bin.tmp";
 const JOB_STORE_MIGRATION_BACKUP_FILE: &str = "background-jobs.bin.migration.bak";
+const JOB_STORE_RECOVERY_TEMP_FILE: &str = ".background-jobs.recovery.tmp";
 const JOB_STORE_MAGIC: &[u8] = b"candor-jobs-v1\0";
 const JOB_STORE_AAD: &[u8] = b"candor-background-jobs-v1";
 const JOB_STORE_KEY_LABEL: &[u8] = b"candor-background-jobs-v1";
@@ -139,8 +141,17 @@ pub enum JobDescriptor {
         #[serde(default)]
         follow_up: Option<Box<JobDescriptor>>,
     },
+    Cleanup {
+        recording_id: String,
+        #[serde(default)]
+        fallback_to_raw: bool,
+        #[serde(default)]
+        follow_up: Option<Box<JobDescriptor>>,
+    },
     Recap {
         recording_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recap_template: Option<String>,
         #[serde(default)]
         mode: AiExecutionMode,
         #[serde(default)]
@@ -192,6 +203,7 @@ impl JobDescriptor {
     pub fn job_type(&self) -> &'static str {
         match self {
             Self::Transcription { .. } => "transcription",
+            Self::Cleanup { .. } => "transcript-cleanup",
             Self::Recap { .. } => "recap",
             Self::Ask { .. } => "ask",
             Self::Export { .. } => "export",
@@ -203,6 +215,7 @@ impl JobDescriptor {
     pub fn recording_id(&self) -> Option<&str> {
         match self {
             Self::Transcription { recording_id, .. }
+            | Self::Cleanup { recording_id, .. }
             | Self::Recap { recording_id, .. }
             | Self::Ask { recording_id, .. } => Some(recording_id),
             Self::Export { params } => params.get("recordingId").and_then(Value::as_str),
@@ -213,13 +226,17 @@ impl JobDescriptor {
     fn exclusive_inference(&self) -> bool {
         matches!(
             self,
-            Self::Transcription { .. } | Self::Recap { .. } | Self::Ask { .. }
+            Self::Transcription { .. }
+                | Self::Cleanup { .. }
+                | Self::Recap { .. }
+                | Self::Ask { .. }
         )
     }
 
     fn scheduling_priority(&self) -> u8 {
         match self {
             Self::Transcription { .. } => 60,
+            Self::Cleanup { .. } => 55,
             Self::Recap { .. } | Self::Ask { .. } => 50,
             Self::Export { .. } => 40,
             Self::DictionaryImport { .. } | Self::DictionaryIndex { .. } => 10,
@@ -228,7 +245,9 @@ impl JobDescriptor {
 
     fn follow_up(&self) -> Option<JobDescriptor> {
         match self {
-            Self::Transcription { follow_up, .. } => follow_up.as_deref().cloned(),
+            Self::Transcription { follow_up, .. } | Self::Cleanup { follow_up, .. } => {
+                follow_up.as_deref().cloned()
+            }
             _ => None,
         }
     }
@@ -479,6 +498,27 @@ impl JobEntry {
     }
 }
 
+fn job_entry_recording_id(entry: &JobEntry) -> Option<&str> {
+    entry
+        .descriptor
+        .as_ref()
+        .and_then(JobDescriptor::recording_id)
+        .or_else(|| {
+            entry
+                .result
+                .as_ref()
+                .and_then(|value| value.get("recordingId"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            entry
+                .error
+                .as_ref()
+                .and_then(|value| value.get("recordingId"))
+                .and_then(Value::as_str)
+        })
+}
+
 #[derive(Clone)]
 struct JobPersistence {
     root: PathBuf,
@@ -490,6 +530,7 @@ struct JobPersistence {
 struct JobManagerInner {
     protocol_version: &'static str,
     jobs: Mutex<HashMap<String, JobEntry>>,
+    deleting_recordings: Mutex<HashSet<String>>,
     workers: Mutex<HashSet<String>>,
     inference_gate: Mutex<()>,
     recording_active: AtomicBool,
@@ -553,10 +594,34 @@ enum WorkerGate {
     PausedForShutdown,
 }
 
+struct WorkerRegistration {
+    manager: JobManager,
+    job_id: String,
+}
+
+impl WorkerRegistration {
+    fn new(manager: JobManager, job_id: String) -> Self {
+        Self { manager, job_id }
+    }
+}
+
+impl Drop for WorkerRegistration {
+    fn drop(&mut self) {
+        self.manager.release_worker(&self.job_id);
+    }
+}
+
 impl JobManager {
+    /// Creates a manager with no durable job store. This is used by the
+    /// read-only automation core so merely listing meetings cannot read,
+    /// recover, or rewrite the desktop process's background-job state.
+    pub fn in_memory(protocol_version: &'static str) -> Self {
+        Self::build(protocol_version, None, None)
+    }
+
     #[cfg(test)]
     pub fn new(protocol_version: &'static str) -> Self {
-        Self::build(protocol_version, None, None)
+        Self::in_memory(protocol_version)
     }
 
     pub fn with_roots_and_staging(
@@ -637,6 +702,7 @@ impl JobManager {
             inner: Arc::new(JobManagerInner {
                 protocol_version,
                 jobs: Mutex::new(jobs),
+                deleting_recordings: Mutex::new(HashSet::new()),
                 workers: Mutex::new(HashSet::new()),
                 inference_gate: Mutex::new(()),
                 recording_active: AtomicBool::new(false),
@@ -664,7 +730,12 @@ impl JobManager {
         F: FnOnce(JobContext) -> Result<Value, JobFailure> + Send + 'static,
     {
         let (job_id, accepted) = self.insert_job(job_type, exclusive_inference, None, None)?;
-        self.spawn_once(job_id, exclusive_inference, task);
+        self.spawn_once(
+            job_id,
+            job_type == "media-import",
+            exclusive_inference,
+            task,
+        );
         Ok(accepted)
     }
 
@@ -697,6 +768,24 @@ impl JobManager {
         if descriptor.is_some() {
             self.require_persistence_ready()?;
         }
+        let _deletion_guard =
+            if let Some(recording_id) = descriptor.as_ref().and_then(JobDescriptor::recording_id) {
+                let deleting = self.inner.deleting_recordings.lock().map_err(|_| {
+                    JobManagerError::new(
+                        "JOB_RECORDING_DELETE_GATE_UNAVAILABLE",
+                        "recording deletion coordination is unavailable",
+                    )
+                })?;
+                if deleting.contains(recording_id) {
+                    return Err(JobManagerError::new(
+                        "JOB_RECORDING_DELETION_IN_PROGRESS",
+                        "new local work cannot start for a recording being deleted",
+                    ));
+                }
+                Some(deleting)
+            } else {
+                None
+            };
         let job_id = new_job_id()?;
         let created_at = timestamp();
         let created_at_ms = now_ms();
@@ -877,6 +966,105 @@ impl JobManager {
         }))
     }
 
+    pub fn begin_recording_deletion(&self, recording_id: &str) -> Result<Value, JobManagerError> {
+        let mut deleting = self.inner.deleting_recordings.lock().map_err(|_| {
+            JobManagerError::new(
+                "JOB_RECORDING_DELETE_GATE_UNAVAILABLE",
+                "recording deletion coordination is unavailable",
+            )
+        })?;
+        if deleting.contains(recording_id) {
+            return Ok(json!({
+                "recordingId": recording_id,
+                "deleteGateActive": true,
+                "activeJobCount": 0,
+                "rawPathExposed": false
+            }));
+        }
+        let jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        let active_job_count = jobs
+            .values()
+            .filter(|entry| {
+                job_entry_recording_id(entry) == Some(recording_id) && !entry.state.terminal()
+            })
+            .count();
+        if active_job_count > 0 {
+            return Err(JobManagerError::new(
+                "JOB_RECORDING_BUSY",
+                "local work for this recording must finish or be cancelled before deletion",
+            ));
+        }
+        drop(jobs);
+        deleting.insert(recording_id.to_string());
+        Ok(json!({
+            "recordingId": recording_id,
+            "deleteGateActive": true,
+            "activeJobCount": 0,
+            "rawPathExposed": false
+        }))
+    }
+
+    pub fn recover_recording_deletion(&self, recording_id: &str) -> Result<(), JobManagerError> {
+        self.inner
+            .deleting_recordings
+            .lock()
+            .map_err(|_| {
+                JobManagerError::new(
+                    "JOB_RECORDING_DELETE_GATE_UNAVAILABLE",
+                    "recording deletion coordination is unavailable",
+                )
+            })?
+            .insert(recording_id.to_string());
+        Ok(())
+    }
+
+    pub fn purge_recording_jobs(&self, recording_id: &str) -> Result<Value, JobManagerError> {
+        let deleting = self.inner.deleting_recordings.lock().map_err(|_| {
+            JobManagerError::new(
+                "JOB_RECORDING_DELETE_GATE_UNAVAILABLE",
+                "recording deletion coordination is unavailable",
+            )
+        })?;
+        if !deleting.contains(recording_id) {
+            return Err(JobManagerError::new(
+                "JOB_RECORDING_DELETE_GATE_REQUIRED",
+                "recording job data cannot be purged outside a deletion transaction",
+            ));
+        }
+        let removed_count = {
+            let mut jobs = self.inner.jobs.lock().map_err(|_| {
+                JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+            })?;
+            let before = jobs.len();
+            jobs.retain(|_, entry| job_entry_recording_id(entry) != Some(recording_id));
+            before.saturating_sub(jobs.len())
+        };
+        drop(deleting);
+        self.persist_without_prior_state_artifacts()?;
+        Ok(json!({
+            "recordingId": recording_id,
+            "purgedJobCount": removed_count,
+            "persisted": self.inner.persistence.is_some(),
+            "priorStateArtifactsRemoved": true,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    pub fn complete_recording_deletion(&self, recording_id: &str) {
+        self.inner
+            .deleting_recordings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(recording_id);
+    }
+
+    pub fn abort_recording_deletion(&self, recording_id: &str) {
+        self.complete_recording_deletion(recording_id);
+    }
+
     pub fn has_active_type(&self, job_type: &str) -> Result<bool, JobManagerError> {
         let jobs = self.inner.jobs.lock().map_err(|_| {
             JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
@@ -1030,6 +1218,12 @@ impl JobManager {
             let entry = jobs
                 .get_mut(job_id)
                 .ok_or_else(|| JobManagerError::new("JOB_NOT_FOUND", "local job was not found"))?;
+            if entry_has_unresolved_media_import_cleanup(entry) {
+                return Err(JobManagerError::new(
+                    "MEDIA_IMPORT_CLEANUP_UNRESOLVED",
+                    "media import cleanup must be reconciled by recording recovery before this job can be retried",
+                ));
+            }
             if !matches!(
                 entry.state,
                 JobState::Failed | JobState::Cancelled | JobState::Paused
@@ -1076,6 +1270,12 @@ impl JobManager {
                 return Err(JobManagerError::new(
                     "JOB_NOT_TERMINAL",
                     "a running local job cannot be acknowledged",
+                ));
+            }
+            if entry_has_unresolved_media_import_cleanup(entry) {
+                return Err(JobManagerError::new(
+                    "MEDIA_IMPORT_CLEANUP_UNRESOLVED",
+                    "media import cleanup must be reconciled by recording recovery before this job can be acknowledged",
                 ));
             }
             jobs.remove(job_id).is_some()
@@ -1218,6 +1418,7 @@ impl JobManager {
                 .iter()
                 .filter(|(_, entry)| {
                     entry.state.terminal()
+                        && !entry_has_unresolved_media_import_cleanup(entry)
                         && now.saturating_sub(entry.updated_at_ms) >= TERMINAL_JOB_RETENTION_MS
                 })
                 .map(|(job_id, _)| job_id.clone())
@@ -1300,34 +1501,47 @@ impl JobManager {
 
     pub fn set_recording_active(&self, active: bool) {
         self.inner.recording_active.store(active, Ordering::SeqCst);
-        let mut changed = Vec::new();
         if active {
-            let mut jobs = self
-                .inner
-                .jobs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for entry in jobs
-                .values_mut()
-                .filter(|entry| entry.exclusive_inference && !entry.state.terminal())
-            {
-                if entry.cancel_requested {
-                    continue;
-                }
-                entry.preempt_requested = true;
-                entry.cancellation.store(true, Ordering::SeqCst);
-                entry.updated_at = timestamp();
-                entry.updated_at_ms = now_ms();
-                if matches!(entry.state, JobState::Running | JobState::Cancelling) {
-                    entry.state = JobState::Cancelling;
-                    entry.stage = Some("yielding-to-recording".to_string());
-                } else {
-                    entry.state = JobState::Paused;
-                    entry.stage = Some("recording-priority".to_string());
-                }
-                changed.push(entry.job_id.clone());
-            }
+            self.signal_recording_priority();
+        } else {
+            self.persist_best_effort();
+            self.inner.priority_changed.notify_all();
         }
+    }
+
+    fn signal_recording_priority(&self) {
+        let mut changed = Vec::new();
+        let mut jobs = self
+            .inner
+            .jobs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for entry in jobs
+            .values_mut()
+            .filter(|entry| entry.exclusive_inference && !entry.state.terminal())
+        {
+            if entry.cancel_requested {
+                continue;
+            }
+            entry.preempt_requested = true;
+            entry.cancellation.store(true, Ordering::SeqCst);
+            entry.updated_at = timestamp();
+            entry.updated_at_ms = now_ms();
+            if matches!(entry.state, JobState::Running | JobState::Cancelling) {
+                entry.state = JobState::Cancelling;
+                entry.stage = Some("yielding-to-recording".to_string());
+            } else if entry.job_type == "media-import" {
+                // Media imports are one-shot jobs backed only by the selected source.
+                // Once recording wins priority, a queued import must terminate instead
+                // of silently resuming after the recording ends.
+                finish_entry_cancelled(entry);
+            } else {
+                entry.state = JobState::Paused;
+                entry.stage = Some("recording-priority".to_string());
+            }
+            changed.push(entry.job_id.clone());
+        }
+        drop(jobs);
         self.persist_best_effort();
         self.inner.priority_changed.notify_all();
         for job_id in changed {
@@ -1335,7 +1549,325 @@ impl JobManager {
         }
     }
 
-    fn spawn_once<F>(&self, job_id: String, exclusive_inference: bool, task: F)
+    /// Acquires recording priority and waits until every preempted media-import
+    /// worker has returned with a verified terminal outcome. The returned bool
+    /// is true only when this call changed the inactive state to active. Callers
+    /// must release priority after a failed capture start only when it is true.
+    pub fn begin_recording_priority(
+        &self,
+        media_import_cleanup_timeout: Duration,
+    ) -> Result<bool, JobManagerError> {
+        if self
+            .inner
+            .recording_active
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(false);
+        }
+        let targets = match self.media_import_barrier_targets() {
+            Ok(targets) => targets,
+            Err(error) => {
+                self.set_recording_active(false);
+                return Err(error);
+            }
+        };
+        self.signal_recording_priority();
+        let deadline = Instant::now()
+            .checked_add(media_import_cleanup_timeout)
+            .unwrap_or_else(Instant::now);
+        let result = (|| loop {
+            if !self.media_import_target_worker_active(&targets)? {
+                self.verify_media_import_barrier_targets(&targets)?;
+                return Ok(true);
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(JobManagerError::new(
+                        "MEDIA_IMPORT_CLEANUP_TIMEOUT",
+                        "recording could not start because a cancelled media import was still cleaning up",
+                    ));
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let guard = self
+                .inner
+                .priority_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _ = self
+                .inner
+                .priority_changed
+                .wait_timeout(guard, remaining.min(Duration::from_millis(25)));
+        })();
+        if result.is_err() {
+            self.set_recording_active(false);
+        }
+        result
+    }
+
+    /// Resolves persistent media-import cleanup failures only after the
+    /// recording store completed a full, pathless recovery scan without any
+    /// quarantined recordings or pending deletions. The failed job remains as
+    /// an audit record, but no longer blocks recording once this proof is
+    /// durably stored.
+    pub fn resolve_media_import_cleanup_after_recovery(
+        &self,
+        recovery: &Value,
+    ) -> Result<Value, JobManagerError> {
+        let recovery_object = recovery.as_object().ok_or_else(|| {
+            JobManagerError::new(
+                "MEDIA_IMPORT_RECOVERY_PROOF_INVALID",
+                "recording recovery did not return a valid cleanup proof",
+            )
+        })?;
+        let recovered_count = recovery_object
+            .get("recoveredCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                JobManagerError::new(
+                    "MEDIA_IMPORT_RECOVERY_PROOF_INVALID",
+                    "recording recovery omitted its recovered recording count",
+                )
+            })?;
+        let quarantined_count = recovery_object
+            .get("quarantinedCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                JobManagerError::new(
+                    "MEDIA_IMPORT_RECOVERY_PROOF_INVALID",
+                    "recording recovery omitted its quarantined recording count",
+                )
+            })?;
+        let pending_deletion_count = recovery_object
+            .get("pendingDeletionCount")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                JobManagerError::new(
+                    "MEDIA_IMPORT_RECOVERY_PROOF_INVALID",
+                    "recording recovery omitted its pending deletion count",
+                )
+            })?;
+        if recovery_object
+            .get("rawPathExposed")
+            .and_then(Value::as_bool)
+            != Some(false)
+        {
+            return Err(JobManagerError::new(
+                "MEDIA_IMPORT_RECOVERY_PROOF_INVALID",
+                "recording recovery did not provide a pathless cleanup proof",
+            ));
+        }
+
+        if quarantined_count != 0 || pending_deletion_count != 0 {
+            return Ok(json!({
+                "resolved": false,
+                "resolvedCount": 0,
+                "recoveredCount": recovered_count,
+                "quarantinedCount": quarantined_count,
+                "pendingDeletionCount": pending_deletion_count,
+                "resolution": "recording-store-recovery-incomplete",
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }));
+        }
+
+        let _write_guard = if self.inner.persistence.is_some() {
+            Some(self.inner.persistence_lock.lock().map_err(|_| {
+                JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job storage is unavailable")
+            })?)
+        } else {
+            None
+        };
+        let mut jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        let resolved_at = timestamp();
+        let resolved_at_ms = now_ms();
+        let mut prior_values = Vec::new();
+        for (job_id, entry) in jobs.iter_mut() {
+            if !entry_has_unresolved_media_import_cleanup(entry) {
+                continue;
+            }
+            let Some(error) = entry.error.as_mut().and_then(Value::as_object_mut) else {
+                continue;
+            };
+            prior_values.push((
+                job_id.clone(),
+                Value::Object(error.clone()),
+                entry.updated_at.clone(),
+                entry.updated_at_ms,
+            ));
+            error.insert("cleanupResolved".to_string(), json!(true));
+            error.insert(
+                "cleanupResolution".to_string(),
+                json!("recording-store-recovery"),
+            );
+            entry.updated_at = resolved_at.clone();
+            entry.updated_at_ms = resolved_at_ms;
+        }
+        let resolved_job_ids = prior_values
+            .iter()
+            .map(|(job_id, _, _, _)| job_id.clone())
+            .collect::<HashSet<_>>();
+
+        if resolved_job_ids.is_empty() {
+            drop(jobs);
+            drop(_write_guard);
+            return Ok(json!({
+                "resolved": true,
+                "resolvedCount": 0,
+                "recoveredCount": recovered_count,
+                "quarantinedCount": 0,
+                "pendingDeletionCount": 0,
+                "resolution": "recording-store-recovery",
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }));
+        }
+
+        if let Some(config) = self.inner.persistence.as_ref() {
+            let document = JobStoreDocument {
+                schema_version: JOB_STORE_SCHEMA_VERSION,
+                jobs: jobs.values().map(JobEntry::persisted).collect(),
+            };
+            if let Err(error) = write_job_document(config, &document) {
+                let durable_resolution = read_job_document(config).is_ok_and(|persisted| {
+                    resolved_job_ids.iter().all(|job_id| {
+                        persisted.jobs.iter().any(|entry| {
+                            entry.job_id == *job_id
+                                && entry
+                                    .error
+                                    .as_ref()
+                                    .and_then(|error| error.get("cleanupResolved"))
+                                    .and_then(Value::as_bool)
+                                    == Some(true)
+                        })
+                    })
+                });
+                if !durable_resolution {
+                    for (job_id, error, updated_at, updated_at_ms) in &prior_values {
+                        if let Some(entry) = jobs.get_mut(job_id) {
+                            entry.error = Some(error.clone());
+                            entry.updated_at = updated_at.clone();
+                            entry.updated_at_ms = *updated_at_ms;
+                        }
+                    }
+                    drop(jobs);
+                    drop(_write_guard);
+                    self.remember_persistence_error(error.clone());
+                    return Err(error);
+                }
+            }
+        }
+        drop(jobs);
+        drop(_write_guard);
+
+        if self.inner.persistence.is_some() {
+            *self
+                .inner
+                .persistence_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        }
+
+        for job_id in &resolved_job_ids {
+            self.emit(job_id);
+        }
+        self.inner.priority_changed.notify_all();
+        Ok(json!({
+            "resolved": true,
+            "resolvedCount": resolved_job_ids.len(),
+            "recoveredCount": recovered_count,
+            "quarantinedCount": 0,
+            "pendingDeletionCount": 0,
+            "resolution": "recording-store-recovery",
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    fn media_import_barrier_targets(&self) -> Result<HashSet<String>, JobManagerError> {
+        let jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        Ok(jobs
+            .values()
+            .filter(|entry| {
+                entry.job_type == "media-import"
+                    && (!entry.state.terminal() || entry_has_unresolved_media_import_cleanup(entry))
+            })
+            .map(|entry| entry.job_id.clone())
+            .collect())
+    }
+
+    fn media_import_target_worker_active(
+        &self,
+        targets: &HashSet<String>,
+    ) -> Result<bool, JobManagerError> {
+        let workers = self.inner.workers.lock().map_err(|_| {
+            JobManagerError::new(
+                "JOB_STORE_UNAVAILABLE",
+                "local job worker coordination is unavailable",
+            )
+        })?;
+        Ok(targets.iter().any(|job_id| workers.contains(job_id)))
+    }
+
+    fn verify_media_import_barrier_targets(
+        &self,
+        targets: &HashSet<String>,
+    ) -> Result<(), JobManagerError> {
+        let jobs = self.inner.jobs.lock().map_err(|_| {
+            JobManagerError::new("JOB_STORE_UNAVAILABLE", "local job store is unavailable")
+        })?;
+        for job_id in targets {
+            let Some(entry) = jobs.get(job_id) else {
+                return Err(JobManagerError::new(
+                    "MEDIA_IMPORT_CLEANUP_UNCONFIRMED",
+                    "recording could not start because media import cleanup could not be confirmed",
+                ));
+            };
+            match entry.state {
+                JobState::Completed | JobState::Cancelled => {}
+                JobState::Failed => {
+                    let code = entry
+                        .error
+                        .as_ref()
+                        .and_then(|error| error.get("code"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("MEDIA_IMPORT_CLEANUP_UNCONFIRMED");
+                    let message = entry
+                        .error
+                        .as_ref()
+                        .and_then(|error| error.get("message"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("media import cleanup failed before recording could start");
+                    return Err(match code {
+                        "MEDIA_IMPORT_CLEANUP_FAILED" => {
+                            JobManagerError::new("MEDIA_IMPORT_CLEANUP_FAILED", message)
+                        }
+                        "MEDIA_IMPORT_WORKER_PANIC" => {
+                            JobManagerError::new("MEDIA_IMPORT_WORKER_PANIC", message)
+                        }
+                        _ => JobManagerError::new(
+                            "MEDIA_IMPORT_CLEANUP_UNCONFIRMED",
+                            format!("media import ended with {code} before recording could start"),
+                        ),
+                    });
+                }
+                JobState::Queued | JobState::Running | JobState::Paused | JobState::Cancelling => {
+                    return Err(JobManagerError::new(
+                        "MEDIA_IMPORT_CLEANUP_UNCONFIRMED",
+                        "recording could not start because media import cleanup did not reach a terminal state",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn spawn_once<F>(&self, job_id: String, media_import: bool, exclusive_inference: bool, task: F)
     where
         F: FnOnce(JobContext) -> Result<Value, JobFailure> + Send + 'static,
     {
@@ -1344,78 +1876,92 @@ impl JobManager {
         }
         let manager = self.clone();
         thread::spawn(move || {
-            let gate = manager.wait_for_priority(&job_id, exclusive_inference);
-            if !matches!(gate, WorkerGate::Ready) {
-                if matches!(gate, WorkerGate::Cancelled) {
-                    manager.finish_cancelled(&job_id);
+            let _worker_registration = WorkerRegistration::new(manager.clone(), job_id.clone());
+            let execution = catch_unwind(AssertUnwindSafe(|| {
+                let gate = manager.wait_for_priority(&job_id, exclusive_inference);
+                if !matches!(gate, WorkerGate::Ready) {
+                    if matches!(gate, WorkerGate::Cancelled) {
+                        manager.finish_cancelled(&job_id);
+                    }
+                    return;
                 }
-                manager.release_worker(&job_id);
-                return;
-            }
-            let Some(context) = manager.context(&job_id) else {
-                manager.release_worker(&job_id);
-                return;
-            };
-            let result = if exclusive_inference {
-                match manager.inner.inference_gate.lock() {
-                    Ok(_guard) => {
-                        if manager.inner.recording_active.load(Ordering::SeqCst) {
-                            Err(JobFailure::new(
+                let Some(context) = manager.context(&job_id) else {
+                    return;
+                };
+                let result = if exclusive_inference {
+                    match manager.inner.inference_gate.lock() {
+                        Ok(_guard) => {
+                            if manager.inner.recording_active.load(Ordering::SeqCst) {
+                                Err(JobFailure::new(
+                                    "RECORDING_PRIORITY",
+                                    "local work yielded to an active recording",
+                                    true,
+                                ))
+                            } else {
+                                if manager.set_running(&job_id) {
+                                    task(context.clone())
+                                } else {
+                                    Err(JobFailure::new(
+                                        "JOB_CANCELLED",
+                                        "local work was cancelled before it started",
+                                        false,
+                                    ))
+                                }
+                            }
+                        }
+                        Err(_) => Err(JobFailure::new(
+                            "LOCAL_MODEL_SCHEDULER_UNAVAILABLE",
+                            "local model scheduling is unavailable",
+                            true,
+                        )),
+                    }
+                } else {
+                    if manager.set_running(&job_id) {
+                        task(context.clone())
+                    } else {
+                        Err(JobFailure::new(
+                            "JOB_CANCELLED",
+                            "local work was cancelled before it started",
+                            false,
+                        ))
+                    }
+                };
+
+                if media_import && media_import_result_committed(&result) {
+                    if let Ok(value) = result {
+                        manager.finish_committed_media_import(&job_id, value);
+                    }
+                } else if media_import && media_import_result_requires_recovery(&result) {
+                    if let Err(error) = result {
+                        manager.finish_failed_after_preemption(&job_id, error);
+                    }
+                } else if media_import && manager.preempt_requested(&job_id) {
+                    manager.finish_preempted_media_import(&job_id, result);
+                } else if manager.user_cancel_requested(&job_id) || context.cancelled() {
+                    if manager.preempt_requested(&job_id) {
+                        manager.finish_failed(
+                            &job_id,
+                            JobFailure::new(
                                 "RECORDING_PRIORITY",
                                 "local work yielded to an active recording",
                                 true,
-                            ))
-                        } else {
-                            if manager.set_running(&job_id) {
-                                task(context.clone())
-                            } else {
-                                Err(JobFailure::new(
-                                    "JOB_CANCELLED",
-                                    "local work was cancelled before it started",
-                                    false,
-                                ))
-                            }
+                            ),
+                        );
+                    } else {
+                        manager.finish_cancelled(&job_id);
+                    }
+                } else {
+                    match result {
+                        Ok(value) => {
+                            manager.finish_completed(&job_id, value);
                         }
+                        Err(error) => manager.finish_failed(&job_id, error),
                     }
-                    Err(_) => Err(JobFailure::new(
-                        "LOCAL_MODEL_SCHEDULER_UNAVAILABLE",
-                        "local model scheduling is unavailable",
-                        true,
-                    )),
                 }
-            } else {
-                if manager.set_running(&job_id) {
-                    task(context.clone())
-                } else {
-                    Err(JobFailure::new(
-                        "JOB_CANCELLED",
-                        "local work was cancelled before it started",
-                        false,
-                    ))
-                }
-            };
-            if manager.user_cancel_requested(&job_id) || context.cancelled() {
-                if manager.preempt_requested(&job_id) {
-                    manager.finish_failed(
-                        &job_id,
-                        JobFailure::new(
-                            "RECORDING_PRIORITY",
-                            "local work yielded to an active recording",
-                            true,
-                        ),
-                    );
-                } else {
-                    manager.finish_cancelled(&job_id);
-                }
-            } else {
-                match result {
-                    Ok(value) => {
-                        manager.finish_completed(&job_id, value);
-                    }
-                    Err(error) => manager.finish_failed(&job_id, error),
-                }
+            }));
+            if execution.is_err() {
+                manager.finish_worker_panicked(&job_id, media_import);
             }
-            manager.release_worker(&job_id);
         });
     }
 
@@ -1732,6 +2278,89 @@ impl JobManager {
         completed
     }
 
+    fn finish_committed_media_import(&self, job_id: &str, result: Value) {
+        self.mutate(job_id, |entry| {
+            if entry.state == JobState::Completed {
+                return;
+            }
+            entry.state = JobState::Completed;
+            entry.stage = Some("completed".to_string());
+            entry.progress = Some(JobProgress {
+                completed: 100,
+                total: Some(100),
+                unit: Some("percent".to_string()),
+            });
+            entry.result = Some(result);
+            entry.error = None;
+            entry.cancel_requested = false;
+            entry.preempt_requested = false;
+            entry.shutdown_pause_requested = false;
+            entry.updated_at = timestamp();
+            entry.updated_at_ms = now_ms();
+        });
+    }
+
+    fn finish_preempted_media_import(&self, job_id: &str, result: Result<Value, JobFailure>) {
+        match result {
+            Ok(_) => self.finish_cancelled(job_id),
+            Err(error)
+                if matches!(
+                    error.code,
+                    "MEDIA_IMPORT_CANCELLED" | "RECORDING_PRIORITY" | "JOB_CANCELLED"
+                ) =>
+            {
+                self.finish_cancelled(job_id)
+            }
+            Err(error) => self.finish_failed_after_preemption(job_id, error),
+        }
+    }
+
+    fn finish_worker_panicked(&self, job_id: &str, media_import: bool) {
+        let failure = JobFailure::new(
+            if media_import {
+                "MEDIA_IMPORT_WORKER_PANIC"
+            } else {
+                "JOB_WORKER_PANIC"
+            },
+            if media_import {
+                "media import stopped unexpectedly before cleanup could be confirmed"
+            } else {
+                "local work stopped unexpectedly"
+            },
+            false,
+        );
+        if media_import {
+            self.finish_failed_after_preemption(job_id, failure);
+        } else {
+            self.finish_failed(job_id, failure);
+        }
+    }
+
+    fn finish_failed_after_preemption(&self, job_id: &str, failure: JobFailure) {
+        self.mutate(job_id, |entry| {
+            if entry.state == JobState::Completed {
+                return;
+            }
+            entry.state = JobState::Failed;
+            entry.stage = Some("failed".to_string());
+            entry.result = None;
+            entry.result_persisted = false;
+            entry.error = Some(job_error_value(
+                &entry.job_id,
+                &entry.job_type,
+                JobFailure {
+                    retryable: false,
+                    ..failure
+                },
+            ));
+            entry.cancel_requested = false;
+            entry.preempt_requested = false;
+            entry.shutdown_pause_requested = false;
+            entry.updated_at = timestamp();
+            entry.updated_at_ms = now_ms();
+        });
+    }
+
     fn finish_failed(&self, job_id: &str, failure: JobFailure) {
         self.mutate(job_id, |entry| {
             if entry.cancel_requested
@@ -1831,6 +2460,7 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(job_id);
+        self.inner.priority_changed.notify_all();
     }
 
     fn emit(&self, job_id: &str) {
@@ -1875,6 +2505,14 @@ impl JobManager {
     }
 
     fn persist(&self) -> Result<(), JobManagerError> {
+        self.persist_internal(false)
+    }
+
+    fn persist_without_prior_state_artifacts(&self) -> Result<(), JobManagerError> {
+        self.persist_internal(true)
+    }
+
+    fn persist_internal(&self, remove_prior_state_artifacts: bool) -> Result<(), JobManagerError> {
         let Some(config) = self.inner.persistence.as_ref() else {
             return Ok(());
         };
@@ -1890,7 +2528,11 @@ impl JobManager {
                 jobs: jobs.values().map(JobEntry::persisted).collect(),
             }
         };
-        write_job_document(config, &document)
+        write_job_document(config, &document)?;
+        if remove_prior_state_artifacts {
+            remove_job_prior_state_artifacts(config)?;
+        }
+        Ok(())
     }
 
     fn persist_best_effort(&self) {
@@ -1913,6 +2555,46 @@ impl JobManager {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error);
     }
+}
+
+fn media_import_result_committed(result: &Result<Value, JobFailure>) -> bool {
+    result.as_ref().is_ok_and(|value| {
+        value
+            .get("imported")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+fn media_import_failure_requires_recovery(code: &str) -> bool {
+    code == "MEDIA_IMPORT_WORKER_PANIC"
+        || (code.starts_with("MEDIA_IMPORT_")
+            && (code.contains("CLEANUP") || code.contains("ROLLBACK")))
+}
+
+fn media_import_result_requires_recovery(result: &Result<Value, JobFailure>) -> bool {
+    result
+        .as_ref()
+        .err()
+        .is_some_and(|failure| media_import_failure_requires_recovery(failure.code))
+}
+
+fn entry_has_unresolved_media_import_cleanup(entry: &JobEntry) -> bool {
+    if entry.job_type != "media-import" || entry.state != JobState::Failed {
+        return false;
+    }
+    let Some(error) = entry.error.as_ref() else {
+        return false;
+    };
+    let resolved = error
+        .get("cleanupResolved")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !resolved
+        && error
+            .get("code")
+            .and_then(Value::as_str)
+            .is_some_and(media_import_failure_requires_recovery)
 }
 
 fn finish_entry_cancelled(entry: &mut JobEntry) {
@@ -2109,7 +2791,25 @@ fn validate_current_descriptor(
                     )
                 })?;
         }
-        JobDescriptor::Recap { .. }
+        JobDescriptor::Recap { recap_template, .. } => {
+            if recap_template.as_ref().is_some_and(|template| {
+                template.is_empty()
+                    || template.len() > 4_096
+                    || template.chars().any(|character| {
+                        character == '\0'
+                            || (character.is_control()
+                                && character != '\n'
+                                && character != '\r'
+                                && character != '\t')
+                    })
+            }) {
+                return Err(JobManagerError::new(
+                    "JOB_STORE_RECAP_TEMPLATE_INVALID",
+                    "saved recap template metadata is invalid",
+                ));
+            }
+        }
+        JobDescriptor::Cleanup { .. }
         | JobDescriptor::Ask { .. }
         | JobDescriptor::Export { .. }
         | JobDescriptor::DictionaryIndex { .. } => {}
@@ -2124,7 +2824,8 @@ fn migrate_descriptor(
     staged_tokens: &mut Vec<String>,
 ) -> Result<(), JobManagerError> {
     match descriptor {
-        JobDescriptor::Transcription { follow_up, .. } => {
+        JobDescriptor::Transcription { follow_up, .. }
+        | JobDescriptor::Cleanup { follow_up, .. } => {
             if let Some(follow_up) = follow_up.as_deref_mut() {
                 migrate_descriptor(follow_up, staging, true, staged_tokens)?;
             }
@@ -2311,7 +3012,7 @@ fn restore_job_store_backup(config: &JobPersistence, backup: &Path) -> Result<()
         )
     })?;
     let target = config.root.join(JOB_STORE_FILE);
-    let temporary = config.root.join(".background-jobs.recovery.tmp");
+    let temporary = config.root.join(JOB_STORE_RECOVERY_TEMP_FILE);
     let _ = fs::remove_file(&temporary);
     fs::copy(backup, &temporary).map_err(|_| {
         JobManagerError::new(
@@ -2451,7 +3152,47 @@ fn write_job_document(
             "local job state could not be committed",
         ));
     }
-    let _ = fs::remove_file(&backup);
+    if backup.exists() {
+        fs::remove_file(&backup).map_err(|_| {
+            JobManagerError::new(
+                "JOB_STORE_BACKUP_CLEANUP_FAILED",
+                "the prior local job backup could not be removed after commit",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn remove_job_prior_state_artifacts(config: &JobPersistence) -> Result<(), JobManagerError> {
+    for name in [
+        JOB_STORE_BACKUP_FILE,
+        JOB_STORE_MIGRATION_BACKUP_FILE,
+        JOB_STORE_TEMP_FILE,
+        JOB_STORE_RECOVERY_TEMP_FILE,
+    ] {
+        let artifact = config.root.join(name);
+        if !artifact.exists() {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(&artifact).map_err(|_| {
+            JobManagerError::new(
+                "JOB_STORE_ARTIFACT_CLEANUP_FAILED",
+                "a prior local job artifact could not be inspected",
+            )
+        })?;
+        if !metadata.file_type().is_file() {
+            return Err(JobManagerError::new(
+                "JOB_STORE_ARTIFACT_CLEANUP_FAILED",
+                "a prior local job artifact was not a regular file",
+            ));
+        }
+        fs::remove_file(&artifact).map_err(|_| {
+            JobManagerError::new(
+                "JOB_STORE_ARTIFACT_CLEANUP_FAILED",
+                "a prior local job artifact could not be removed",
+            )
+        })?;
+    }
     Ok(())
 }
 
@@ -2510,6 +3251,10 @@ fn safe_failure_message(job_type: &str, _message: &str) -> String {
         "transcription" => {
             "Local transcription could not be completed. Your recording is safe.".to_string()
         }
+        "transcript-cleanup" => {
+            "Local transcript cleanup could not be completed. The original transcript is safe."
+                .to_string()
+        }
         "recap" | "ask" => {
             "Local AI could not complete this request. Your meeting data is safe.".to_string()
         }
@@ -2529,6 +3274,7 @@ fn safe_failure_message(job_type: &str, _message: &str) -> String {
 fn job_type_priority(job_type: &str) -> u8 {
     match job_type {
         "transcription" => 60,
+        "transcript-cleanup" => 55,
         "recap" | "ask" => 50,
         "export" => 40,
         "local-ai-benchmark" => 20,
@@ -2573,6 +3319,15 @@ mod tests {
             thread::sleep(Duration::from_millis(5));
         }
         panic!("job did not reach state {state}");
+    }
+
+    fn successful_recording_recovery() -> Value {
+        json!({
+            "recoveredCount": 0,
+            "quarantinedCount": 0,
+            "pendingDeletionCount": 0,
+            "rawPathExposed": false
+        })
     }
 
     fn executor(attempts: Arc<AtomicUsize>) -> JobExecutor {
@@ -2632,10 +3387,147 @@ mod tests {
         }
     }
 
+    fn recap_descriptor(recording_id: &str) -> JobDescriptor {
+        JobDescriptor::Recap {
+            recording_id: recording_id.to_string(),
+            recap_template: None,
+            mode: AiExecutionMode::LocalLlm,
+            fallback_policy: AiFallbackPolicy::RequireLocalLlm,
+            legacy_quality: None,
+        }
+    }
+
+    #[test]
+    fn recording_deletion_gate_rejects_queued_and_running_jobs() {
+        for state in [JobState::Queued, JobState::Running] {
+            let manager = JobManager::new("test-protocol");
+            let (job_id, _) = manager
+                .insert_job(
+                    "recap",
+                    true,
+                    Some(recap_descriptor("recording-busy")),
+                    None,
+                )
+                .expect("insert job");
+            manager
+                .inner
+                .jobs
+                .lock()
+                .expect("jobs")
+                .get_mut(&job_id)
+                .expect("job")
+                .state = state;
+
+            let error = manager
+                .begin_recording_deletion("recording-busy")
+                .expect_err("active recording job must block deletion");
+            assert_eq!(error.code, "JOB_RECORDING_BUSY");
+        }
+    }
+
+    #[test]
+    fn recording_deletion_purges_terminal_results_and_blocks_new_jobs() {
+        let manager = JobManager::new("test-protocol");
+        let (job_id, _) = manager
+            .insert_job(
+                "recap",
+                true,
+                Some(recap_descriptor("recording-delete")),
+                None,
+            )
+            .expect("insert terminal job");
+        {
+            let mut jobs = manager.inner.jobs.lock().expect("jobs");
+            let job = jobs.get_mut(&job_id).expect("job");
+            job.state = JobState::Completed;
+            job.result = Some(json!({
+                "recordingId": "recording-delete",
+                "summary": "private completed recap"
+            }));
+            job.result_persisted = true;
+        }
+
+        manager
+            .begin_recording_deletion("recording-delete")
+            .expect("begin deletion");
+        let denied = manager
+            .insert_job(
+                "recap",
+                true,
+                Some(recap_descriptor("recording-delete")),
+                None,
+            )
+            .expect_err("new work must be gated");
+        assert_eq!(denied.code, "JOB_RECORDING_DELETION_IN_PROGRESS");
+        let purged = manager
+            .purge_recording_jobs("recording-delete")
+            .expect("purge terminal data");
+        assert_eq!(purged["purgedJobCount"], 1);
+        assert_eq!(manager.list().expect("list")["jobCount"], 0);
+    }
+
+    #[test]
+    fn recording_job_purge_survives_restart() {
+        let root = test_root("recording-delete-restart");
+        let manager =
+            JobManager::with_test_roots("test-protocol", root.join("jobs"), root.join("keys"));
+        let (job_id, _) = manager
+            .insert_job(
+                "recap",
+                true,
+                Some(recap_descriptor("recording-restart")),
+                None,
+            )
+            .expect("insert persisted job");
+        {
+            let mut jobs = manager.inner.jobs.lock().expect("jobs");
+            let job = jobs.get_mut(&job_id).expect("job");
+            job.state = JobState::Completed;
+            job.result = Some(json!({
+                "recordingId": "recording-restart",
+                "summary": "private restart recap"
+            }));
+            job.result_persisted = true;
+        }
+        manager.persist().expect("persist completed job");
+        let job_root = root.join("jobs");
+        fs::copy(
+            job_root.join(JOB_STORE_FILE),
+            job_root.join(JOB_STORE_MIGRATION_BACKUP_FILE),
+        )
+        .expect("seed migration backup with deleted job data");
+        fs::copy(
+            job_root.join(JOB_STORE_FILE),
+            job_root.join(JOB_STORE_RECOVERY_TEMP_FILE),
+        )
+        .expect("seed recovery artifact with deleted job data");
+        manager
+            .begin_recording_deletion("recording-restart")
+            .expect("begin deletion");
+        let purged = manager
+            .purge_recording_jobs("recording-restart")
+            .expect("persist purge");
+        assert_eq!(purged["priorStateArtifactsRemoved"], true);
+        for name in [
+            JOB_STORE_BACKUP_FILE,
+            JOB_STORE_MIGRATION_BACKUP_FILE,
+            JOB_STORE_TEMP_FILE,
+            JOB_STORE_RECOVERY_TEMP_FILE,
+        ] {
+            assert!(!job_root.join(name).exists(), "{name} must be removed");
+        }
+        drop(manager);
+
+        let restored =
+            JobManager::with_test_roots("test-protocol", root.join("jobs"), root.join("keys"));
+        assert_eq!(restored.list().expect("restored jobs")["jobCount"], 0);
+    }
+
     #[test]
     fn persisted_cancelled_task_retains_cancellation_semantics() {
         let descriptor = JobDescriptor::Recap {
             recording_id: "recording-cancelled".to_string(),
+            recap_template: None,
             mode: AiExecutionMode::LocalLlm,
             fallback_policy: AiFallbackPolicy::RequireLocalLlm,
             legacy_quality: None,
@@ -2656,6 +3548,7 @@ mod tests {
     fn persisted_ai_descriptors_without_a_policy_default_to_ask_first() {
         let mut serialized = serde_json::to_value(JobDescriptor::Recap {
             recording_id: "recording-migrated".to_string(),
+            recap_template: None,
             mode: AiExecutionMode::LocalLlm,
             fallback_policy: AiFallbackPolicy::RequireLocalLlm,
             legacy_quality: None,
@@ -2672,6 +3565,37 @@ mod tests {
             } => assert_eq!(fallback_policy, AiFallbackPolicy::RequireLocalLlm),
             _ => panic!("expected recap descriptor"),
         }
+    }
+
+    #[test]
+    fn persisted_recap_templates_are_bounded_and_round_trip_locally() {
+        let descriptor = JobDescriptor::Recap {
+            recording_id: "recording-profile-template".to_string(),
+            recap_template: Some("Focus on blockers and named owners.".to_string()),
+            mode: AiExecutionMode::LocalLlm,
+            fallback_policy: AiFallbackPolicy::RequireLocalLlm,
+            legacy_quality: None,
+        };
+        validate_current_descriptor(&descriptor, None).expect("valid recap template");
+        let restored = serde_json::from_value::<JobDescriptor>(
+            serde_json::to_value(&descriptor).expect("serialize recap template"),
+        )
+        .expect("restore recap template");
+        assert_eq!(restored, descriptor);
+
+        let invalid = JobDescriptor::Recap {
+            recording_id: "recording-profile-template".to_string(),
+            recap_template: Some("x".repeat(4_097)),
+            mode: AiExecutionMode::LocalLlm,
+            fallback_policy: AiFallbackPolicy::RequireLocalLlm,
+            legacy_quality: None,
+        };
+        assert_eq!(
+            validate_current_descriptor(&invalid, None)
+                .unwrap_err()
+                .code,
+            "JOB_STORE_RECAP_TEMPLATE_INVALID"
+        );
     }
 
     #[test]
@@ -2964,6 +3888,510 @@ mod tests {
     }
 
     #[test]
+    fn running_media_import_job_terminates_after_yielding_to_recording_priority() {
+        let manager = JobManager::new("test-protocol");
+        let cancellation_observed = Arc::new(AtomicUsize::new(0));
+        let worker_observation = cancellation_observed.clone();
+        let accepted = manager
+            .submit("media-import", true, move |context| {
+                for _ in 0..250 {
+                    if context.cancelled() {
+                        worker_observation.store(1, AtomicOrdering::SeqCst);
+                        return Ok(json!({
+                            "imported": false,
+                            "rawPathExposed": false,
+                            "keyMaterialExposedToRenderer": false
+                        }));
+                    }
+                    thread::sleep(Duration::from_millis(2));
+                }
+                Err(JobFailure::new(
+                    "TEST_CANCELLATION_NOT_OBSERVED",
+                    "media import test did not observe recording preemption",
+                    false,
+                ))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"].as_str().expect("job id");
+        wait_for_state(&manager, job_id, "running");
+
+        manager.set_recording_active(true);
+
+        let yielded = wait_for_terminal(&manager, job_id);
+        assert_eq!(cancellation_observed.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(yielded["state"], "cancelled");
+        assert_eq!(yielded["stage"], "cancelled");
+        assert_eq!(yielded["terminal"], true);
+        assert_eq!(yielded["result"], Value::Null);
+        assert_eq!(yielded["sourceDataPreserved"], true);
+        manager.set_recording_active(false);
+    }
+
+    #[test]
+    fn recording_priority_waits_for_media_import_cleanup_before_succeeding() {
+        let manager = JobManager::new("test-protocol");
+        let (cancellation_observed, observe_cancellation) = std::sync::mpsc::channel();
+        let (release_cleanup, cleanup_released) = std::sync::mpsc::channel();
+        let accepted = manager
+            .submit("media-import", true, move |context| {
+                while !context.cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                cancellation_observed.send(()).expect("report cancellation");
+                cleanup_released.recv().expect("release simulated cleanup");
+                Ok(json!({
+                    "imported": false,
+                    "partialRecordingRemoved": true,
+                    "rawPathExposed": false,
+                    "keyMaterialExposedToRenderer": false
+                }))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+
+        let barrier_manager = manager.clone();
+        let (barrier_finished, observe_barrier) = std::sync::mpsc::channel();
+        let barrier = thread::spawn(move || {
+            barrier_finished
+                .send(barrier_manager.begin_recording_priority(Duration::from_secs(2)))
+                .expect("report recording barrier result");
+        });
+
+        observe_cancellation
+            .recv_timeout(Duration::from_secs(1))
+            .expect("media import observed recording priority");
+        assert!(
+            observe_barrier
+                .recv_timeout(Duration::from_millis(25))
+                .is_err(),
+            "recording barrier must remain closed while rollback is running"
+        );
+
+        release_cleanup.send(()).expect("finish simulated cleanup");
+        observe_barrier
+            .recv_timeout(Duration::from_secs(1))
+            .expect("recording barrier completed")
+            .expect("recording barrier succeeded after cleanup");
+        barrier.join().expect("join recording barrier");
+        assert_eq!(wait_for_terminal(&manager, &job_id)["state"], "cancelled");
+        assert!(manager.inner.recording_active.load(Ordering::SeqCst));
+        manager.set_recording_active(false);
+    }
+
+    #[test]
+    fn recording_priority_fails_closed_when_media_import_cleanup_times_out() {
+        let manager = JobManager::new("test-protocol");
+        let (cancellation_observed, observe_cancellation) = std::sync::mpsc::channel();
+        let (release_cleanup, cleanup_released) = std::sync::mpsc::channel();
+        let accepted = manager
+            .submit("media-import", true, move |context| {
+                while !context.cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                cancellation_observed.send(()).expect("report cancellation");
+                cleanup_released.recv().expect("release simulated cleanup");
+                Ok(json!({ "rawPathExposed": false }))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+
+        let barrier_manager = manager.clone();
+        let barrier = thread::spawn(move || {
+            barrier_manager.begin_recording_priority(Duration::from_millis(30))
+        });
+        observe_cancellation
+            .recv_timeout(Duration::from_secs(1))
+            .expect("media import observed recording priority");
+        let error = barrier
+            .join()
+            .expect("join recording barrier")
+            .expect_err("unfinished cleanup must block capture");
+        assert_eq!(error.code, "MEDIA_IMPORT_CLEANUP_TIMEOUT");
+        assert!(!manager.inner.recording_active.load(Ordering::SeqCst));
+
+        release_cleanup.send(()).expect("finish simulated cleanup");
+        assert_eq!(wait_for_terminal(&manager, &job_id)["state"], "cancelled");
+    }
+
+    #[test]
+    fn recording_priority_reports_media_import_cleanup_failure() {
+        let manager = JobManager::new("test-protocol");
+        let accepted = manager
+            .submit("media-import", true, |context| {
+                while !context.cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(JobFailure::new(
+                    "MEDIA_IMPORT_CLEANUP_FAILED",
+                    "partial recording rollback failed",
+                    false,
+                ))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+
+        let error = manager
+            .begin_recording_priority(Duration::from_secs(1))
+            .expect_err("cleanup failure must block capture");
+        assert_eq!(error.code, "MEDIA_IMPORT_CLEANUP_FAILED");
+        let failed = wait_for_terminal(&manager, &job_id);
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["code"], "MEDIA_IMPORT_CLEANUP_FAILED");
+        assert!(!manager.inner.recording_active.load(Ordering::SeqCst));
+
+        let retry_error = manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect_err("unresolved cleanup must block later recording attempts");
+        assert_eq!(retry_error.code, "MEDIA_IMPORT_CLEANUP_FAILED");
+        assert_eq!(
+            manager
+                .acknowledge(&job_id)
+                .err()
+                .expect("unresolved cleanup cannot be acknowledged")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_UNRESOLVED"
+        );
+        {
+            let mut jobs = manager.inner.jobs.lock().expect("job store");
+            jobs.get_mut(&job_id).expect("failed job").updated_at_ms = 0;
+        }
+        assert!(manager.apply_retention().expect("retention").is_empty());
+        assert_eq!(
+            manager.get(&job_id).expect("retained failure")["state"],
+            "failed"
+        );
+
+        let unresolved = manager
+            .resolve_media_import_cleanup_after_recovery(&json!({
+                "recoveredCount": 0,
+                "quarantinedCount": 1,
+                "pendingDeletionCount": 0,
+                "rawPathExposed": false
+            }))
+            .expect("incomplete recovery result");
+        assert_eq!(unresolved["resolved"], false);
+        assert_eq!(
+            manager
+                .begin_recording_priority(Duration::from_millis(25))
+                .expect_err("quarantined recovery must not clear the cleanup latch")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_FAILED"
+        );
+
+        let resolved = manager
+            .resolve_media_import_cleanup_after_recovery(&successful_recording_recovery())
+            .expect("safe recovery resolves the cleanup latch");
+        assert_eq!(resolved["resolved"], true);
+        assert_eq!(resolved["resolvedCount"], 1);
+        assert!(manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("resolved cleanup no longer blocks recording"));
+        manager.set_recording_active(false);
+    }
+
+    #[test]
+    fn user_cancelled_media_import_preserves_cleanup_failure_when_recording_waits() {
+        let manager = JobManager::new("test-protocol");
+        let (cancellation_observed, observe_cancellation) = std::sync::mpsc::channel();
+        let (release_cleanup, cleanup_released) = std::sync::mpsc::channel();
+        let accepted = manager
+            .submit("media-import", true, move |context| {
+                while !context.cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                cancellation_observed.send(()).expect("report cancellation");
+                cleanup_released.recv().expect("release failed cleanup");
+                Err(JobFailure::new(
+                    "MEDIA_IMPORT_CLEANUP_FAILED",
+                    "partial recording rollback failed after user cancellation",
+                    false,
+                ))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+
+        manager.cancel(&job_id).expect("cancel media import");
+        observe_cancellation
+            .recv_timeout(Duration::from_secs(1))
+            .expect("worker observed user cancellation");
+
+        let barrier_manager = manager.clone();
+        let (barrier_finished, observe_barrier) = std::sync::mpsc::channel();
+        let barrier = thread::spawn(move || {
+            barrier_finished
+                .send(barrier_manager.begin_recording_priority(Duration::from_secs(1)))
+                .expect("report recording barrier result");
+        });
+        assert!(
+            observe_barrier
+                .recv_timeout(Duration::from_millis(25))
+                .is_err(),
+            "recording must wait for user-cancelled import cleanup"
+        );
+
+        release_cleanup.send(()).expect("finish failed cleanup");
+        let error = observe_barrier
+            .recv_timeout(Duration::from_secs(1))
+            .expect("recording barrier completed")
+            .expect_err("cleanup failure must remain visible after user cancellation");
+        assert_eq!(error.code, "MEDIA_IMPORT_CLEANUP_FAILED");
+        barrier.join().expect("join recording barrier");
+        let failed = wait_for_terminal(&manager, &job_id);
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["code"], "MEDIA_IMPORT_CLEANUP_FAILED");
+        assert!(!manager.preempt_requested(&job_id));
+        assert!(!manager.inner.recording_active.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn recording_priority_reports_panicking_media_import_without_stale_worker() {
+        let manager = JobManager::new("test-protocol");
+        let accepted = manager
+            .submit("media-import", true, |context| {
+                while !context.cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                panic!("injected media import worker panic");
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+
+        let error = manager
+            .begin_recording_priority(Duration::from_secs(1))
+            .expect_err("worker panic must block capture");
+        assert_eq!(error.code, "MEDIA_IMPORT_WORKER_PANIC");
+        let failed = wait_for_terminal(&manager, &job_id);
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["code"], "MEDIA_IMPORT_WORKER_PANIC");
+        assert!(!manager.inner.recording_active.load(Ordering::SeqCst));
+
+        let retry_error = manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect_err("worker panic remains blocked until recovery");
+        assert_eq!(retry_error.code, "MEDIA_IMPORT_WORKER_PANIC");
+        assert_eq!(
+            manager
+                .acknowledge(&job_id)
+                .err()
+                .expect("unresolved worker panic cannot be acknowledged")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_UNRESOLVED"
+        );
+
+        let resolved = manager
+            .resolve_media_import_cleanup_after_recovery(&successful_recording_recovery())
+            .expect("safe recording recovery resolves panic latch");
+        assert_eq!(resolved["resolvedCount"], 1);
+        let acquired = manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("released worker registration and resolved latch permit recording");
+        assert!(acquired);
+        manager.set_recording_active(false);
+    }
+
+    #[test]
+    fn unresolved_media_import_cleanup_survives_restart_until_verified_recovery() {
+        let root = test_root("media-import-cleanup-latch");
+        let jobs_root = root.join("jobs");
+        let key_root = root.join("keys");
+        let manager =
+            JobManager::with_test_roots("test-protocol", jobs_root.clone(), key_root.clone());
+        let accepted = manager
+            .submit("media-import", true, |context| {
+                while !context.cancelled() {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(JobFailure::new(
+                    "MEDIA_IMPORT_CLEANUP_FAILED",
+                    "persisted partial recording rollback failed",
+                    false,
+                ))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+        assert_eq!(
+            manager
+                .begin_recording_priority(Duration::from_secs(1))
+                .expect_err("cleanup failure blocks recording")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_FAILED"
+        );
+        drop(manager);
+
+        let restored =
+            JobManager::with_test_roots("test-protocol", jobs_root.clone(), key_root.clone());
+        assert_eq!(
+            restored.get(&job_id).expect("restored failure")["state"],
+            "failed"
+        );
+        assert_eq!(
+            restored
+                .begin_recording_priority(Duration::from_millis(25))
+                .expect_err("persisted cleanup latch blocks after restart")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_FAILED"
+        );
+        let blocked_temporary = jobs_root.join(JOB_STORE_TEMP_FILE);
+        fs::create_dir(&blocked_temporary).expect("block cleanup-resolution staging write");
+        let persistence_error = restored
+            .resolve_media_import_cleanup_after_recovery(&successful_recording_recovery())
+            .expect_err("failed persistence must roll back cleanup resolution");
+        assert_eq!(persistence_error.code, "JOB_STORE_WRITE_FAILED");
+        assert_eq!(
+            restored.get(&job_id).expect("rolled back cleanup audit")["error"]["cleanupResolved"],
+            Value::Null
+        );
+        assert_eq!(
+            restored
+                .begin_recording_priority(Duration::from_millis(25))
+                .expect_err("rolled back resolution must keep recording blocked")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_FAILED"
+        );
+        fs::remove_dir(&blocked_temporary).expect("remove staging-write blocker");
+        let resolved = restored
+            .resolve_media_import_cleanup_after_recovery(&successful_recording_recovery())
+            .expect("verified recovery is persisted");
+        assert_eq!(resolved["resolvedCount"], 1);
+        drop(restored);
+
+        let recovered = JobManager::with_test_roots("test-protocol", jobs_root, key_root);
+        assert_eq!(
+            recovered.get(&job_id).expect("resolved audit record")["error"]["cleanupResolved"],
+            true
+        );
+        assert!(recovered
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("resolved latch stays clear after restart"));
+        recovered.set_recording_active(false);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn recording_priority_preserves_media_import_committed_before_preemption() {
+        let manager = JobManager::new("test-protocol");
+        let (commit_completed, observe_commit) = std::sync::mpsc::channel();
+        let (release_result, result_released) = std::sync::mpsc::channel();
+        let accepted = manager
+            .submit("media-import", true, move |_context| {
+                commit_completed.send(()).expect("report durable commit");
+                result_released
+                    .recv()
+                    .expect("release committed import result");
+                Ok(json!({
+                    "imported": true,
+                    "recordingId": "recording-import-committed",
+                    "rawPathExposed": false,
+                    "keyMaterialExposedToRenderer": false
+                }))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        wait_for_state(&manager, &job_id, "running");
+        observe_commit
+            .recv_timeout(Duration::from_secs(1))
+            .expect("durable commit completed");
+
+        let barrier_manager = manager.clone();
+        let (barrier_finished, observe_barrier) = std::sync::mpsc::channel();
+        let barrier = thread::spawn(move || {
+            barrier_finished
+                .send(barrier_manager.begin_recording_priority(Duration::from_secs(1)))
+                .expect("report recording barrier result");
+        });
+        assert!(
+            observe_barrier
+                .recv_timeout(Duration::from_millis(25))
+                .is_err(),
+            "recording must wait for the committed import worker to publish success"
+        );
+
+        release_result
+            .send(())
+            .expect("publish committed import result");
+        assert!(observe_barrier
+            .recv_timeout(Duration::from_secs(1))
+            .expect("recording barrier completed")
+            .expect("committed import must not block capture"));
+        barrier.join().expect("join recording barrier");
+        let completed = wait_for_terminal(&manager, &job_id);
+        assert_eq!(completed["state"], "completed");
+        assert_eq!(completed["result"]["imported"], true);
+        assert_eq!(
+            completed["result"]["recordingId"],
+            "recording-import-committed"
+        );
+        manager.set_recording_active(false);
+    }
+
+    #[test]
+    fn queued_media_import_job_is_cancelled_instead_of_resuming_after_recording() {
+        let manager = JobManager::new("test-protocol");
+        let (release_blocker, blocker_released) = std::sync::mpsc::channel::<()>();
+        let blocker = manager
+            .submit("transcription", true, move |_context| {
+                let _ = blocker_released.recv();
+                Ok(json!({ "rawPathExposed": false }))
+            })
+            .expect("accepted blocker");
+        let blocker_id = blocker["jobId"].as_str().expect("blocker job id");
+        wait_for_state(&manager, blocker_id, "running");
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker_attempts = attempts.clone();
+        let accepted = manager
+            .submit("media-import", true, move |_context| {
+                worker_attempts.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(json!({ "rawPathExposed": false }))
+            })
+            .expect("accepted media import");
+        let job_id = accepted["jobId"].as_str().expect("media import job id");
+        wait_for_state(&manager, job_id, "queued");
+
+        manager.set_recording_active(true);
+
+        let cancelled = wait_for_terminal(&manager, job_id);
+        assert_eq!(cancelled["state"], "cancelled");
+        assert_eq!(cancelled["stage"], "cancelled");
+        assert_eq!(cancelled["terminal"], true);
+        assert_eq!(cancelled["result"], Value::Null);
+        assert_eq!(cancelled["sourceDataPreserved"], true);
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 0);
+
+        manager.set_recording_active(false);
+        let _ = release_blocker.send(());
+        wait_for_terminal(&manager, blocker_id);
+        assert_eq!(attempts.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
     fn cancellation_cannot_be_overwritten_by_a_concurrent_pause_or_start() {
         let root = test_root("cancel-pause-race");
         let manager =
@@ -3112,6 +4540,7 @@ mod tests {
             .submit_descriptor(
                 JobDescriptor::Recap {
                     recording_id: "recording-after-capacity".to_string(),
+                    recap_template: None,
                     mode: AiExecutionMode::HeuristicFallback,
                     fallback_policy: AiFallbackPolicy::AllowDisclosed,
                     legacy_quality: None,
@@ -3312,6 +4741,7 @@ mod tests {
                     model_id: None,
                     follow_up: Some(Box::new(JobDescriptor::Recap {
                         recording_id: "recording-3".to_string(),
+                        recap_template: None,
                         mode: AiExecutionMode::LocalLlm,
                         fallback_policy: AiFallbackPolicy::AllowDisclosed,
                         legacy_quality: None,
@@ -3345,6 +4775,7 @@ mod tests {
             .submit_descriptor(
                 JobDescriptor::Recap {
                     recording_id: "recording-4".to_string(),
+                    recap_template: None,
                     mode: AiExecutionMode::HeuristicFallback,
                     fallback_policy: AiFallbackPolicy::AllowDisclosed,
                     legacy_quality: None,
@@ -3559,6 +4990,7 @@ mod tests {
             .submit_descriptor(
                 JobDescriptor::Recap {
                     recording_id: "recording-legacy".to_string(),
+                    recap_template: None,
                     mode: AiExecutionMode::LocalLlm,
                     fallback_policy: AiFallbackPolicy::AllowDisclosed,
                     legacy_quality: None,
@@ -3652,6 +5084,7 @@ mod tests {
                     "55555555555555555555555555555555",
                     JobDescriptor::Recap {
                         recording_id: "recording-preserved".to_string(),
+                        recap_template: None,
                         mode: AiExecutionMode::LocalLlm,
                         fallback_policy: AiFallbackPolicy::AllowDisclosed,
                         legacy_quality: None,

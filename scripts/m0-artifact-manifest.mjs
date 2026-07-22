@@ -77,6 +77,8 @@ function packagedFiles() {
     return {
       appExecutable: join(releaseDir, "win-unpacked", "Candor.exe"),
       coreExecutable: join(releaseDir, "win-unpacked", "resources", "bin", "candor-core.exe"),
+      candorctlExecutable: join(releaseDir, "win-unpacked", "resources", "bin", "candorctl.exe"),
+      candorMcpExecutable: join(releaseDir, "win-unpacked", "resources", "bin", "candor-mcp.exe"),
       appArchive: join(releaseDir, "win-unpacked", "resources", "app.asar"),
     };
   }
@@ -90,6 +92,8 @@ function packagedFiles() {
     return {
       appExecutable: join(appRoot, "Contents", "MacOS", "Candor"),
       coreExecutable: join(appRoot, "Contents", "Resources", "bin", "candor-core"),
+      candorctlExecutable: join(appRoot, "Contents", "Resources", "bin", "candorctl"),
+      candorMcpExecutable: join(appRoot, "Contents", "Resources", "bin", "candor-mcp"),
       appArchive: join(appRoot, "Contents", "Resources", "app.asar"),
     };
   }
@@ -99,6 +103,8 @@ function packagedFiles() {
       join(releaseDir, "linux-unpacked", "Candor"),
     ]),
     coreExecutable: join(releaseDir, "linux-unpacked", "resources", "bin", "candor-core"),
+    candorctlExecutable: join(releaseDir, "linux-unpacked", "resources", "bin", "candorctl"),
+    candorMcpExecutable: join(releaseDir, "linux-unpacked", "resources", "bin", "candor-mcp"),
     appArchive: join(releaseDir, "linux-unpacked", "resources", "app.asar"),
   };
 }
@@ -134,6 +140,8 @@ const proofScripts = [
   "scripts/generate-v3-icons.mjs",
   "scripts/v3-icon-proof.mjs",
   "scripts/cargo-with-local-perl.mjs",
+  "scripts/build-release-core.mjs",
+  "scripts/release-binary-path-audit.mjs",
   "scripts/v3-verify.mjs",
   "scripts/m0-audit-electron.mjs",
   "scripts/m0-build-electron.mjs",
@@ -152,6 +160,7 @@ const proofScripts = [
   "scripts/release-checksum-validation.mjs",
   "scripts/v3-release-artifact-smoke.mjs",
   "scripts/v3-release-signing-proof.mjs",
+  "scripts/v3-release-sbom.mjs",
   "scripts/v3-source-security-proof.mjs",
   "scripts/v3-updater-policy-proof.mjs",
   "scripts/m1-bootstrap-native-perl-windows.ps1",
@@ -258,6 +267,16 @@ const sourceFiles = [
   "crates/candor-core/assets/fonts/NotoSans-Regular.ttf",
   "crates/candor-core/assets/fonts/NotoSans-Bold.ttf",
   "crates/candor-core/assets/fonts/OFL.txt",
+  "crates/candor-tools/Cargo.toml",
+  "crates/candor-tools/Cargo.lock",
+  "crates/candor-tools/src/lib.rs",
+  "crates/candor-tools/src/cli.rs",
+  "crates/candor-tools/src/core_client.rs",
+  "crates/candor-tools/src/mcp.rs",
+  "crates/candor-tools/src/service.rs",
+  "crates/candor-tools/src/bin/candorctl.rs",
+  "crates/candor-tools/src/bin/candor-mcp.rs",
+  "docs/mcp-server.md",
   "docs/proofs/M0_ELECTRON_HARDENING_CHECKLIST.md",
   "docs/proofs/M0_IPC_THREAT_MODEL.md",
   "docs/proofs/M0_NETWORK_PROOF.md",

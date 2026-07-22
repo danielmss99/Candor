@@ -11,6 +11,11 @@ const linuxNetworkProof = readFileSync(resolve(repoRoot, "scripts", "m0-network-
 const macosNetworkProof = readFileSync(resolve(repoRoot, "scripts", "m0-network-deny-macos.mjs"), "utf8");
 const proofAudit = readFileSync(resolve(repoRoot, "scripts", "m0-proof-audit.mjs"), "utf8");
 const artifactManifest = readFileSync(resolve(repoRoot, "scripts", "m0-artifact-manifest.mjs"), "utf8");
+const releaseCoreBuild = readFileSync(resolve(repoRoot, "scripts", "build-release-core.mjs"), "utf8");
+const releaseBinaryPathAudit = readFileSync(
+  resolve(repoRoot, "scripts", "release-binary-path-audit.mjs"),
+  "utf8",
+);
 const coreBuildScript = readFileSync(resolve(repoRoot, "crates", "candor-core", "build.rs"), "utf8");
 const electronBuilder = readFileSync(resolve(repoRoot, "electron-builder.v3.yml"), "utf8");
 const sourceInterfaceBuilder = readFileSync(
@@ -40,6 +45,7 @@ const m4LocalInstructPreflightDoc = readFileSync(resolve(repoRoot, "docs", "proo
 const m4RealLocalInstruct = readFileSync(resolve(repoRoot, "scripts", "m4-real-local-instruct-proof.mjs"), "utf8");
 const m4RealLocalInstructDoc = readFileSync(resolve(repoRoot, "docs", "proofs", "M4_REAL_LOCAL_INSTRUCT_PROOF.md"), "utf8");
 const packageJson = readFileSync(resolve(repoRoot, "package.json"), "utf8");
+const thirdPartyNotices = readFileSync(resolve(repoRoot, "THIRD_PARTY_NOTICES.md"), "utf8");
 const v2Importer = readFileSync(
   resolve(repoRoot, "crates", "candor-core", "src", "v2_importer.rs"),
   "utf8",
@@ -259,6 +265,23 @@ for (const [contents, pattern, label] of [
   [artifactManifest, "releaseArtifacts", "artifact manifest release artifact list"],
   [artifactManifest, "expectedReleaseArtifactKinds", "artifact manifest expected release artifact kinds"],
   [artifactManifest, '"crates/candor-core/build.rs"', "artifact manifest core build script identity"],
+  [artifactManifest, '"crates/candor-tools/Cargo.lock"', "artifact manifest companion dependency identity"],
+  [artifactManifest, '"scripts/release-binary-path-audit.mjs"', "artifact manifest release binary path audit identity"],
+  [artifactManifest, "candorctlExecutable", "artifact manifest candorctl identity"],
+  [artifactManifest, "candorMcpExecutable", "artifact manifest candor-mcp identity"],
+  [releaseCoreBuild, '"crates/candor-tools/Cargo.toml"', "release build includes automation companions"],
+  [releaseCoreBuild, '"candorctl.exe", "candor-mcp.exe"', "Windows release companion names"],
+  [releaseCoreBuild, "assertReleaseBinariesDoNotExposeBuildPaths", "release and staged binary path audit invocation"],
+  [releaseCoreBuild, 'stage: "release output"', "release output binary path audit"],
+  [releaseCoreBuild, 'stage: "staged output"', "staged output binary path audit"],
+  [releaseBinaryPathAudit, "binaryPaths.length !== 3", "three-binary path audit cardinality"],
+  [releaseBinaryPathAudit, 'label: "repository checkout path"', "repository path binary rejection"],
+  [releaseBinaryPathAudit, 'label: "build user home path"', "home path binary rejection"],
+  [releaseBinaryPathAudit, "runReleaseBinaryPathAuditSelfTest", "release binary path scanner regression self-test"],
+  [electronBuilder, "- candorctl.exe", "Windows package includes candorctl"],
+  [electronBuilder, "- candor-mcp.exe", "Windows package includes candor-mcp"],
+  [electronBuilder, "Contents/Resources/bin/candorctl", "macOS signs candorctl"],
+  [electronBuilder, "Contents/Resources/bin/candor-mcp", "macOS signs candor-mcp"],
   [coreBuildScript, "cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift", "macOS system Swift runtime rpath"],
   [coreBuildScript, 'args(["--find", "swiftc"])', "macOS Xcode Swift runtime discovery"],
   [v3Verify, "V3 source security proof", "v3 aggregate source security step"],
@@ -284,11 +307,16 @@ for (const [contents, pattern, label] of [
   [releaseSigningProof, "Linux AppImage detached signature proof is missing or unverified", "release signing Linux AppImage signature failure"],
   [releaseSigningProof, "Linux deb detached signature proof is missing or unverified", "release signing Linux deb signature failure"],
   [releaseSigningProof, "macosSignatureEvidence", "release signing macOS signature evidence"],
+  [releaseSigningProof, "companionSignatures", "release signing companion signature evidence"],
+  [releaseSigningProof, "Windows automation companion executables are not Authenticode-signed", "release signing Windows companion failure"],
+  [releaseSigningProof, "macOS automation companion codesign proof is missing or invalid", "release signing macOS companion failure"],
   [releaseSigningProof, "macOS notarization/staple proof is missing or invalid", "release signing macOS staple failure"],
   [releaseSigningProof, "macOS DMG Gatekeeper assessment proof is missing or invalid", "release signing macOS Gatekeeper failure"],
   [packagedSmoke, "minimumSmokeScreenshotWidth = 960", "packaged smoke desktop screenshot width floor"],
   [packagedSmoke, "minimumSmokeScreenshotHeight = 600", "packaged smoke desktop screenshot height floor"],
   [packagedSmoke, "verificationFailure", "packaged smoke failure receipt"],
+  [packagedSmoke, "candorctlExecutable", "packaged smoke candorctl hash evidence"],
+  [packagedSmoke, "candorMcpExecutable", "packaged smoke candor-mcp hash evidence"],
   [transcriptionProofAudit, "stringValues", "transcription proof raw string path scanner"],
   [transcriptionProofAudit, "runPathScannerSelfTest", "transcription proof path scanner regression test"],
   [releaseReadinessAudit, "verified detached signatures for Linux AppImage", "release readiness Linux AppImage signature validator"],
@@ -298,6 +326,9 @@ for (const [contents, pattern, label] of [
   [releaseReadinessAudit, "release signing proof must show a signed macOS app bundle", "release readiness macOS app signing validator"],
   [releaseArtifactSmoke, "releaseGaps", "M0 structural package proof keeps release signing gaps explicit"],
   [releaseArtifactSmoke, "strictFailures", "strict artifact smoke promotes release gaps to failures"],
+  [releaseArtifactSmoke, '"candorctl.exe", "candor-mcp.exe"', "Windows installer companion payload checks"],
+  [releaseArtifactSmoke, '"appimage:candor-mcp"', "Linux AppImage companion payload checks"],
+  [releaseArtifactSmoke, '"deb:candor-mcp"', "Linux deb companion payload checks"],
   [releaseChecksums, 'proofKind: "v3-release-checksums"', "release checksum proof kind"],
   [releaseChecksums, "SHA256SUMS", "release checksum manifest"],
   [releaseChecksums, "networkAttempted: false", "release checksum network denial evidence"],
@@ -306,6 +337,9 @@ for (const [contents, pattern, label] of [
   [releaseChecksums, "bindArtifactManifest", "release checksum artifact-manifest binding"],
   [releaseSbom, 'spdxVersion: "SPDX-2.3"', "SPDX 2.3 release inventory"],
   [releaseSbom, "networkAttempted: false", "local SBOM generation"],
+  [releaseSbom, '"crates/candor-tools/Cargo.lock"', "release SBOM companion lockfile inventory"],
+  [releaseSbom, "companionBinaryPackageCount", "release SBOM companion package inventory"],
+  [thirdPartyNotices, "`crates/candor-tools/Cargo.lock`", "companion dependency license notice"],
   [manualReleaseMatrix, 'proofKind: "v3-manual-release-matrix"', "manual Windows release proof kind"],
   [manualReleaseMatrix, "validateManualReleaseEvidence", "manual release evidence validation"],
   [visualEvidence, "screenshotCount: evidence.length", "critical GUI screenshot evidence count"],
@@ -351,6 +385,7 @@ for (const [contents, pattern, label] of [
   [packageJson, "\"v3:identity:verify\"", "product identity npm script"],
   [packageJson, "\"v3:verify-main-architecture\"", "remote-main architecture npm script"],
   [packageJson, "\"v3:sbom:verify\"", "release SBOM verification npm script"],
+  [packageJson, "cargo audit --file crates/candor-tools/Cargo.lock", "companion dependency audit command"],
   [packageJson, "\"v3:manual-release-matrix:strict\"", "strict manual Windows release matrix npm script"],
   [packageJson, "\"email\": \"danielmss99@users.noreply.github.com\"", "Linux package maintainer email"],
   [packageJson, "\"desktopName\": \"Candor\"", "Linux desktop application identity"],

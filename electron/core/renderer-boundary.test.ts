@@ -22,4 +22,17 @@ describe("renderer core boundary", () => {
     })).toEqual({ version: "0.1.0", rawPathExposed: false });
     expect(sanitizeCoreResultForRenderer("capture.status", { pid: 1234 })).toEqual({ pid: 1234 });
   });
+
+  it("reconstructs exact renderer results from reviewed fields", () => {
+    expect(sanitizeCoreResultForRenderer("capture.status", {
+      implemented: true,
+      active: false,
+      sources: {},
+      privateTelemetry: "drop-me",
+    }, ["implemented", "active", "sources"])).toEqual({
+      implemented: true,
+      active: false,
+      sources: {},
+    });
+  });
 });

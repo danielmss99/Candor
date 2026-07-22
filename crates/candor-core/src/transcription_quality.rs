@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,6 +16,7 @@ const GIB: u64 = 1024 * 1024 * 1024;
 const BALANCED_MAX_REAL_TIME_FACTOR: f64 = 0.5;
 const MAXIMUM_MAX_REAL_TIME_FACTOR: f64 = 1.0;
 const MAX_BENCHMARK_MODEL_HASHES: usize = 8;
+pub(crate) const TRANSCRIPTION_BENCHMARK_AUDIO_SECONDS: u32 = 30;
 
 #[derive(Debug)]
 pub struct TranscriptionQualityError {
@@ -295,6 +297,44 @@ impl TranscriptionQualityService {
                 "keyMaterialExposedToRenderer": false
             }),
         }
+    }
+
+    pub(crate) fn measured_speech_model_latencies_ms(&self) -> BTreeMap<String, u64> {
+        let Ok(policy) = self.load_policy() else {
+            return BTreeMap::new();
+        };
+        if policy.benchmark.state != "measured" {
+            return BTreeMap::new();
+        }
+        let mut measurements = BTreeMap::new();
+        for (tier, real_time_factor, measured_sha256) in [
+            (
+                TranscriptionBenchmarkTier::Balanced,
+                policy.benchmark.balanced_real_time_factor,
+                policy.benchmark.balanced_model_sha256.as_deref(),
+            ),
+            (
+                TranscriptionBenchmarkTier::Maximum,
+                policy.benchmark.maximum_real_time_factor,
+                policy.benchmark.maximum_model_sha256.as_deref(),
+            ),
+        ] {
+            let Some(real_time_factor) = real_time_factor else {
+                continue;
+            };
+            if !real_time_factor.is_finite()
+                || real_time_factor <= 0.0
+                || !benchmark_hash_matches(tier, measured_sha256)
+            {
+                continue;
+            }
+            let elapsed_ms =
+                real_time_factor * f64::from(TRANSCRIPTION_BENCHMARK_AUDIO_SECONDS) * 1_000.0;
+            if elapsed_ms.is_finite() && elapsed_ms > 0.0 && elapsed_ms <= u64::MAX as f64 {
+                measurements.insert(tier.model_id().to_string(), elapsed_ms.round() as u64);
+            }
+        }
+        measurements
     }
 
     pub fn update(
@@ -890,6 +930,31 @@ mod tests {
         assert_eq!(status["estimatedRealTimeFactor"], Value::Null);
         assert!(status.get("llmEstimatedTokensPerSecond").is_none());
         assert!(status.get("modelHashes").is_none());
+    }
+
+    #[test]
+    fn model_latency_cache_exposes_only_real_trusted_benchmark_measurements() {
+        let root = test_root("model-latency-cache");
+        let service = TranscriptionQualityService::with_hardware(
+            root,
+            HardwareCapability::with_memory_gib(16),
+        );
+        assert!(service.measured_speech_model_latencies_ms().is_empty());
+
+        service
+            .record_benchmark(TranscriptionBenchmarkMeasurement {
+                tier: TranscriptionBenchmarkTier::Balanced,
+                whisper_real_time_factor: 0.25,
+                llm_estimated_tokens_per_second: 8.0,
+                whisper_model_sha256: trusted_hash(TranscriptionBenchmarkTier::Balanced),
+                llm_model_sha256: "b".repeat(64),
+            })
+            .expect("record trusted local benchmark");
+
+        let measurements = service.measured_speech_model_latencies_ms();
+        assert_eq!(measurements.get("large-v3-turbo"), Some(&7_500));
+        assert!(!measurements.contains_key("large-v3"));
+        assert!(!measurements.contains_key("small.en"));
     }
 
     #[test]

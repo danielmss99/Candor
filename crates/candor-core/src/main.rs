@@ -1,19 +1,31 @@
+#![recursion_limit = "256"]
+
 mod ai_fallback_preference;
 mod background_jobs;
 mod bundled_ai_assets;
 mod capture_service;
 mod consent_store;
+mod diarization_service;
 mod dictionary_package;
 mod dictionary_staging;
 mod grounded_output;
 mod job_manager;
+mod live_asr_producer;
 mod local_ai_service;
 mod local_instruct_assets;
 mod local_instruct_model;
 mod local_model_scheduler;
+mod media_decoder;
+mod media_import;
+mod media_import_service;
+#[cfg(test)]
+mod media_test_fixtures;
+mod meeting_profiles;
 mod model_manager;
 mod os_key_store;
+mod parakeet_package;
 mod recording_store;
+mod replacement_rules;
 mod report_export;
 mod terminology_dictionary;
 mod transcription_quality;
@@ -24,26 +36,35 @@ mod vault_store;
 
 use std::collections::{HashSet, VecDeque};
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::process;
-use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ai_fallback_preference::{
     AiFallbackPreferenceError, AiFallbackPreferenceService, AiFallbackPreferenceUpdateParams,
     AiJobIntent,
 };
 use background_jobs::{
-    descriptor_for_ask, descriptor_for_dictionary_import, descriptor_for_export,
-    descriptor_for_recap, descriptor_for_transcription, processing_queue_failure,
-    BackgroundJobServices,
+    descriptor_for_ask, descriptor_for_cleanup, descriptor_for_dictionary_import,
+    descriptor_for_export, descriptor_for_recording_recap, descriptor_for_transcription,
+    processing_queue_failure, BackgroundJobServices,
 };
 use bundled_ai_assets::BundledAiAssets;
+use candor_core::live_transcript_service::{LiveTranscriptService, LiveTranscriptServiceError};
 use capture_service::{
     CaptureError, CaptureManager, CaptureStartMicAndSystemParams, CaptureStartParams,
+    MicTestStartParams, SetPreferredMicrophoneParams,
 };
 use consent_store::{ConsentAcknowledgeParams, ConsentError, ConsentStore};
+use diarization_service::{
+    DiarizationAssignSpeakerNameParams, DiarizationPreferenceParams, DiarizationRecordingParams,
+    DiarizationRemoveSpeakerNameParams, DiarizationService, DiarizationServiceError,
+};
 use dictionary_staging::DictionaryStaging;
 use job_manager::{JobFailure, JobManager, JobManagerError};
+use live_asr_producer::{LiveAsrProducerError, LiveAsrProducerManager};
 use local_ai_service::{
     LocalAiError, LocalAiProofParams, LocalAiService, LocalAskParams, LocalRecapParams,
 };
@@ -54,17 +75,30 @@ use local_instruct_model::{
     LocalInstructAskParams, LocalInstructError, LocalInstructModelService, LocalInstructRecapParams,
 };
 use local_model_scheduler::LocalModelScheduler;
+use media_import_service::{
+    production_local_media_storage_supported, MediaImportService, MediaImportServiceError,
+};
+use meeting_profiles::{
+    MeetingProcessingProfileSnapshot, MeetingProfileDeleteParams, MeetingProfileError,
+    MeetingProfileGetParams, MeetingProfileSelectParams, MeetingProfileService,
+    MeetingProfileUpsertParams, ProfileCaptureSource,
+};
 use model_manager::{
     ModelIdParams, ModelImportAbortParams, ModelImportChunkParams, ModelImportFinishParams,
     ModelImportStartParams, ModelManager, ModelManagerError, ModelProofParams,
 };
 use recording_store::{
     AudioChunkParams, ExportRecordingParams, RecordingIdParams, RecordingPageParams,
-    RecordingStore, RecordingStoreError, SaveNotesParams, SearchRecordingsParams,
-    StartRecordingParams, TranscriptPageParams, WriteAudioChunkParams, WriteChunkParams,
-    WriteTranscriptSegmentParams,
+    RecordingStore, RecordingStoreError, ReprocessingPrepareParams, SaveNotesParams,
+    SearchRecordingsParams, StartRecordingParams, TranscriptPageParams, TranscriptRevisionParams,
+    WriteAudioChunkParams, WriteChunkParams, WriteTranscriptSegmentParams,
 };
-use serde::{Deserialize, Serialize};
+use replacement_rules::{
+    ReplacementApplyParams, ReplacementPreviewParams, ReplacementRuleError, ReplacementRuleService,
+    ReplacementRuleSetDeleteParams, ReplacementRuleSetGetParams, ReplacementRuleSetUpsertParams,
+};
+use serde::de::Error as SerdeDeError;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use terminology_dictionary::{
     TerminologyAssignParams, TerminologyDecisionParams, TerminologyError, TerminologyImportParams,
@@ -76,7 +110,8 @@ use transcription_quality::{
     TranscriptionQualityUpdateParams,
 };
 use transcription_service::{
-    TranscriptionError, TranscriptionProofParams, TranscriptionRunLocalParams, TranscriptionService,
+    ProtectedTermApplyParams, ProtectedTermReviewParams, TranscriptionError,
+    TranscriptionProofParams, TranscriptionRunLocalParams, TranscriptionService,
 };
 use update_policy::UpdatePolicy;
 use v2_importer::{V2ImportError, V2ImportFolderParams, V2ImportProofParams, V2Importer};
@@ -84,9 +119,72 @@ use vault_store::{VaultOpenParams, VaultStore, VaultStoreError};
 
 const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "m0-jsonrpc-stdio-1";
+const MEDIA_IMPORT_RECORDING_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RPC_LINE_BYTES: usize = 4_000_000;
 const RECENT_REQUEST_ID_LIMIT: usize = 1_024;
+const AUTOMATION_MODE_ENV: &str = "CANDOR_AUTOMATION_MODE";
+const AUTOMATION_READ_ONLY_VALUE: &str = "read-only";
+const AUTOMATION_READ_ONLY_METHODS: &[&str] = &[
+    "recording.durable.listPage",
+    "recording.durable.transcriptPage",
+    "recording.durable.search",
+    "core.shutdown",
+];
 static PROTOCOL_OUTPUT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+struct MediaLocalValidationSlot(Arc<AtomicBool>);
+
+impl Drop for MediaLocalValidationSlot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MediaLocalValidationRunError {
+    Busy,
+    Timeout,
+    Spawn,
+    Disconnected,
+}
+
+fn run_bounded_media_local_validation<T, F>(
+    active: Arc<AtomicBool>,
+    timeout: Duration,
+    operation: F,
+) -> Result<T, MediaLocalValidationRunError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    if active
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(MediaLocalValidationRunError::Busy);
+    }
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let worker_active = Arc::clone(&active);
+    if std::thread::Builder::new()
+        .name("candor-media-local-validation".to_string())
+        .spawn(move || {
+            let _slot = MediaLocalValidationSlot(worker_active);
+            let _ = sender.send(operation());
+        })
+        .is_err()
+    {
+        active.store(false, Ordering::SeqCst);
+        return Err(MediaLocalValidationRunError::Spawn);
+    }
+
+    match receiver.recv_timeout(timeout) {
+        Ok(value) => Ok(value),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(MediaLocalValidationRunError::Timeout),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(MediaLocalValidationRunError::Disconnected)
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,6 +199,25 @@ struct RpcRequest {
     params: Value,
     #[serde(default)]
     sent_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct LiveTranscriptRecordingParams {
+    recording_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MediaImportPathParams {
+    source_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MediaImportVerifiedPathParams {
+    source_path: String,
+    expected_source_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -135,8 +252,16 @@ struct JobIdParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AiRecapJobParams {
     recording_id: String,
+    #[serde(default, deserialize_with = "deserialize_recap_template")]
+    recap_template: Option<String>,
     #[serde(default)]
     intent: AiJobIntent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AiCleanupJobParams {
+    recording_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,18 +331,26 @@ impl RecentRequestIds {
 
 struct CoreState {
     started_at_ms: u128,
+    automation_read_only: bool,
     ai_fallback_preference: AiFallbackPreferenceService,
     bundled_ai_assets: BundledAiAssets,
     capture_manager: CaptureManager,
     consent_store: ConsentStore,
+    diarization_service: DiarizationService,
     dictionary_staging: DictionaryStaging,
     local_ai_service: LocalAiService,
     local_instruct_assets: LocalInstructAssetManager,
     local_instruct_model: LocalInstructModelService,
+    live_transcript: LiveTranscriptService,
+    live_asr_producer: LiveAsrProducerManager,
+    media_import: MediaImportService,
+    media_local_validation_active: Arc<AtomicBool>,
+    meeting_profiles: MeetingProfileService,
     job_manager: JobManager,
     model_manager: ModelManager,
     model_scheduler: LocalModelScheduler,
     recording_store: RecordingStore,
+    replacement_rules: ReplacementRuleService,
     recent_request_ids: RecentRequestIds,
     shutdown_requested: bool,
     startup_recovery: StartupRecoveryStatus,
@@ -230,18 +363,37 @@ struct CoreState {
 
 impl CoreState {
     fn new(started_at_ms: u128) -> Self {
+        let automation_read_only = std::env::var(AUTOMATION_MODE_ENV)
+            .is_ok_and(|value| value == AUTOMATION_READ_ONLY_VALUE);
         let recording_store = RecordingStore::from_env();
         let vault_store = VaultStore::from_env();
         let bundled_ai_assets = BundledAiAssets::from_env();
-        let startup_recovery = startup_recovery_status(
-            recording_store
-                .recover()
-                .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
-        );
+        let startup_recovery_result = (!automation_read_only).then(|| recording_store.recover());
+        let startup_recovery = skipped_startup_recovery_status();
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
         let transcription_quality_root = recording_store
             .settings_root_for_core()
             .join("transcription");
+        let capture_preferences_root = recording_store.settings_root_for_core().join("capture");
+        let media_import = MediaImportService::with_staging_root(
+            recording_store
+                .local_data_root_for_core()
+                .join("private-media-staging"),
+        );
+        let diarization_service = DiarizationService::with_roots(
+            recording_store.settings_root_for_core().join("diarization"),
+            recording_store.key_root_for_core(),
+        );
+        let meeting_profiles = MeetingProfileService::with_root(
+            recording_store
+                .settings_root_for_core()
+                .join("meeting-profiles"),
+        );
+        let replacement_rules = ReplacementRuleService::with_root(
+            recording_store
+                .settings_root_for_core()
+                .join("replacement-rules"),
+        );
         let ai_fallback_preference = AiFallbackPreferenceService::with_root(
             recording_store.settings_root_for_core().join("local-ai"),
         );
@@ -255,23 +407,31 @@ impl CoreState {
                 .join("dictionary-staging"),
             recording_store.key_root_for_core(),
         );
-        let job_manager = JobManager::with_roots_and_staging(
-            PROTOCOL_VERSION,
-            recording_store
-                .settings_root_for_core()
-                .join("background-jobs"),
-            recording_store.key_root_for_core(),
-            &dictionary_staging,
-        );
-        maintain_dictionary_staging(&job_manager, &dictionary_staging);
-        #[cfg(not(test))]
-        start_dictionary_staging_maintenance(job_manager.clone(), dictionary_staging.clone());
-        let state = Self {
+        let job_manager = if automation_read_only {
+            JobManager::in_memory(PROTOCOL_VERSION)
+        } else {
+            JobManager::with_roots_and_staging(
+                PROTOCOL_VERSION,
+                recording_store
+                    .settings_root_for_core()
+                    .join("background-jobs"),
+                recording_store.key_root_for_core(),
+                &dictionary_staging,
+            )
+        };
+        if !automation_read_only {
+            maintain_dictionary_staging(&job_manager, &dictionary_staging);
+            #[cfg(not(test))]
+            start_dictionary_staging_maintenance(job_manager.clone(), dictionary_staging.clone());
+        }
+        let mut state = Self {
             started_at_ms,
+            automation_read_only,
             ai_fallback_preference,
             bundled_ai_assets: bundled_ai_assets.clone(),
-            capture_manager: CaptureManager::default(),
+            capture_manager: CaptureManager::with_preferences_root(capture_preferences_root),
             consent_store: ConsentStore::from_env(),
+            diarization_service,
             dictionary_staging,
             local_ai_service: LocalAiService,
             local_instruct_assets: LocalInstructAssetManager::with_root(
@@ -282,10 +442,16 @@ impl CoreState {
                 bundled_ai_assets.clone(),
                 terminology_service.clone(),
             ),
+            live_transcript: LiveTranscriptService::new(),
+            live_asr_producer: LiveAsrProducerManager::default(),
+            media_import,
+            media_local_validation_active: Arc::new(AtomicBool::new(false)),
+            meeting_profiles,
             job_manager,
             model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
+            replacement_rules,
             recent_request_ids: RecentRequestIds::default(),
             shutdown_requested: false,
             startup_recovery,
@@ -298,9 +464,21 @@ impl CoreState {
             v2_importer: V2Importer,
             vault_store,
         };
-        let background_services = state.background_job_services();
-        let _ = background_services.ensure_bundled_general_dictionary();
-        state.job_manager.recover(background_services.executor());
+        if !automation_read_only {
+            if let Some(result) = startup_recovery_result {
+                let reconciled = result.map(|value| {
+                    let value = reconcile_recovered_deletions(value, &state);
+                    let _ = state
+                        .job_manager
+                        .resolve_media_import_cleanup_after_recovery(&value);
+                    value
+                });
+                state.startup_recovery = startup_recovery_status(reconciled);
+            }
+            let background_services = state.background_job_services();
+            let _ = background_services.ensure_bundled_general_dictionary();
+            state.job_manager.recover(background_services.executor());
+        }
         state
     }
 
@@ -310,18 +488,45 @@ impl CoreState {
         recording_store: RecordingStore,
         vault_store: VaultStore,
     ) -> Self {
+        Self::with_stores_mode(started_at_ms, recording_store, vault_store, false)
+    }
+
+    #[cfg(test)]
+    fn with_stores_mode(
+        started_at_ms: u128,
+        recording_store: RecordingStore,
+        vault_store: VaultStore,
+        automation_read_only: bool,
+    ) -> Self {
         let consent_root = recording_store
             .local_data_root_for_core()
             .join("consent-state");
-        let startup_recovery = startup_recovery_status(
-            recording_store
-                .recover()
-                .map(|value| reconcile_recovered_deletions(value, &recording_store, &vault_store)),
-        );
+        let startup_recovery_result = (!automation_read_only).then(|| recording_store.recover());
+        let startup_recovery = skipped_startup_recovery_status();
         let instruct_assets_root = recording_store.models_root_for_core().join("instruct");
         let transcription_quality_root = recording_store
             .settings_root_for_core()
             .join("transcription");
+        let capture_preferences_root = recording_store.settings_root_for_core().join("capture");
+        let media_import = MediaImportService::with_staging_root(
+            recording_store
+                .local_data_root_for_core()
+                .join("private-media-staging"),
+        );
+        let diarization_service = DiarizationService::with_test_roots(
+            recording_store.settings_root_for_core().join("diarization"),
+            recording_store.key_root_for_core(),
+        );
+        let meeting_profiles = MeetingProfileService::with_root(
+            recording_store
+                .settings_root_for_core()
+                .join("meeting-profiles"),
+        );
+        let replacement_rules = ReplacementRuleService::with_root(
+            recording_store
+                .settings_root_for_core()
+                .join("replacement-rules"),
+        );
         let ai_fallback_preference = AiFallbackPreferenceService::with_root(
             recording_store.settings_root_for_core().join("local-ai"),
         );
@@ -336,21 +541,29 @@ impl CoreState {
             recording_store.key_root_for_core(),
         );
         let bundled_ai_assets = BundledAiAssets::disabled();
-        let job_manager = JobManager::with_test_roots_and_staging(
-            PROTOCOL_VERSION,
-            recording_store
-                .settings_root_for_core()
-                .join("background-jobs"),
-            recording_store.key_root_for_core(),
-            &dictionary_staging,
-        );
-        maintain_dictionary_staging(&job_manager, &dictionary_staging);
-        let state = Self {
+        let job_manager = if automation_read_only {
+            JobManager::in_memory(PROTOCOL_VERSION)
+        } else {
+            JobManager::with_test_roots_and_staging(
+                PROTOCOL_VERSION,
+                recording_store
+                    .settings_root_for_core()
+                    .join("background-jobs"),
+                recording_store.key_root_for_core(),
+                &dictionary_staging,
+            )
+        };
+        if !automation_read_only {
+            maintain_dictionary_staging(&job_manager, &dictionary_staging);
+        }
+        let mut state = Self {
             started_at_ms,
+            automation_read_only,
             ai_fallback_preference,
             bundled_ai_assets: bundled_ai_assets.clone(),
-            capture_manager: CaptureManager::default(),
+            capture_manager: CaptureManager::with_preferences_root(capture_preferences_root),
             consent_store: ConsentStore::with_root(consent_root),
+            diarization_service,
             dictionary_staging,
             local_ai_service: LocalAiService,
             local_instruct_assets: LocalInstructAssetManager::with_root(
@@ -361,10 +574,16 @@ impl CoreState {
                 bundled_ai_assets.clone(),
                 terminology_service.clone(),
             ),
+            live_transcript: LiveTranscriptService::new(),
+            live_asr_producer: LiveAsrProducerManager::default(),
+            media_import,
+            media_local_validation_active: Arc::new(AtomicBool::new(false)),
+            meeting_profiles,
             job_manager,
             model_manager: ModelManager::with_bundled_assets(bundled_ai_assets),
             model_scheduler: LocalModelScheduler::default(),
             recording_store,
+            replacement_rules,
             recent_request_ids: RecentRequestIds::default(),
             shutdown_requested: false,
             startup_recovery,
@@ -377,9 +596,21 @@ impl CoreState {
             v2_importer: V2Importer,
             vault_store,
         };
-        let background_services = state.background_job_services();
-        let _ = background_services.ensure_bundled_general_dictionary();
-        state.job_manager.recover(background_services.executor());
+        if !automation_read_only {
+            if let Some(result) = startup_recovery_result {
+                let reconciled = result.map(|value| {
+                    let value = reconcile_recovered_deletions(value, &state);
+                    let _ = state
+                        .job_manager
+                        .resolve_media_import_cleanup_after_recovery(&value);
+                    value
+                });
+                state.startup_recovery = startup_recovery_status(reconciled);
+            }
+            let background_services = state.background_job_services();
+            let _ = background_services.ensure_bundled_general_dictionary();
+            state.job_manager.recover(background_services.executor());
+        }
         state
     }
 
@@ -391,6 +622,7 @@ impl CoreState {
             self.dictionary_staging.clone(),
             self.terminology_service.clone(),
             self.transcription_service.clone(),
+            self.live_transcript.clone(),
         )
     }
 }
@@ -442,6 +674,18 @@ fn startup_recovery_status(result: Result<Value, RecordingStoreError>) -> Startu
             error_code: Some(error.code),
             raw_path_exposed: false,
         },
+    }
+}
+
+fn skipped_startup_recovery_status() -> StartupRecoveryStatus {
+    StartupRecoveryStatus {
+        attempted: false,
+        ok: true,
+        recovered_count: 0,
+        completed_deletion_count: 0,
+        pending_deletion_count: 0,
+        error_code: None,
+        raw_path_exposed: false,
     }
 }
 
@@ -577,6 +821,58 @@ fn make_terminology_error(id: Value, error: TerminologyError) -> RpcResponse {
     make_error(id, error.code, error.message)
 }
 
+fn deserialize_recap_template<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.len() > 4_096
+        || trimmed.chars().any(|character| {
+            character == '\0'
+                || (character.is_control()
+                    && character != '\n'
+                    && character != '\r'
+                    && character != '\t')
+        })
+    {
+        return Err(SerdeDeError::custom(
+            "recapTemplate must contain at most 4096 bytes of safe text",
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn make_meeting_profile_error(id: Value, error: MeetingProfileError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
+fn make_media_import_error(id: Value, error: MediaImportServiceError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
+fn make_diarization_error(id: Value, error: DiarizationServiceError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
+fn make_live_transcript_error(id: Value, error: LiveTranscriptServiceError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
+fn make_live_asr_error(id: Value, error: LiveAsrProducerError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
+fn make_replacement_rule_error(id: Value, error: ReplacementRuleError) -> RpcResponse {
+    make_error(id, error.code, error.message)
+}
+
 fn make_model_error(id: Value, error: ModelManagerError) -> RpcResponse {
     make_error(id, error.code, error.message)
 }
@@ -601,6 +897,12 @@ fn make_job_error(id: Value, error: JobManagerError) -> RpcResponse {
     make_error(id, error.code, error.message)
 }
 
+fn rollback_failed_capture_start(job_manager: &JobManager, recording_priority_acquired: bool) {
+    if recording_priority_acquired {
+        job_manager.set_recording_active(false);
+    }
+}
+
 fn decode_params<T>(id: Value, params: Value) -> Result<T, RpcResponse>
 where
     T: for<'de> Deserialize<'de>,
@@ -614,8 +916,40 @@ where
     })
 }
 
+fn capture_processing_profile(
+    state: &CoreState,
+    profile_id: Option<&str>,
+    profile_version: Option<u32>,
+    capture_source: ProfileCaptureSource,
+) -> Result<MeetingProcessingProfileSnapshot, MeetingProfileError> {
+    match (profile_id, profile_version) {
+        (Some(profile_id), Some(profile_version)) => {
+            state.meeting_profiles.processing_snapshot_for_capture(
+                profile_id,
+                profile_version,
+                capture_source,
+                &state.replacement_rules,
+            )
+        }
+        (None, None) => state
+            .meeting_profiles
+            .active_processing_snapshot_for_capture(capture_source, &state.replacement_rules),
+        _ => Err(MeetingProfileError {
+            code: "MEETING_PROFILE_BINDING_INCOMPLETE",
+            message: "capture requires both a meeting profile id and version".to_string(),
+        }),
+    }
+}
+
 fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
     let id = req.id.clone();
+    if state.automation_read_only && !AUTOMATION_READ_ONLY_METHODS.contains(&req.method.as_str()) {
+        return make_error(
+            id,
+            "METHOD_NOT_ALLOWED",
+            "Method is unavailable in the read-only automation core",
+        );
+    }
     let result = match req.method.as_str() {
         "core.ping" => json!({ "pong": true }),
         "core.version" => json!({
@@ -659,10 +993,19 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "import.v2.fromFolder",
                 "import.v2.startFromFolder",
                 "import.v2.proofSynthetic",
+                "media.importStatus",
+                "media.validateLocalSourcePath",
+                "media.importFromPath",
                 "consent.status",
                 "consent.acknowledge",
                 "capture.status",
                 "capture.devices",
+                "capture.preferences",
+                "capture.setPreferredMicrophone",
+                "capture.micTestStart",
+                "capture.micTestStatus",
+                "capture.micTestSample",
+                "capture.micTestStop",
                 "capture.startMic",
                 "capture.startSystem",
                 "capture.startMicAndSystem",
@@ -698,11 +1041,34 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "ai.proofHeuristicRecap",
                 "ai.proofSchedulerBusy",
                 "ai.ask.start",
+                "ai.cleanup.start",
                 "ai.recap.start",
                 "transcription.status",
                 "transcription.quality.status",
                 "transcription.quality.update",
                 "transcription.quality.benchmark.start",
+                "liveTranscript.enable",
+                "liveTranscript.start",
+                "liveTranscript.snapshot",
+                "liveTranscript.clear",
+                "liveTranscript.stop",
+                "liveTranscript.eventsDrain",
+                "diarization.status",
+                "diarization.updatePreference",
+                "diarization.speakerNames",
+                "diarization.assignSpeakerName",
+                "diarization.removeSpeakerName",
+                "profiles.list",
+                "profiles.get",
+                "profiles.upsert",
+                "profiles.delete",
+                "profiles.select",
+                "replacements.list",
+                "replacements.get",
+                "replacements.upsert",
+                "replacements.delete",
+                "replacements.preview",
+                "replacements.apply",
                 "terminology.status",
                 "terminology.import",
                 "terminology.package.start",
@@ -713,6 +1079,8 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "transcription.runLocal",
                 "transcription.start",
                 "transcription.proofSynthetic",
+                "transcription.protectedTermReview",
+                "transcription.applyProtectedTermReview",
                 "jobs.list",
                 "jobs.activeSummary",
                 "jobs.get",
@@ -735,11 +1103,15 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 "recording.durable.replayManifest",
                 "recording.durable.transcript",
                 "recording.durable.transcriptPage",
+                "recording.trustHistory",
+                "recording.transcriptRevision",
+                "recording.selectTranscriptRevision",
                 "recording.privacyReceipt",
                 "recording.durable.readAudioChunk",
                 "recording.durable.search",
                 "recording.notes.read",
                 "recording.notes.save",
+                "transcription.prepareReprocess",
                 "retention.status",
                 "recording.index.status",
                 "export.create",
@@ -879,6 +1251,106 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(error) => return make_v2_import_error(id, error),
             }
         }
+        "media.importStatus" => json!({
+            "implemented": production_local_media_storage_supported(),
+            "supportedContainers": ["wav", "mp3", "m4a", "mp4", "webm"],
+            "nativeImportReady": ["wav-pcm16", "mp3", "m4a-aac-lc", "m4a-alac", "mp4-aac-lc", "mp4-alac", "webm-vorbis"],
+            "decoderUnavailable": ["webm-opus", "video-only", "unsupported-container-codec"],
+            "pickerOwnedByMainProcess": true,
+            "rendererPathAccepted": false,
+            "localOnly": true,
+            "networkAttempted": false,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }),
+        "media.validateLocalSourcePath" => {
+            if state.capture_manager.is_active() {
+                return make_error(
+                    id,
+                    "MEDIA_IMPORT_CAPTURE_ACTIVE",
+                    "media cannot be validated while a recording is active",
+                );
+            }
+            let params = match decode_params::<MediaImportPathParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            let media_import = state.media_import.clone();
+            let source_path = PathBuf::from(params.source_path);
+            match run_bounded_media_local_validation(
+                Arc::clone(&state.media_local_validation_active),
+                Duration::from_secs(3),
+                move || media_import.validate_local_source_path(source_path),
+            ) {
+                Ok(Ok(value)) => json!(value),
+                Ok(Err(error)) => return make_media_import_error(id, error),
+                Err(MediaLocalValidationRunError::Busy) => {
+                    return make_error(
+                        id,
+                        "MEDIA_IMPORT_LOCAL_VALIDATION_BUSY",
+                        "another local media eligibility validation is still running",
+                    )
+                }
+                Err(MediaLocalValidationRunError::Timeout) => {
+                    return make_error(
+                        id,
+                        "MEDIA_IMPORT_LOCAL_VALIDATION_TIMEOUT",
+                        "local media eligibility validation exceeded its fixed time limit",
+                    )
+                }
+                Err(
+                    MediaLocalValidationRunError::Spawn
+                    | MediaLocalValidationRunError::Disconnected,
+                ) => {
+                    return make_error(
+                        id,
+                        "MEDIA_IMPORT_LOCAL_VALIDATION_FAILED",
+                        "local media eligibility validation could not complete",
+                    )
+                }
+            }
+        }
+        "media.importFromPath" => {
+            if state.capture_manager.is_active() {
+                return make_error(
+                    id,
+                    "MEDIA_IMPORT_CAPTURE_ACTIVE",
+                    "media cannot be imported while a recording is active",
+                );
+            }
+            let params =
+                match decode_params::<MediaImportVerifiedPathParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let store = state.recording_store.clone();
+            let media_import = state.media_import.clone();
+            let source_path = PathBuf::from(params.source_path);
+            let expected_source_sha256 = params.expected_source_sha256;
+            // Mark it exclusive so capture activation signals cancellation. The import
+            // service rolls back partial durable data before the import job reports a
+            // terminal state.
+            match state
+                .job_manager
+                .submit("media-import", true, move |context| {
+                    context.progress("validating", 0, Some(3), Some("stage"));
+                    let cancellation = context.cancellation_flag();
+                    context.progress("decoding", 1, Some(3), Some("stage"));
+                    let value = media_import
+                        .import_source_cancellable(
+                            &store,
+                            source_path,
+                            expected_source_sha256,
+                            cancellation.as_ref(),
+                        )
+                        .map_err(|error| JobFailure::new(error.code, error.message, false))?;
+                    context.progress("committing", 2, Some(3), Some("stage"));
+                    Ok(json!(value))
+                }) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
         "consent.status" => match state.consent_store.status() {
             Ok(value) => value,
             Err(error) => return make_consent_error(id, error),
@@ -895,6 +1367,37 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
         }
         "capture.status" => state.capture_manager.status(),
         "capture.devices" => state.capture_manager.devices(),
+        "capture.preferences" => state.capture_manager.preferences(),
+        "capture.setPreferredMicrophone" => {
+            let params = match decode_params::<SetPreferredMicrophoneParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.capture_manager.set_preferred_microphone(params) {
+                Ok(value) => value,
+                Err(error) => return make_capture_error(id, error),
+            }
+        }
+        "capture.micTestStart" => {
+            let params = match decode_params::<MicTestStartParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.capture_manager.mic_test_start(params) {
+                Ok(value) => value,
+                Err(error) => return make_capture_error(id, error),
+            }
+        }
+        "capture.micTestStatus" => state.capture_manager.mic_test_status(),
+        "capture.micTestSample" => match state.capture_manager.mic_test_sample() {
+            Ok(value) => value,
+            Err(error) => return make_capture_error(id, error),
+        },
+        "capture.micTestStop" => match state.capture_manager.mic_test_stop() {
+            Ok(value) => value,
+            Err(error) => return make_capture_error(id, error),
+        },
         "capture.startMic" => {
             let params = match decode_params::<CaptureStartParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -903,14 +1406,30 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             if let Err(error) = state.consent_store.require_mic_recording() {
                 return make_consent_error(id, error);
             }
-            state.job_manager.set_recording_active(true);
-            match state
-                .capture_manager
-                .start_mic(state.recording_store.clone(), params)
+            let processing_profile = match capture_processing_profile(
+                state,
+                params.profile_id.as_deref(),
+                params.profile_version,
+                ProfileCaptureSource::Microphone,
+            ) {
+                Ok(profile) => profile,
+                Err(error) => return make_meeting_profile_error(id, error),
+            };
+            let recording_priority_acquired = match state
+                .job_manager
+                .begin_recording_priority(MEDIA_IMPORT_RECORDING_BARRIER_TIMEOUT)
             {
+                Ok(acquired) => acquired,
+                Err(error) => return make_job_error(id, error),
+            };
+            match state.capture_manager.start_mic_with_processing_profile(
+                state.recording_store.clone(),
+                params,
+                Some(processing_profile),
+            ) {
                 Ok(value) => value,
                 Err(error) => {
-                    state.job_manager.set_recording_active(false);
+                    rollback_failed_capture_start(&state.job_manager, recording_priority_acquired);
                     return make_capture_error(id, error);
                 }
             }
@@ -923,14 +1442,30 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             if let Err(error) = state.consent_store.require_system_audio_recording() {
                 return make_consent_error(id, error);
             }
-            state.job_manager.set_recording_active(true);
-            match state
-                .capture_manager
-                .start_system(state.recording_store.clone(), params)
+            let processing_profile = match capture_processing_profile(
+                state,
+                params.profile_id.as_deref(),
+                params.profile_version,
+                ProfileCaptureSource::SystemAudio,
+            ) {
+                Ok(profile) => profile,
+                Err(error) => return make_meeting_profile_error(id, error),
+            };
+            let recording_priority_acquired = match state
+                .job_manager
+                .begin_recording_priority(MEDIA_IMPORT_RECORDING_BARRIER_TIMEOUT)
             {
+                Ok(acquired) => acquired,
+                Err(error) => return make_job_error(id, error),
+            };
+            match state.capture_manager.start_system_with_processing_profile(
+                state.recording_store.clone(),
+                params,
+                Some(processing_profile),
+            ) {
                 Ok(value) => value,
                 Err(error) => {
-                    state.job_manager.set_recording_active(false);
+                    rollback_failed_capture_start(&state.job_manager, recording_priority_acquired);
                     return make_capture_error(id, error);
                 }
             }
@@ -944,59 +1479,132 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             if let Err(error) = state.consent_store.require_mic_and_system_audio_recording() {
                 return make_consent_error(id, error);
             }
-            state.job_manager.set_recording_active(true);
+            let processing_profile = match capture_processing_profile(
+                state,
+                params.profile_id.as_deref(),
+                params.profile_version,
+                ProfileCaptureSource::Combined,
+            ) {
+                Ok(profile) => profile,
+                Err(error) => return make_meeting_profile_error(id, error),
+            };
+            let recording_priority_acquired = match state
+                .job_manager
+                .begin_recording_priority(MEDIA_IMPORT_RECORDING_BARRIER_TIMEOUT)
+            {
+                Ok(acquired) => acquired,
+                Err(error) => return make_job_error(id, error),
+            };
             match state
                 .capture_manager
-                .start_mic_and_system(state.recording_store.clone(), params)
-            {
+                .start_mic_and_system_with_processing_profile(
+                    state.recording_store.clone(),
+                    params,
+                    Some(processing_profile),
+                ) {
                 Ok(value) => value,
                 Err(error) => {
-                    state.job_manager.set_recording_active(false);
+                    rollback_failed_capture_start(&state.job_manager, recording_priority_acquired);
                     return make_capture_error(id, error);
                 }
             }
         }
-        "capture.stop" => match state.capture_manager.stop(&state.recording_store) {
-            Ok(mut value) => {
-                let recording_id = finalized_capture_recording_id(&value);
-                if recording_id.is_some() {
-                    state.job_manager.set_recording_active(false);
-                }
-                if let Some(recording_id) = recording_id {
-                    let descriptor = descriptor_for_transcription(
-                        recording_id,
-                        None,
-                        None,
-                        true,
-                        state
-                            .ai_fallback_preference
-                            .preference_or_safe_default()
-                            .default_fallback_policy(),
-                    );
-                    let executor = state.background_job_services().executor();
-                    match state.job_manager.submit_descriptor(descriptor, executor) {
-                        Ok(job) => {
-                            if let Some(root) = value.as_object_mut() {
-                                root.insert("autoProcessingQueued".to_string(), Value::Bool(true));
-                                root.insert(
-                                    "transcriptionJobId".to_string(),
-                                    job.get("jobId").cloned().unwrap_or(Value::Null),
-                                );
-                            }
-                        }
-                        Err(error) => {
-                            if let Some(root) = value.as_object_mut() {
-                                root.insert("autoProcessingQueued".to_string(), Value::Bool(false));
-                                root.insert(
-                                    "processingQueueError".to_string(),
-                                    processing_queue_failure(&error),
-                                );
-                            }
-                        }
+        "capture.stop" => {
+            let stopping_recording_id = state.capture_manager.request_stop();
+            let live_asr_stop = stopping_recording_id
+                .as_deref()
+                .map(|recording_id| state.live_asr_producer.stop(recording_id));
+            if let Some(recording_id) = stopping_recording_id.as_deref() {
+                let _ = state.live_transcript.producer_stopped(recording_id);
+            }
+            match state.capture_manager.stop(&state.recording_store) {
+                Ok(mut value) => {
+                    if let (Some(root), Some(outcome)) =
+                        (value.as_object_mut(), live_asr_stop.as_ref())
+                    {
+                        root.insert(
+                            "liveTranscriptProducer".to_string(),
+                            json!({
+                                "workerFound": outcome.worker_found,
+                                "cancellationRequested": outcome.cancellation_requested,
+                                "joinedWithinBudget": outcome.joined_within_budget,
+                                "joinDeferred": outcome.join_deferred,
+                                "joinBudgetMs": 250,
+                                "droppedPcmChunkCount": outcome.dropped_pcm_chunk_count,
+                                "failureCode": outcome.failure_code,
+                                "provisionalDurableWrites": false,
+                                "rawPathExposed": false,
+                                "keyMaterialExposedToRenderer": false
+                            }),
+                        );
                     }
-                } else if let Some(root) = value.as_object_mut() {
-                    root.insert("autoProcessingQueued".to_string(), Value::Bool(false));
-                    root.insert(
+                    let recording_id = finalized_capture_recording_id(&value);
+                    if recording_id.is_some() {
+                        state.job_manager.set_recording_active(false);
+                    }
+                    if let Some(recording_id) = recording_id {
+                        match state.recording_store.processing_profile(&recording_id) {
+                            Ok(processing_profile) => {
+                                let descriptor = descriptor_for_transcription(
+                                    recording_id,
+                                    None,
+                                    None,
+                                    true,
+                                    processing_profile.as_ref(),
+                                    state
+                                        .ai_fallback_preference
+                                        .preference_or_safe_default()
+                                        .default_fallback_policy(),
+                                );
+                                let executor = state.background_job_services().executor();
+                                match state.job_manager.submit_descriptor(descriptor, executor) {
+                                    Ok(job) => {
+                                        if let Some(root) = value.as_object_mut() {
+                                            root.insert(
+                                                "autoProcessingQueued".to_string(),
+                                                Value::Bool(true),
+                                            );
+                                            root.insert(
+                                                "transcriptionJobId".to_string(),
+                                                job.get("jobId").cloned().unwrap_or(Value::Null),
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if let Some(root) = value.as_object_mut() {
+                                            root.insert(
+                                                "autoProcessingQueued".to_string(),
+                                                Value::Bool(false),
+                                            );
+                                            root.insert(
+                                                "processingQueueError".to_string(),
+                                                processing_queue_failure(&error),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                if let Some(root) = value.as_object_mut() {
+                                    root.insert(
+                                        "autoProcessingQueued".to_string(),
+                                        Value::Bool(false),
+                                    );
+                                    root.insert(
+                                    "processingQueueError".to_string(),
+                                    json!({
+                                        "code": error.code,
+                                        "message": "Recording saved, but its capture-time processing profile could not be verified.",
+                                        "retryable": false,
+                                        "rawPathExposed": false
+                                    }),
+                                );
+                                }
+                            }
+                        }
+                    } else if let Some(root) = value.as_object_mut() {
+                        root.insert("autoProcessingQueued".to_string(), Value::Bool(false));
+                        root.insert(
                         "processingQueueError".to_string(),
                         json!({
                             "code": "CAPTURE_RECOVERY_REQUIRED",
@@ -1004,11 +1612,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                             "retryable": true
                         }),
                     );
+                    }
+                    value
                 }
-                value
+                Err(error) => return make_capture_error(id, error),
             }
-            Err(error) => return make_capture_error(id, error),
-        },
+        }
         "capture.proofSynthetic" => match state
             .capture_manager
             .proof_synthetic(&state.recording_store)
@@ -1031,7 +1640,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             Err(error) => return make_capture_error(id, error),
         },
         "models.status" => state.model_manager.status(&state.recording_store),
-        "models.listLocal" => state.model_manager.list_local(&state.recording_store),
+        "models.listLocal" => state.model_manager.list_local(
+            &state.recording_store,
+            &state
+                .transcription_service
+                .measured_speech_model_latencies_ms(),
+        ),
         "models.verifyLocal" => {
             let params = match decode_params::<ModelIdParams>(id.clone(), req.params) {
                 Ok(params) => params,
@@ -1115,7 +1729,11 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 .submit("speech-model-import", false, move |context| {
                     context.progress("verifying-and-installing", 0, Some(1), Some("stage"));
                     model_manager
-                        .import_finish(&store, params)
+                        .import_finish_with_cancellation(
+                            &store,
+                            params,
+                            Some(context.cancellation_flag()),
+                        )
                         .map_err(|error| JobFailure::new(error.code, error.message, true))
                 }) {
                 Ok(value) => value,
@@ -1359,12 +1977,38 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            if let Err(error) = state.recording_store.require_finished(&params.recording_id) {
+                return make_recording_error(id, error);
+            }
             let policy = match state.ai_fallback_preference.resolve_intent(params.intent) {
                 Ok(policy) => policy,
                 Err(error) => return make_ai_fallback_preference_error(id, error),
             };
-            let descriptor =
-                descriptor_for_recap(params.recording_id, policy.mode, policy.fallback_policy);
+            let descriptor = match descriptor_for_recording_recap(
+                &state.recording_store,
+                params.recording_id,
+                params.recap_template,
+                policy.mode,
+                policy.fallback_policy,
+            ) {
+                Ok(descriptor) => descriptor,
+                Err(error) => return make_recording_error(id, error),
+            };
+            let executor = state.background_job_services().executor();
+            match state.job_manager.submit_descriptor(descriptor, executor) {
+                Ok(value) => value,
+                Err(error) => return make_job_error(id, error),
+            }
+        }
+        "ai.cleanup.start" => {
+            let params = match decode_params::<AiCleanupJobParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            if let Err(error) = state.recording_store.require_finished(&params.recording_id) {
+                return make_recording_error(id, error);
+            }
+            let descriptor = descriptor_for_cleanup(params.recording_id, true);
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
@@ -1376,6 +2020,9 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            if let Err(error) = state.recording_store.require_finished(&params.recording_id) {
+                return make_recording_error(id, error);
+            }
             let policy = match state.ai_fallback_preference.resolve_intent(params.intent) {
                 Ok(policy) => policy,
                 Err(error) => return make_ai_fallback_preference_error(id, error),
@@ -1390,6 +2037,262 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state.job_manager.submit_descriptor(descriptor, executor) {
                 Ok(value) => value,
                 Err(error) => return make_job_error(id, error),
+            }
+        }
+        "liveTranscript.enable" => {
+            let params =
+                match decode_params::<LiveTranscriptRecordingParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.live_transcript.enable(params.recording_id) {
+                Ok(value) => json!(value),
+                Err(error) => return make_live_transcript_error(id, error),
+            }
+        }
+        "liveTranscript.start" => {
+            let params =
+                match decode_params::<LiveTranscriptRecordingParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            if !LiveAsrProducerManager::available() {
+                return make_live_asr_error(
+                    id,
+                    LiveAsrProducerError {
+                        code: "LIVE_TRANSCRIPT_ENGINE_UNAVAILABLE",
+                        message:
+                            "this Candor core was built without the packaged local Whisper runtime"
+                                .to_string(),
+                    },
+                );
+            }
+            let value = match state.live_transcript.start(&params.recording_id) {
+                Ok(value) => value,
+                Err(error) => return make_live_transcript_error(id, error),
+            };
+            if let Err(error) = state.live_asr_producer.start(
+                &params.recording_id,
+                &state.capture_manager,
+                state.recording_store.clone(),
+                state.model_manager.clone(),
+                state.transcription_service.clone(),
+                state.live_transcript.clone(),
+            ) {
+                let _ = state.live_transcript.producer_stopped(&params.recording_id);
+                return make_live_asr_error(id, error);
+            }
+            json!(value)
+        }
+        "liveTranscript.snapshot" => {
+            let params =
+                match decode_params::<LiveTranscriptRecordingParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.live_transcript.snapshot(&params.recording_id) {
+                Ok(value) => json!(value),
+                Err(error) => return make_live_transcript_error(id, error),
+            }
+        }
+        "liveTranscript.clear" => {
+            let params =
+                match decode_params::<LiveTranscriptRecordingParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.live_transcript.clear(&params.recording_id) {
+                Ok(value) => json!(value),
+                Err(error) => return make_live_transcript_error(id, error),
+            }
+        }
+        "liveTranscript.stop" => {
+            let params =
+                match decode_params::<LiveTranscriptRecordingParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            let _ = state.live_asr_producer.stop(&params.recording_id);
+            match state.live_transcript.stop(&params.recording_id) {
+                Ok(value) => json!(value),
+                Err(error) => return make_live_transcript_error(id, error),
+            }
+        }
+        "liveTranscript.eventsDrain" => {
+            if let Err(response) = decode_params::<()>(id.clone(), req.params) {
+                return response;
+            }
+            match state.live_transcript.drain_events() {
+                Ok(value) => json!(value),
+                Err(error) => return make_live_transcript_error(id, error),
+            }
+        }
+        "diarization.status" => {
+            if let Err(response) = decode_params::<()>(id.clone(), req.params) {
+                return response;
+            }
+            match state.diarization_service.status() {
+                Ok(value) => value,
+                Err(error) => return make_diarization_error(id, error),
+            }
+        }
+        "diarization.updatePreference" => {
+            let params = match decode_params::<DiarizationPreferenceParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.diarization_service.update_preference(params) {
+                Ok(value) => value,
+                Err(error) => return make_diarization_error(id, error),
+            }
+        }
+        "diarization.speakerNames" => {
+            let params = match decode_params::<DiarizationRecordingParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            if let Err(error) = state.recording_store.trust_history(RecordingIdParams {
+                recording_id: params.recording_id.clone(),
+            }) {
+                return make_recording_error(id, error);
+            }
+            match state.diarization_service.list_speaker_names(params) {
+                Ok(value) => value,
+                Err(error) => return make_diarization_error(id, error),
+            }
+        }
+        "diarization.assignSpeakerName" => {
+            let params =
+                match decode_params::<DiarizationAssignSpeakerNameParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            if let Err(error) = state.recording_store.trust_history(RecordingIdParams {
+                recording_id: params.recording_id.clone(),
+            }) {
+                return make_recording_error(id, error);
+            }
+            match state.diarization_service.assign_speaker_name(params) {
+                Ok(value) => value,
+                Err(error) => return make_diarization_error(id, error),
+            }
+        }
+        "diarization.removeSpeakerName" => {
+            let params =
+                match decode_params::<DiarizationRemoveSpeakerNameParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            if let Err(error) = state.recording_store.trust_history(RecordingIdParams {
+                recording_id: params.recording_id.clone(),
+            }) {
+                return make_recording_error(id, error);
+            }
+            match state.diarization_service.remove_speaker_name(params) {
+                Ok(value) => value,
+                Err(error) => return make_diarization_error(id, error),
+            }
+        }
+        "profiles.list" => match state.meeting_profiles.list() {
+            Ok(value) => value,
+            Err(error) => return make_meeting_profile_error(id, error),
+        },
+        "profiles.get" => {
+            let params = match decode_params::<MeetingProfileGetParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.meeting_profiles.get(params) {
+                Ok(value) => value,
+                Err(error) => return make_meeting_profile_error(id, error),
+            }
+        }
+        "profiles.upsert" => {
+            let params = match decode_params::<MeetingProfileUpsertParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.meeting_profiles.upsert_custom(params) {
+                Ok(value) => value,
+                Err(error) => return make_meeting_profile_error(id, error),
+            }
+        }
+        "profiles.delete" => {
+            let params = match decode_params::<MeetingProfileDeleteParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.meeting_profiles.delete_custom(params) {
+                Ok(value) => value,
+                Err(error) => return make_meeting_profile_error(id, error),
+            }
+        }
+        "profiles.select" => {
+            let params = match decode_params::<MeetingProfileSelectParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.meeting_profiles.select(params) {
+                Ok(value) => value,
+                Err(error) => return make_meeting_profile_error(id, error),
+            }
+        }
+        "replacements.list" => match state.replacement_rules.list() {
+            Ok(value) => value,
+            Err(error) => return make_replacement_rule_error(id, error),
+        },
+        "replacements.get" => {
+            let params = match decode_params::<ReplacementRuleSetGetParams>(id.clone(), req.params)
+            {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.replacement_rules.get(params) {
+                Ok(value) => value,
+                Err(error) => return make_replacement_rule_error(id, error),
+            }
+        }
+        "replacements.upsert" => {
+            let params =
+                match decode_params::<ReplacementRuleSetUpsertParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.replacement_rules.upsert_custom(params) {
+                Ok(value) => value,
+                Err(error) => return make_replacement_rule_error(id, error),
+            }
+        }
+        "replacements.delete" => {
+            let params =
+                match decode_params::<ReplacementRuleSetDeleteParams>(id.clone(), req.params) {
+                    Ok(params) => params,
+                    Err(response) => return response,
+                };
+            match state.replacement_rules.delete_custom(params) {
+                Ok(value) => value,
+                Err(error) => return make_replacement_rule_error(id, error),
+            }
+        }
+        "replacements.preview" => {
+            let params = match decode_params::<ReplacementPreviewParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.replacement_rules.preview(params) {
+                Ok(value) => value,
+                Err(error) => return make_replacement_rule_error(id, error),
+            }
+        }
+        "replacements.apply" => {
+            let params = match decode_params::<ReplacementApplyParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.replacement_rules.apply(params) {
+                Ok(value) => value,
+                Err(error) => return make_replacement_rule_error(id, error),
             }
         }
         "terminology.status" => {
@@ -1599,7 +2502,7 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Err(response) => return response,
             };
             let recording_id = params.recording_id.clone();
-            let value = match state.transcription_service.run_local(
+            let run = match state.transcription_service.run_local_with_commit(
                 &state.recording_store,
                 &mut state.model_scheduler,
                 &state.model_manager,
@@ -1608,6 +2511,10 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(value) => value,
                 Err(error) => return make_transcription_error(id, error),
             };
+            let _ = state
+                .live_transcript
+                .reconcile_committed(&run.committed_final_revision);
+            let value = run.public_value;
             let model = value.get("model").and_then(Value::as_object);
             if let Err(error) = state.recording_store.record_processing_fact(
                 &recording_id,
@@ -1633,11 +2540,22 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            if let Err(error) = state.recording_store.require_finished(&params.recording_id) {
+                return make_recording_error(id, error);
+            }
+            let processing_profile = match state
+                .recording_store
+                .processing_profile(&params.recording_id)
+            {
+                Ok(profile) => profile,
+                Err(error) => return make_recording_error(id, error),
+            };
             let descriptor = descriptor_for_transcription(
                 params.recording_id,
                 params.channel,
                 params.model_id,
                 false,
+                processing_profile.as_ref(),
                 state
                     .ai_fallback_preference
                     .preference_or_safe_default()
@@ -1657,6 +2575,32 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             match state
                 .transcription_service
                 .proof_synthetic(&state.recording_store, params)
+            {
+                Ok(value) => value,
+                Err(error) => return make_transcription_error(id, error),
+            }
+        }
+        "transcription.protectedTermReview" => {
+            let params = match decode_params::<ProtectedTermReviewParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state
+                .transcription_service
+                .protected_term_review(&state.recording_store, params)
+            {
+                Ok(value) => value,
+                Err(error) => return make_transcription_error(id, error),
+            }
+        }
+        "transcription.applyProtectedTermReview" => {
+            let params = match decode_params::<ProtectedTermApplyParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state
+                .transcription_service
+                .apply_protected_term_review(&state.recording_store, params)
             {
                 Ok(value) => value,
                 Err(error) => return make_transcription_error(id, error),
@@ -1727,18 +2671,79 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            let deleted_recording_id = params.recording_id.clone();
+            if let Err(error) = state
+                .recording_store
+                .require_finished(&deleted_recording_id)
+            {
+                return make_recording_error(id, error);
+            }
+            if let Err(error) = state.recording_store.trust_history(RecordingIdParams {
+                recording_id: deleted_recording_id.clone(),
+            }) {
+                return make_recording_error(id, error);
+            }
+            if let Err(error) = state
+                .job_manager
+                .begin_recording_deletion(&deleted_recording_id)
+            {
+                return make_job_error(id, error);
+            }
             match state.recording_store.delete_finished(params) {
                 Ok(value) => finalize_deletion_result(value, state),
+                Err(error) => {
+                    if !state
+                        .recording_store
+                        .deletion_pending(&deleted_recording_id)
+                    {
+                        state
+                            .job_manager
+                            .abort_recording_deletion(&deleted_recording_id);
+                    }
+                    return make_recording_error(id, error);
+                }
+            }
+        }
+        "recording.durable.recover" => {
+            if state.capture_manager.is_active() {
+                return make_error(
+                    id,
+                    "RECORDING_RECOVERY_CAPTURE_ACTIVE",
+                    "recording recovery cannot run while capture is active",
+                );
+            }
+            let media_import_active = match state.job_manager.has_active_type("media-import") {
+                Ok(active) => active,
+                Err(error) => return make_job_error(id, error),
+            };
+            if media_import_active {
+                return make_error(
+                    id,
+                    "RECORDING_RECOVERY_MEDIA_IMPORT_ACTIVE",
+                    "recording recovery cannot run while a media import is active",
+                );
+            }
+            match state.recording_store.recover() {
+                Ok(value) => {
+                    let mut value = annotate_recovery_result(value, state);
+                    let cleanup_resolution = match state
+                        .job_manager
+                        .resolve_media_import_cleanup_after_recovery(&value)
+                    {
+                        Ok(resolution) => resolution,
+                        Err(error) => return make_job_error(id, error),
+                    };
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert(
+                            "mediaImportCleanupResolution".to_string(),
+                            cleanup_resolution,
+                        );
+                    }
+                    value
+                }
                 Err(error) => return make_recording_error(id, error),
             }
         }
-        "recording.durable.recover" => match state.recording_store.recover() {
-            Ok(value) => {
-                state.job_manager.set_recording_active(false);
-                annotate_recovery_result(value, state)
-            }
-            Err(error) => return make_recording_error(id, error),
-        },
         "recording.durable.list" => match state.recording_store.list() {
             Ok(value) => value,
             Err(error) => return make_recording_error(id, error),
@@ -1748,7 +2753,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state.recording_store.list_page(params) {
+            let listed = if state.automation_read_only {
+                state.recording_store.list_page_read_only(params)
+            } else {
+                state.recording_store.list_page(params)
+            };
+            match listed {
                 Ok(value) => value,
                 Err(error) => return make_recording_error(id, error),
             }
@@ -1791,11 +2801,63 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state.recording_store.transcript_page(params) {
+            let transcript = if state.automation_read_only {
+                state.recording_store.transcript_page_read_only(params)
+            } else {
+                state.recording_store.transcript_page(params)
+            };
+            match transcript {
+                Ok(value) if state.automation_read_only => match state
+                    .terminology_service
+                    .apply_accepted_corrections_read_only(value)
+                {
+                    Ok(value) => value,
+                    Err(error) => return make_terminology_error(id, error),
+                },
                 Ok(value) => match state.terminology_service.apply_accepted_corrections(value) {
                     Ok(value) => value,
                     Err(error) => return make_terminology_error(id, error),
                 },
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "recording.trustHistory" => {
+            let params = match decode_params::<RecordingIdParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.trust_history(params) {
+                Ok(value) => value,
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "recording.transcriptRevision" => {
+            let params = match decode_params::<TranscriptRevisionParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.transcript_revision(params) {
+                Ok(value) => value,
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "recording.selectTranscriptRevision" => {
+            let params = match decode_params::<TranscriptRevisionParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.select_transcript_revision(params) {
+                Ok(value) => value,
+                Err(error) => return make_recording_error(id, error),
+            }
+        }
+        "transcription.prepareReprocess" => {
+            let params = match decode_params::<ReprocessingPrepareParams>(id.clone(), req.params) {
+                Ok(params) => params,
+                Err(response) => return response,
+            };
+            match state.recording_store.prepare_reprocessing(params) {
+                Ok(value) => value,
                 Err(error) => return make_recording_error(id, error),
             }
         }
@@ -1827,7 +2889,12 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
                 Ok(params) => params,
                 Err(response) => return response,
             };
-            match state.recording_store.search(params) {
+            let result = if state.automation_read_only {
+                state.recording_store.search_read_only(params)
+            } else {
+                state.recording_store.search(params)
+            };
+            match result {
                 Ok(value) => value,
                 Err(error) => return make_recording_error(id, error),
             }
@@ -1961,10 +3028,13 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
         }
         "export.start" => {
             let raw_params = req.params.clone();
-            let _params = match decode_params::<ExportRecordingParams>(id.clone(), req.params) {
+            let params = match decode_params::<ExportRecordingParams>(id.clone(), req.params) {
                 Ok(params) => params,
                 Err(response) => return response,
             };
+            if let Err(error) = state.recording_store.require_finished(&params.recording_id) {
+                return make_recording_error(id, error);
+            }
             let descriptor = descriptor_for_export(raw_params);
             let executor = state.background_job_services().executor();
             match state.job_manager.submit_descriptor(descriptor, executor) {
@@ -1983,8 +3053,15 @@ fn handle_request(req: RpcRequest, state: &mut CoreState) -> RpcResponse {
             }
         }
         "core.shutdown" => {
-            if let Err(error) = state.job_manager.pause_all_for_shutdown() {
-                return make_job_error(id, error);
+            if !state.automation_read_only {
+                if let Err(error) = state.capture_manager.mic_test_stop() {
+                    return make_capture_error(id, error);
+                }
+                let _ = state.capture_manager.request_stop();
+                let _ = state.live_asr_producer.stop_all();
+                if let Err(error) = state.job_manager.pause_all_for_shutdown() {
+                    return make_job_error(id, error);
+                }
             }
             state.shutdown_requested = true;
             json!({ "shutdown": true })
@@ -2016,7 +3093,7 @@ fn annotate_recording_summary(mut value: Value, state: &mut CoreState) -> Value 
     value
 }
 
-fn finalize_deletion_result(mut value: Value, state: &CoreState) -> Value {
+fn finalize_deletion_result(value: Value, state: &CoreState) -> Value {
     let recording_id = value
         .get("recordingId")
         .and_then(Value::as_str)
@@ -2030,55 +3107,83 @@ fn finalize_deletion_result(mut value: Value, state: &CoreState) -> Value {
         return value;
     }
 
-    let index_cleanup = match state.vault_store.delete_recording_index(&recording_id) {
+    let jobs_cleanup = match state.job_manager.purge_recording_jobs(&recording_id) {
         Ok(cleanup) => cleanup,
-        Err(error) => json!({
-            "cleanupComplete": false,
-            "state": "pending",
-            "errorCode": error.code,
+        Err(error) => return deletion_cleanup_pending(value, "jobs", error.code),
+    };
+    let live_transcript_cleanup = match state.live_transcript.remove_for_deletion(&recording_id) {
+        Ok(cleanup) => json!(cleanup),
+        Err(error) => return deletion_cleanup_pending(value, "live-transcript", error.code),
+    };
+    let terminology_cleanup = match state.terminology_service.remove_recording(&recording_id) {
+        Ok(cleanup) => cleanup,
+        Err(error) => return deletion_cleanup_pending(value, "terminology", error.code),
+    };
+    let diarization_cleanup = match state.diarization_service.remove_recording(&recording_id) {
+        Ok(()) => json!({
+            "recordingId": recording_id,
+            "removed": true,
             "rawPathExposed": false,
             "keyMaterialExposedToRenderer": false
         }),
+        Err(error) => return deletion_cleanup_pending(value, "diarization", error.code),
     };
-    let cleanup_complete = index_cleanup
-        .get("cleanupComplete")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    if cleanup_complete {
-        match state
-            .recording_store
-            .complete_deletion_metadata(RecordingIdParams {
-                recording_id: recording_id.clone(),
-            }) {
-            Ok(mut completed) => {
-                if let Some(object) = completed.as_object_mut() {
-                    object.insert("vaultIndexCleanup".to_string(), index_cleanup);
-                }
-                return completed;
-            }
-            Err(error) => {
-                if let Some(object) = value.as_object_mut() {
-                    object.insert("state".to_string(), json!("metadataCleanupPending"));
-                    object.insert("deleted".to_string(), json!(false));
-                    object.insert("metadataCleanupComplete".to_string(), json!(false));
-                    object.insert("retryRequired".to_string(), json!(true));
-                    object.insert("metadataErrorCode".to_string(), json!(error.code));
-                }
-            }
+    let search_cleanup = match state.recording_store.invalidate_trust_search_index() {
+        Ok(cleanup) => cleanup,
+        Err(error) => return deletion_cleanup_pending(value, "search-index", error.code),
+    };
+    let index_cleanup = match state.vault_store.delete_recording_index(&recording_id) {
+        Ok(cleanup)
+            if cleanup
+                .get("cleanupComplete")
+                .and_then(Value::as_bool)
+                .unwrap_or(false) =>
+        {
+            cleanup
         }
+        Ok(_) => {
+            return deletion_cleanup_pending(value, "vault-index", "VAULT_INDEX_CLEANUP_PENDING")
+        }
+        Err(error) => return deletion_cleanup_pending(value, "vault-index", error.code),
+    };
+    match state
+        .recording_store
+        .complete_deletion_metadata(RecordingIdParams {
+            recording_id: recording_id.clone(),
+        }) {
+        Ok(mut completed) => {
+            state.job_manager.complete_recording_deletion(&recording_id);
+            if let Some(object) = completed.as_object_mut() {
+                object.insert("jobsCleanup".to_string(), jobs_cleanup);
+                object.insert("liveTranscriptCleanup".to_string(), live_transcript_cleanup);
+                object.insert("terminologyCleanup".to_string(), terminology_cleanup);
+                object.insert("diarizationCleanup".to_string(), diarization_cleanup);
+                object.insert("searchIndexCleanup".to_string(), search_cleanup);
+                object.insert("vaultIndexCleanup".to_string(), index_cleanup);
+            }
+            completed
+        }
+        Err(error) => deletion_cleanup_pending(value, "deletion-metadata", error.code),
     }
+}
+
+fn deletion_cleanup_pending(
+    mut value: Value,
+    stage: &'static str,
+    error_code: &'static str,
+) -> Value {
     if let Some(object) = value.as_object_mut() {
-        object.insert("vaultIndexCleanup".to_string(), index_cleanup);
+        object.insert("state".to_string(), json!("metadataCleanupPending"));
+        object.insert("deleted".to_string(), json!(false));
+        object.insert("metadataCleanupComplete".to_string(), json!(false));
+        object.insert("retryRequired".to_string(), json!(true));
+        object.insert("metadataCleanupStage".to_string(), json!(stage));
+        object.insert("metadataErrorCode".to_string(), json!(error_code));
     }
     value
 }
 
-fn reconcile_recovered_deletions(
-    mut value: Value,
-    recording_store: &RecordingStore,
-    vault_store: &VaultStore,
-) -> Value {
+fn reconcile_recovered_deletions(mut value: Value, state: &CoreState) -> Value {
     let ids = value
         .get("completedDeletionIds")
         .and_then(Value::as_array)
@@ -2090,22 +3195,27 @@ fn reconcile_recovered_deletions(
         .and_then(Value::as_u64)
         .unwrap_or_default();
     for id in ids.iter().filter_map(Value::as_str) {
-        let cleanup_complete = vault_store
-            .delete_recording_index(id)
-            .ok()
-            .map(|cleanup| {
-                cleanup
-                    .get("cleanupComplete")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-        if cleanup_complete
-            && recording_store
-                .complete_deletion_metadata(RecordingIdParams {
-                    recording_id: id.to_string(),
-                })
-                .is_ok()
+        if state.job_manager.recover_recording_deletion(id).is_err() {
+            pending = pending.saturating_add(1);
+            continue;
+        }
+        let finalized = finalize_deletion_result(
+            json!({
+                "recordingId": id,
+                "state": "metadataCleanupPending",
+                "deleted": false,
+                "recordingDataRemoved": true,
+                "metadataCleanupComplete": false,
+                "retryRequired": true,
+                "permanent": true,
+                "rawPathExposed": false
+            }),
+            state,
+        );
+        if finalized
+            .get("deleted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
         {
             completed = completed.saturating_add(1);
         } else {
@@ -2121,7 +3231,7 @@ fn reconcile_recovered_deletions(
 }
 
 fn annotate_recovery_result(mut value: Value, state: &mut CoreState) -> Value {
-    value = reconcile_recovered_deletions(value, &state.recording_store, &state.vault_store);
+    value = reconcile_recovered_deletions(value, state);
     let mut indexed = 0_u64;
     let mut available = false;
     if let Some(recordings) = value.get("recoveredRecordings").and_then(Value::as_array) {
@@ -2433,6 +3543,7 @@ mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
     use std::fs;
+    use std::time::{Duration, Instant};
 
     fn core_state() -> CoreState {
         let stamp = SystemTime::now()
@@ -2470,6 +3581,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failed_duplicate_capture_start_does_not_release_existing_recording_priority() {
+        let manager = JobManager::new("test-protocol");
+        let first_acquisition = manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("first capture acquires recording priority");
+        assert!(first_acquisition);
+
+        let duplicate_acquisition = manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("duplicate capture observes existing priority");
+        assert!(!duplicate_acquisition);
+        rollback_failed_capture_start(&manager, duplicate_acquisition);
+
+        assert!(
+            !manager
+                .begin_recording_priority(Duration::from_millis(25))
+                .expect("existing capture still owns recording priority"),
+            "duplicate failure must not clear the first capture's priority"
+        );
+
+        rollback_failed_capture_start(&manager, first_acquisition);
+        assert!(manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("priority can be acquired after the owner releases it"));
+        manager.set_recording_active(false);
+    }
+
     fn request(method: &str) -> RpcRequest {
         request_with(json!(1), method, Value::Null)
     }
@@ -2483,6 +3622,105 @@ mod tests {
             params,
             sent_at: None,
         }
+    }
+
+    fn wait_for_media_validation_gate_release(active: &AtomicBool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while active.load(Ordering::SeqCst) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "media validation worker did not release its gate within one second"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn bounded_media_local_validation_keeps_one_worker_until_timeout_work_exits() {
+        let active = Arc::new(AtomicBool::new(false));
+        let (release_sender, release_receiver) = mpsc::sync_channel::<()>(0);
+
+        let timed_out = run_bounded_media_local_validation(
+            Arc::clone(&active),
+            Duration::from_millis(10),
+            move || {
+                let _ = release_receiver.recv();
+                1_u8
+            },
+        );
+        assert_eq!(timed_out, Err(MediaLocalValidationRunError::Timeout));
+        assert!(active.load(Ordering::SeqCst));
+
+        let busy = run_bounded_media_local_validation(
+            Arc::clone(&active),
+            Duration::from_millis(10),
+            || 2_u8,
+        );
+        assert_eq!(busy, Err(MediaLocalValidationRunError::Busy));
+
+        release_sender.send(()).expect("release validation worker");
+        wait_for_media_validation_gate_release(&active);
+
+        let completed = run_bounded_media_local_validation(
+            Arc::clone(&active),
+            Duration::from_millis(100),
+            || 3_u8,
+        );
+        assert_eq!(completed, Ok(3));
+        wait_for_media_validation_gate_release(&active);
+    }
+
+    #[test]
+    fn media_local_validation_gates_are_owned_by_each_core_state() {
+        let first = core_state();
+        let second = core_state();
+        first
+            .media_local_validation_active
+            .store(true, Ordering::SeqCst);
+
+        assert!(first.media_local_validation_active.load(Ordering::SeqCst));
+        assert!(!second.media_local_validation_active.load(Ordering::SeqCst));
+    }
+
+    fn search_when_ready(state: &mut CoreState, id: Value, query: &str) -> RpcResponse {
+        for _ in 0..400 {
+            let response = handle_request(
+                request_with(
+                    id.clone(),
+                    "recording.durable.search",
+                    json!({ "query": query }),
+                ),
+                state,
+            );
+            if response.ok {
+                return response;
+            }
+            if response.error.as_deref().map(|error| error.code)
+                != Some("RECORDING_SEARCH_INDEX_BUILDING")
+            {
+                return response;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("encrypted search index did not become ready");
+    }
+
+    #[test]
+    fn deletion_finalizer_preserves_a_confirmed_queue_until_data_is_removed() {
+        let state = core_state();
+        let queued = json!({
+            "recordingId": "recording-queued",
+            "state": "deletionQueued",
+            "deleted": false,
+            "recordingDataRemoved": false,
+            "confirmationRetained": true,
+            "metadataCleanupComplete": false,
+            "retryRequired": true,
+            "permanent": true,
+            "rawPathExposed": false
+        });
+
+        assert_eq!(finalize_deletion_result(queued.clone(), &state), queued);
     }
 
     fn versioned_request_line(request_id: &str, method: &str) -> String {
@@ -2524,6 +3762,22 @@ mod tests {
             .join("fixtures")
             .join("protocol");
         let mut state = core_state();
+        let export_recording = state
+            .recording_store
+            .start(StartRecordingParams {
+                label: Some("shared protocol export fixture".to_string()),
+            })
+            .expect("start shared protocol export fixture");
+        let export_recording_id = export_recording["recordingId"]
+            .as_str()
+            .expect("shared protocol export recording id")
+            .to_string();
+        state
+            .recording_store
+            .finish(RecordingIdParams {
+                recording_id: export_recording_id.clone(),
+            })
+            .expect("finish shared protocol export fixture");
 
         for entry in fs::read_dir(fixture_root.join("valid")).expect("valid fixture directory") {
             let path = entry.expect("valid fixture entry").path();
@@ -2534,7 +3788,7 @@ mod tests {
                 serde_json::from_slice(&fs::read(&path).expect("valid fixture read"))
                     .expect("valid fixture JSON");
             let kind = fixture["kind"].as_str().expect("valid fixture kind");
-            let (method, params, expected) = if kind == "handshake" {
+            let (method, mut params, expected) = if kind == "handshake" {
                 ("core.version", Value::Null, &fixture["value"])
             } else {
                 (
@@ -2543,6 +3797,9 @@ mod tests {
                     &fixture["result"],
                 )
             };
+            if method == "export.start" {
+                params["recordingId"] = json!(export_recording_id.clone());
+            }
             let response = handle_request(
                 request_with(
                     json!(path.file_name().unwrap().to_string_lossy()),
@@ -2766,6 +4023,648 @@ mod tests {
     }
 
     #[test]
+    fn media_import_is_rejected_before_path_access_during_active_capture() {
+        let mut state = core_state();
+        state.capture_manager.activate_synthetic_for_test();
+
+        let response = handle_request(
+            request_with(
+                json!("active-import"),
+                "media.importFromPath",
+                json!({ "sourcePath": "Z:\\path-that-must-not-be-opened\\meeting.wav" }),
+            ),
+            &mut state,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("MEDIA_IMPORT_CAPTURE_ACTIVE")
+        );
+        assert!(state.capture_manager.is_active());
+    }
+
+    #[test]
+    fn recording_recovery_is_rejected_during_capture_without_releasing_priority() {
+        let mut state = core_state();
+        let started = state
+            .recording_store
+            .start(StartRecordingParams {
+                label: Some("active recovery guard".to_string()),
+            })
+            .expect("start unfinished recording");
+        let recording_id = started["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        assert!(state
+            .job_manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("capture owns recording priority"));
+        state.capture_manager.activate_synthetic_for_test();
+
+        let response = handle_request(request("recording.durable.recover"), &mut state);
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("RECORDING_RECOVERY_CAPTURE_ACTIVE")
+        );
+        assert!(state.capture_manager.is_active());
+        assert!(
+            !state
+                .job_manager
+                .begin_recording_priority(Duration::from_millis(25))
+                .expect("active capture still owns recording priority"),
+            "rejected recovery must not release the active capture's priority"
+        );
+        let summary = state
+            .recording_store
+            .read(RecordingIdParams { recording_id })
+            .expect("read unfinished recording");
+        assert_eq!(summary["summary"]["state"], "recording");
+        state.job_manager.set_recording_active(false);
+    }
+
+    #[test]
+    fn recording_recovery_is_rejected_while_media_import_cleanup_is_unresolved() {
+        let mut state = core_state();
+        let started = state
+            .recording_store
+            .start(StartRecordingParams {
+                label: Some("media import recovery guard".to_string()),
+            })
+            .expect("start unfinished recording");
+        let recording_id = started["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        let (worker_started, observe_worker_started) = mpsc::channel();
+        let (release_worker, worker_released) = mpsc::channel();
+        let accepted = state
+            .job_manager
+            .submit("media-import", true, move |_context| {
+                worker_started.send(()).expect("report active import");
+                worker_released.recv().expect("release active import");
+                Err(JobFailure::new(
+                    "MEDIA_IMPORT_CLEANUP_FAILED",
+                    "cleanup failed after the rejected recovery request",
+                    false,
+                ))
+            })
+            .expect("submit active media import");
+        let job_id = accepted["jobId"]
+            .as_str()
+            .expect("media import job id")
+            .to_string();
+        observe_worker_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("media import entered its worker");
+        assert_eq!(
+            state.job_manager.get(&job_id).expect("active import")["state"],
+            "running"
+        );
+
+        let response = handle_request(request("recording.durable.recover"), &mut state);
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("RECORDING_RECOVERY_MEDIA_IMPORT_ACTIVE")
+        );
+        let summary = state
+            .recording_store
+            .read(RecordingIdParams { recording_id })
+            .expect("read unfinished recording");
+        assert_eq!(summary["summary"]["state"], "recording");
+        assert_eq!(
+            state
+                .job_manager
+                .get(&job_id)
+                .expect("import remains active")["state"],
+            "running"
+        );
+
+        release_worker.send(()).expect("finish import cleanup");
+        let failed = (0..200)
+            .find_map(|_| {
+                let value = state.job_manager.get(&job_id).expect("import status");
+                if value["terminal"] == true {
+                    Some(value)
+                } else {
+                    std::thread::sleep(Duration::from_millis(5));
+                    None
+                }
+            })
+            .expect("media import reached a terminal state");
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error"]["code"], "MEDIA_IMPORT_CLEANUP_FAILED");
+        assert_eq!(failed["error"]["cleanupResolved"], Value::Null);
+        assert_eq!(
+            state
+                .job_manager
+                .begin_recording_priority(Duration::from_millis(25))
+                .expect_err("rejected recovery cannot pre-resolve a later cleanup failure")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_FAILED"
+        );
+    }
+
+    #[test]
+    fn media_local_validation_is_rejected_before_path_access_during_active_capture() {
+        let mut state = core_state();
+        state.capture_manager.activate_synthetic_for_test();
+
+        let response = handle_request(
+            request_with(
+                json!("active-validation"),
+                "media.validateLocalSourcePath",
+                json!({ "sourcePath": "Z:\\path-that-must-not-be-opened\\meeting.wav" }),
+            ),
+            &mut state,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("MEDIA_IMPORT_CAPTURE_ACTIVE")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn media_local_validation_returns_only_bounded_pathless_custody_metadata() {
+        let mut state = core_state();
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let source_path = std::env::temp_dir().join(format!(
+            "candor-local-validation-{}-{stamp}.wav",
+            process::id()
+        ));
+        fs::write(&source_path, [1_u8, 2, 3]).expect("write local validation source");
+
+        let response = handle_request(
+            request_with(
+                json!("local-validation"),
+                "media.validateLocalSourcePath",
+                json!({ "sourcePath": source_path.to_string_lossy() }),
+            ),
+            &mut state,
+        );
+        let _ = fs::remove_file(&source_path);
+
+        assert!(response.ok);
+        let value = response.result.expect("local validation result");
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["eligible"], true);
+        assert_eq!(value["sourceSizeBytes"], 3);
+        assert_eq!(value["localStorageVerified"], true);
+        assert_eq!(value["regularFile"], true);
+        assert_eq!(value["reparsePoint"], false);
+        assert_eq!(value["cloudPlaceholder"], false);
+        assert_eq!(value["localOnly"], true);
+        assert_eq!(value["networkAttempted"], false);
+        assert_eq!(value["rawPathExposed"], false);
+        assert_eq!(value["keyMaterialExposedToRenderer"], false);
+        let object = value.as_object().expect("validation result object");
+        assert_eq!(object.len(), 11);
+        assert!(object.get("sourcePath").is_none());
+        assert!(object.get("canonicalPath").is_none());
+        assert!(object.get("sourceSha256").is_none());
+        assert!(object.get("sourceHash").is_none());
+    }
+
+    #[test]
+    fn media_import_requires_a_bound_source_identity_before_path_access() {
+        let mut state = core_state();
+        let missing_identity = handle_request(
+            request_with(
+                json!("missing-identity"),
+                "media.importFromPath",
+                json!({ "sourcePath": "Z:\\path-that-must-not-be-opened\\meeting.wav" }),
+            ),
+            &mut state,
+        );
+        assert!(!missing_identity.ok);
+        assert_eq!(
+            missing_identity.error.as_ref().map(|error| error.code),
+            Some("INVALID_PARAMS")
+        );
+    }
+
+    #[test]
+    fn recap_job_template_is_trimmed_and_bounded_at_the_core_boundary() {
+        let params = serde_json::from_value::<AiRecapJobParams>(json!({
+            "recordingId": "recording-1",
+            "recapTemplate": "  Focus on decisions and owners.  "
+        }))
+        .expect("bounded recap template");
+        assert_eq!(
+            params.recap_template.as_deref(),
+            Some("Focus on decisions and owners.")
+        );
+        assert!(serde_json::from_value::<AiRecapJobParams>(json!({
+            "recordingId": "recording-1",
+            "recapTemplate": "x".repeat(4_097)
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn microphone_test_is_ephemeral_and_does_not_require_recording_consent() {
+        let mut state = core_state();
+        let response = handle_request(
+            request_with(
+                json!(2),
+                "capture.micTestStart",
+                json!({ "deviceId": "invalid-device" }),
+            ),
+            &mut state,
+        );
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.as_ref().map(|error| error.code),
+            Some("CAPTURE_DEVICE_ID_INVALID")
+        );
+        let recordings = handle_request(request("recording.durable.list"), &mut state)
+            .result
+            .expect("recording list after microphone test");
+        assert_eq!(recordings["recordingCount"], 0);
+        let status = handle_request(request("capture.micTestStatus"), &mut state)
+            .result
+            .expect("microphone test status");
+        assert_eq!(status["active"], false);
+        assert_eq!(status["state"], "idle");
+        assert_eq!(status["rawPathExposed"], false);
+        assert_eq!(status["keyMaterialExposedToRenderer"], false);
+    }
+
+    #[test]
+    fn microphone_v4_rpc_methods_are_allowlisted() {
+        let mut state = core_state();
+        let capabilities = handle_request(request("core.capabilities"), &mut state)
+            .result
+            .expect("core capabilities");
+        let methods = capabilities["allowedMethods"]
+            .as_array()
+            .expect("allowed method list");
+        for method in [
+            "capture.preferences",
+            "capture.setPreferredMicrophone",
+            "capture.micTestStart",
+            "capture.micTestStatus",
+            "capture.micTestSample",
+            "capture.micTestStop",
+        ] {
+            assert!(methods.iter().any(|allowed| allowed == method), "{method}");
+        }
+    }
+
+    #[test]
+    fn protected_term_review_is_core_bound_and_creates_an_immutable_revision() {
+        let mut state = core_state();
+        state
+            .replacement_rules
+            .upsert_custom(replacement_rules::ReplacementRuleSetUpsertParams {
+                id: Some("protected-rules".to_string()),
+                expected_version: None,
+                name: "Protected names".to_string(),
+                rules: vec![replacement_rules::ReplacementRule {
+                    id: "company-name".to_string(),
+                    order: 1,
+                    match_mode: replacement_rules::ReplacementMatchMode::WholeWord,
+                    literal: "Acme".to_string(),
+                    replacement: "ACME".to_string(),
+                    protected_term_review: true,
+                    enabled: true,
+                }],
+            })
+            .expect("create protected replacement rules");
+        state
+            .meeting_profiles
+            .upsert_custom(MeetingProfileUpsertParams {
+                id: Some("protected-profile".to_string()),
+                expected_version: None,
+                name: "Protected profile".to_string(),
+                capture_source: ProfileCaptureSource::Microphone,
+                language: "en".to_string(),
+                local_model_tier: meeting_profiles::ProfileModelTier::Fast,
+                speech_model_id: None,
+                cleanup_model_id: None,
+                summary_model_id: None,
+                dictionary_ids: Vec::new(),
+                replacement_rule_set_id: Some("protected-rules".to_string()),
+                recap_template: String::new(),
+                live_transcription: false,
+            })
+            .expect("create protected meeting profile");
+        let profile = state
+            .meeting_profiles
+            .processing_snapshot_for_capture(
+                "protected-profile",
+                1,
+                ProfileCaptureSource::Microphone,
+                &state.replacement_rules,
+            )
+            .expect("resolve immutable capture profile");
+        let started = state
+            .recording_store
+            .start_with_processing_profile(
+                StartRecordingParams {
+                    label: Some("Protected review".to_string()),
+                },
+                Some(profile),
+            )
+            .expect("start protected review recording");
+        let recording_id = started["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        state
+            .recording_store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish protected review recording");
+        let attempt_id = state
+            .recording_store
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin initial transcript attempt");
+        state
+            .recording_store
+            .write_transcription_attempt_segment(
+                &attempt_id,
+                WriteTranscriptSegmentParams {
+                    recording_id: recording_id.clone(),
+                    channel: "mic".to_string(),
+                    speaker: Some("Speaker 1".to_string()),
+                    text: "Acme joined the meeting.".to_string(),
+                    start_ms: 10,
+                    duration_ms: Some(20),
+                    end_ms: None,
+                    confidence: Some(0.95),
+                },
+            )
+            .expect("write initial transcript attempt");
+        let initial_text = "Acme joined the meeting.";
+        let initial = state
+            .recording_store
+            .complete_transcription_attempt(recording_store::TranscriptionSuccessDraft {
+                recording_id: recording_id.clone(),
+                attempt_id: Some(attempt_id),
+                chunk_indices: Vec::new(),
+                engine: "test-engine".to_string(),
+                model_id: None,
+                model_sha256: None,
+                started_at_ms: 1,
+                elapsed_ms: 1,
+                comparison: recording_store::TranscriptComparisonDraft {
+                    raw_text_sha256: recording_store::transcript_text_sha256(initial_text),
+                    normalized_text_sha256: recording_store::transcript_text_sha256(initial_text),
+                    raw_text_bytes: initial_text.len() as u64,
+                    normalized_text_bytes: initial_text.len() as u64,
+                    raw_segment_count: 1,
+                    normalized_segment_count: 1,
+                    changed: false,
+                },
+                raw_text: initial_text.to_string(),
+            })
+            .expect("commit initial transcript");
+        let initial_revision_id = initial["revisionId"]
+            .as_str()
+            .expect("initial revision id")
+            .to_string();
+
+        let preview = handle_request(
+            request_with(
+                json!(90),
+                "transcription.protectedTermReview",
+                json!({ "recordingId": recording_id.clone() }),
+            ),
+            &mut state,
+        );
+        assert!(preview.ok);
+        let preview = preview.result.expect("protected review preview");
+        assert_eq!(preview["reviewRequired"], true);
+        assert_eq!(preview["revisionId"], initial_revision_id);
+        assert_eq!(preview["previewSegments"][0]["before"], initial_text);
+        assert_eq!(
+            preview["previewSegments"][0]["after"],
+            "ACME joined the meeting."
+        );
+        let preview_token = preview["previewToken"]
+            .as_str()
+            .expect("preview token")
+            .to_string();
+
+        let forged = handle_request(
+            request_with(
+                json!(91),
+                "transcription.applyProtectedTermReview",
+                json!({
+                    "recordingId": recording_id.clone(),
+                    "revisionId": initial_revision_id,
+                    "previewToken": preview_token,
+                    "transcript": "renderer-forged text"
+                }),
+            ),
+            &mut state,
+        );
+        assert!(!forged.ok);
+        assert_eq!(
+            forged.error.as_ref().map(|error| error.code),
+            Some("INVALID_PARAMS")
+        );
+
+        let applied = handle_request(
+            request_with(
+                json!(92),
+                "transcription.applyProtectedTermReview",
+                json!({
+                    "recordingId": recording_id.clone(),
+                    "revisionId": preview["revisionId"],
+                    "previewToken": preview["previewToken"]
+                }),
+            ),
+            &mut state,
+        );
+        assert!(applied.ok);
+        let applied = applied.result.expect("protected review apply");
+        assert_eq!(applied["trustHistory"]["source"], "review");
+        assert_eq!(applied["rawPathExposed"], false);
+        assert_eq!(applied["networkAttempted"], false);
+
+        let transcript = state
+            .recording_store
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("reviewed transcript");
+        assert_eq!(
+            transcript["segments"][0]["text"],
+            "ACME joined the meeting."
+        );
+        let history = state
+            .recording_store
+            .trust_history(RecordingIdParams { recording_id })
+            .expect("protected review history");
+        assert_eq!(history["revisionCount"], 2);
+        assert_eq!(history["revisions"][0]["revisionId"], initial_revision_id);
+        assert_eq!(history["revisions"][1]["source"], "review");
+        assert_eq!(
+            history["processingReceipts"][1]["operation"],
+            "protected-term-review"
+        );
+    }
+
+    #[test]
+    fn live_transcript_renderer_methods_are_bounded_and_text_ingress_is_absent() {
+        let mut state = core_state();
+        let capabilities = handle_request(request("core.capabilities"), &mut state)
+            .result
+            .expect("core capabilities");
+        let methods = capabilities["allowedMethods"]
+            .as_array()
+            .expect("allowed method list");
+        for method in candor_core::live_transcript_service::LIVE_TRANSCRIPT_RENDERER_METHODS {
+            assert!(methods.iter().any(|allowed| allowed == method), "{method}");
+        }
+        assert!(!methods.iter().any(|method| method == "liveTranscript.push"));
+        assert!(!methods
+            .iter()
+            .any(|method| method == "liveTranscript.reconcile"));
+
+        let invalid_identifier = handle_request(
+            request_with(
+                json!(2),
+                "liveTranscript.enable",
+                json!({ "recordingId": "../vault" }),
+            ),
+            &mut state,
+        );
+        assert!(!invalid_identifier.ok);
+        assert_eq!(
+            invalid_identifier.error.as_ref().map(|error| error.code),
+            Some("LIVE_TRANSCRIPT_ID_INVALID")
+        );
+
+        let unknown_field = handle_request(
+            request_with(
+                json!(3),
+                "liveTranscript.enable",
+                json!({ "recordingId": "recording_1", "text": "forged" }),
+            ),
+            &mut state,
+        );
+        assert!(!unknown_field.ok);
+        assert_eq!(
+            unknown_field.error.as_ref().map(|error| error.code),
+            Some("INVALID_PARAMS")
+        );
+
+        let drain_with_params = handle_request(
+            request_with(
+                json!(4),
+                "liveTranscript.eventsDrain",
+                json!({ "recordingId": "recording_1" }),
+            ),
+            &mut state,
+        );
+        assert!(!drain_with_params.ok);
+        assert_eq!(
+            drain_with_params.error.as_ref().map(|error| error.code),
+            Some("INVALID_PARAMS")
+        );
+    }
+
+    #[test]
+    fn live_transcript_start_fails_closed_and_cleans_up_without_capture_prerequisites() {
+        let mut state = core_state();
+        let enable = handle_request(
+            request_with(
+                json!(2),
+                "liveTranscript.enable",
+                json!({ "recordingId": "recording_1" }),
+            ),
+            &mut state,
+        )
+        .result
+        .expect("enable live transcript");
+        assert_eq!(enable["enabled"], true);
+        assert_eq!(enable["active"], false);
+        assert_eq!(enable["networkAttempted"], false);
+        assert_eq!(enable["rawPathExposed"], false);
+        assert_eq!(enable["keyMaterialExposedToRenderer"], false);
+
+        let start = handle_request(
+            request_with(
+                json!(3),
+                "liveTranscript.start",
+                json!({ "recordingId": "recording_1" }),
+            ),
+            &mut state,
+        );
+        assert!(!start.ok);
+        assert_eq!(
+            start.error.as_ref().map(|error| error.code),
+            Some(if cfg!(feature = "local-whisper") {
+                "RECORDING_NOT_FOUND"
+            } else {
+                "LIVE_TRANSCRIPT_ENGINE_UNAVAILABLE"
+            })
+        );
+        let after_failed_start = handle_request(
+            request_with(
+                json!(31),
+                "liveTranscript.enable",
+                json!({ "recordingId": "recording_1" }),
+            ),
+            &mut state,
+        )
+        .result
+        .expect("inspect failed live transcript start");
+        assert_eq!(after_failed_start["active"], false);
+
+        let snapshot = handle_request(
+            request_with(
+                json!(4),
+                "liveTranscript.snapshot",
+                json!({ "recordingId": "recording_1" }),
+            ),
+            &mut state,
+        )
+        .result
+        .expect("snapshot live transcript");
+        assert_eq!(snapshot["segmentCount"], 0);
+        assert_eq!(snapshot["segments"], json!([]));
+
+        let drained = handle_request(request("liveTranscript.eventsDrain"), &mut state)
+            .result
+            .expect("drain live transcript events");
+        assert_eq!(drained["drainedEventCount"], 0);
+        assert_eq!(drained["events"], json!([]));
+        assert_eq!(drained["localOnly"], true);
+        assert_eq!(drained["networkAttempted"], false);
+
+        let stopped = handle_request(
+            request_with(
+                json!(5),
+                "liveTranscript.stop",
+                json!({ "recordingId": "recording_1" }),
+            ),
+            &mut state,
+        )
+        .result
+        .expect("stop live transcript");
+        assert_eq!(stopped["sessionRemoved"], true);
+        assert_eq!(stopped["memoryCleared"], true);
+        assert_eq!(stopped["zeroizationGuaranteed"], false);
+    }
+
+    #[test]
     fn startup_recovery_marks_interrupted_recordings() {
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2791,6 +4690,41 @@ mod tests {
                 data_utf8: "flushed before restart".to_string(),
             })
             .expect("write chunk");
+        let cleanup_jobs = JobManager::with_test_roots(
+            PROTOCOL_VERSION,
+            writer.settings_root_for_core().join("background-jobs"),
+            writer.key_root_for_core(),
+        );
+        let cleanup_job = cleanup_jobs
+            .submit("media-import", true, |context| {
+                while !context.cancelled() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(JobFailure::new(
+                    "MEDIA_IMPORT_CLEANUP_FAILED",
+                    "startup recovery fixture requires reconciliation",
+                    false,
+                ))
+            })
+            .expect("seed cleanup failure");
+        let cleanup_job_id = cleanup_job["jobId"]
+            .as_str()
+            .expect("cleanup job id")
+            .to_string();
+        for _ in 0..200 {
+            if cleanup_jobs.get(&cleanup_job_id).expect("cleanup status")["state"] == "running" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            cleanup_jobs
+                .begin_recording_priority(Duration::from_secs(1))
+                .expect_err("seeded cleanup failure blocks recording")
+                .code,
+            "MEDIA_IMPORT_CLEANUP_FAILED"
+        );
+        drop(cleanup_jobs);
 
         let mut state = CoreState::with_stores(
             now_ms(),
@@ -2804,6 +4738,18 @@ mod tests {
         assert_eq!(status["startupRecovery"]["ok"], true);
         assert_eq!(status["startupRecovery"]["recoveredCount"], 1);
         assert_eq!(status["startupRecovery"]["rawPathExposed"], false);
+        assert_eq!(
+            state
+                .job_manager
+                .get(&cleanup_job_id)
+                .expect("resolved cleanup audit")["error"]["cleanupResolved"],
+            true
+        );
+        assert!(state
+            .job_manager
+            .begin_recording_priority(Duration::from_millis(25))
+            .expect("startup recovery resolves the persistent cleanup latch"));
+        state.job_manager.set_recording_active(false);
 
         let list = handle_request(request("recording.durable.list"), &mut state);
         assert!(list.ok);
@@ -2811,6 +4757,139 @@ mod tests {
         assert_eq!(list["recordings"][0]["recordingId"], recording_id);
         assert_eq!(list["recordings"][0]["state"], "needsRecovery");
         assert_eq!(list["recordings"][0]["rawPathExposed"], false);
+    }
+
+    #[test]
+    fn read_only_automation_coexists_with_an_active_recording_without_mutation() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("candor-core-automation-read-{stamp}"));
+        let recording_root = root.join("recordings");
+        let vault_root = root.join("vault");
+        let writer = RecordingStore::with_root(recording_root.clone());
+        let started = writer
+            .start(StartRecordingParams {
+                label: Some("active desktop capture".to_string()),
+            })
+            .expect("start active recording");
+        let recording_id = started["recordingId"]
+            .as_str()
+            .expect("recording id")
+            .to_string();
+        writer
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "durable active content".to_string(),
+            })
+            .expect("write active chunk");
+        writer
+            .write_transcript_segment(WriteTranscriptSegmentParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                speaker: None,
+                text: "read-only active transcript".to_string(),
+                start_ms: 0,
+                duration_ms: Some(100),
+                end_ms: None,
+                confidence: Some(0.9),
+            })
+            .expect("write active transcript segment");
+        let background_jobs_root = writer.settings_root_for_core().join("background-jobs");
+        let terminology_root = writer.settings_root_for_core().join("terminology");
+
+        let mut state = CoreState::with_stores_mode(
+            now_ms(),
+            RecordingStore::with_root(recording_root),
+            VaultStore::with_root(vault_root),
+            true,
+        );
+        assert!(!state.startup_recovery.attempted);
+        assert!(!background_jobs_root.exists());
+
+        let listed = handle_request(
+            request_with(
+                json!(81),
+                "recording.durable.listPage",
+                json!({ "offset": 0, "limit": 25 }),
+            ),
+            &mut state,
+        );
+        assert!(listed.ok);
+        assert_eq!(
+            listed.result.expect("list result")["recordings"][0]["state"],
+            "recording"
+        );
+
+        let transcript = handle_request(
+            request_with(
+                json!(82),
+                "recording.durable.transcriptPage",
+                json!({ "recordingId": recording_id.clone(), "offset": 0, "limit": 25 }),
+            ),
+            &mut state,
+        );
+        assert!(transcript.ok);
+        let transcript = transcript.result.expect("transcript result");
+        assert_eq!(
+            transcript["segments"][0]["text"],
+            "read-only active transcript"
+        );
+        assert_eq!(transcript["terminologyCorrectionsApplied"], 0);
+        assert!(!terminology_root.exists());
+
+        let searched = handle_request(
+            request_with(
+                json!(83),
+                "recording.durable.search",
+                json!({ "query": "active content" }),
+            ),
+            &mut state,
+        );
+        assert!(searched.ok);
+        let searched = searched.result.expect("search result");
+        assert_eq!(searched["matchCount"], 1);
+        assert_eq!(searched["matches"][0]["rowKind"], "originalTranscriptText");
+        assert_eq!(searched["searchBackend"], "bounded-read-only-source-scan");
+
+        let denied = handle_request(request("recording.durable.recover"), &mut state);
+        assert!(!denied.ok);
+        assert_eq!(
+            denied.error.expect("denied error").code,
+            "METHOD_NOT_ALLOWED"
+        );
+
+        let still_active = writer
+            .read(RecordingIdParams { recording_id })
+            .expect("read active manifest");
+        assert_eq!(still_active["summary"]["state"], "recording");
+        assert!(!background_jobs_root.exists());
+        #[cfg(feature = "sqlcipher-vault")]
+        {
+            let mut settled = false;
+            for _ in 0..200 {
+                match writer.search(SearchRecordingsParams {
+                    query: "active content".to_string(),
+                }) {
+                    Ok(_) => {
+                        settled = true;
+                        break;
+                    }
+                    Err(error) if error.code == "RECORDING_SEARCH_INDEX_BUILDING" => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => {
+                        panic!("search backfill failed during test cleanup: {}", error.code)
+                    }
+                }
+            }
+            assert!(
+                settled,
+                "search backfill did not settle during test cleanup"
+            );
+        }
     }
 
     #[test]
@@ -2853,6 +4932,105 @@ mod tests {
     fn empty_rpc_frames_are_ignored() {
         let mut state = core_state();
         assert!(handle_line("   ", &mut state).is_none());
+    }
+
+    #[test]
+    fn diarization_rpc_is_gated_pathless_and_uses_only_user_controlled_names() {
+        let mut state = core_state();
+        let status = handle_request(request("diarization.status"), &mut state);
+        assert!(status.ok);
+        let status = status.result.unwrap();
+        assert_eq!(status["state"], "disabled");
+        assert_eq!(status["engineAvailable"], false);
+        assert_eq!(status["diarizationAvailable"], false);
+        assert_eq!(status["biometricIdentityClaimed"], false);
+        assert_eq!(status["networkAttempted"], false);
+
+        let enabled = handle_request(
+            request_with(
+                json!(70),
+                "diarization.updatePreference",
+                json!({ "enabled": true }),
+            ),
+            &mut state,
+        );
+        assert!(enabled.ok);
+        let enabled = enabled.result.unwrap();
+        assert_eq!(enabled["state"], "engine-unavailable");
+        assert_eq!(enabled["diarizationAvailable"], false);
+
+        let started = handle_request(
+            request_with(
+                json!(71),
+                "recording.durable.start",
+                json!({ "label": "Speaker labels" }),
+            ),
+            &mut state,
+        );
+        let recording_id = started.result.unwrap()["recordingId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let assigned = handle_request(
+            request_with(
+                json!(72),
+                "diarization.assignSpeakerName",
+                json!({
+                    "recordingId": recording_id.clone(),
+                    "anonymousSpeakerId": "speaker-1",
+                    "displayName": "Avery"
+                }),
+            ),
+            &mut state,
+        );
+        assert!(assigned.ok);
+        let assigned = assigned.result.unwrap();
+        assert_eq!(assigned["assignments"][0]["source"], "user");
+        assert_eq!(assigned["assignments"][0]["identityInferred"], false);
+        assert_eq!(assigned["encryptedAtRest"], true);
+        assert_eq!(assigned["rawPathExposed"], false);
+        assert!(!serde_json::to_string(&assigned)
+            .unwrap()
+            .contains("C:\\\\private"));
+
+        let forged = handle_request(
+            request_with(
+                json!(73),
+                "diarization.updatePreference",
+                json!({ "enabled": true, "modelPath": "C:\\private\\model.bin" }),
+            ),
+            &mut state,
+        );
+        assert!(!forged.ok);
+        assert_eq!(forged.error.unwrap().code, "INVALID_PARAMS");
+
+        assert!(
+            handle_request(
+                request_with(
+                    json!(74),
+                    "recording.durable.finish",
+                    json!({ "recordingId": recording_id.clone() }),
+                ),
+                &mut state,
+            )
+            .ok
+        );
+        assert!(
+            handle_request(
+                request_with(
+                    json!(75),
+                    "recording.durable.delete",
+                    json!({ "recordingId": recording_id.clone() }),
+                ),
+                &mut state,
+            )
+            .ok
+        );
+        let names_after_delete = state
+            .diarization_service
+            .list_speaker_names(DiarizationRecordingParams { recording_id })
+            .unwrap();
+        assert_eq!(names_after_delete["assignmentCount"], 0);
     }
 
     #[test]
@@ -3006,14 +5184,7 @@ mod tests {
             BASE64_STANDARD.encode(&audio_bytes)
         );
 
-        let search = handle_request(
-            request_with(
-                json!(5),
-                "recording.durable.search",
-                json!({ "query": "Reliability" }),
-            ),
-            &mut state,
-        );
+        let search = search_when_ready(&mut state, json!(5), "Reliability");
         assert!(search.ok);
         let search_result = search.result.expect("search result");
         assert_eq!(search_result["rawPathExposed"], false);
@@ -3078,9 +5249,25 @@ mod tests {
         state.bundled_ai_assets = BundledAiAssets::with_root(bundle_root.clone());
         state.model_manager = ModelManager::with_bundled_assets(state.bundled_ai_assets.clone());
 
-        let bundle_status = handle_request(request("ai.bundledAssetsStatus"), &mut state);
-        assert!(bundle_status.ok);
-        let status = bundle_status.result.expect("bundle status");
+        let verification_timeout = Duration::from_secs(10);
+        let verification_started = Instant::now();
+        let status = loop {
+            let response = handle_request(request("ai.bundledAssetsStatus"), &mut state);
+            assert!(response.ok);
+            let status = response.result.expect("bundle status");
+            if status["state"] != "checking" {
+                break status;
+            }
+
+            let elapsed = verification_started.elapsed();
+            assert!(
+                elapsed < verification_timeout,
+                "background bundled status did not complete within {verification_timeout:?}"
+            );
+            std::thread::sleep(
+                Duration::from_millis(5).min(verification_timeout.saturating_sub(elapsed)),
+            );
+        };
         assert_eq!(status["state"], "corrupt");
         assert_eq!(status["repairRequired"], true);
         assert_eq!(status["rawPathExposed"], false);
@@ -3190,7 +5377,7 @@ mod tests {
             request_with(
                 json!(22),
                 "recording.durable.delete",
-                json!({ "recordingId": recording_id }),
+                json!({ "recordingId": recording_id.clone() }),
             ),
             &mut state,
         );
@@ -3205,6 +5392,41 @@ mod tests {
             handle_request(request("recording.durable.list"), &mut state)
                 .result
                 .expect("list after delete")["recordingCount"],
+            0
+        );
+
+        for response in [
+            handle_request(
+                request_with(
+                    json!(23),
+                    "ai.ask.start",
+                    json!({
+                        "recordingId": recording_id.clone(),
+                        "question": "private question after deletion"
+                    }),
+                ),
+                &mut state,
+            ),
+            handle_request(
+                request_with(
+                    json!(24),
+                    "export.start",
+                    json!({
+                        "recordingId": recording_id.clone(),
+                        "format": "markdown"
+                    }),
+                ),
+                &mut state,
+            ),
+        ] {
+            assert!(!response.ok);
+            assert_eq!(
+                response.error.as_ref().map(|error| error.code),
+                Some("RECORDING_NOT_FOUND")
+            );
+        }
+        assert_eq!(
+            state.job_manager.list().expect("jobs after delete")["jobCount"],
             0
         );
     }

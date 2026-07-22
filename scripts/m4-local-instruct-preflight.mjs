@@ -1,7 +1,8 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +24,7 @@ const dataDir = mkdtempSync(path.join(tmpdir(), "candor-v3-m4-local-instruct-"))
 const failures = [];
 const observations = [];
 let child = null;
+let coreLines = null;
 let status = null;
 let proof = null;
 let capabilities = null;
@@ -118,14 +120,14 @@ function spawnCore() {
 }
 
 function makeRpc(childProcess) {
-  const lines = createInterface({ input: childProcess.stdout });
+  coreLines = createInterface({ input: childProcess.stdout });
   const pending = new Map();
 
   childProcess.stderr.on("data", (chunk) => {
     process.stderr.write(`[candor-core stderr] ${chunk}`);
   });
 
-  lines.on("line", (line) => {
+  coreLines.on("line", (line) => {
     const response = JSON.parse(line);
     const entry = pending.get(response.id);
     if (!entry) return;
@@ -249,8 +251,10 @@ try {
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 } finally {
-  if (child && !child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
+  coreLines?.close();
+  if (child && !child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  if (child) await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
   writeProofArtifact();
 }
 

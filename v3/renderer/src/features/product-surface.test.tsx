@@ -183,6 +183,8 @@ describe("simplified product surface", () => {
       }],
       selectedRecordingId: "rec-1",
       models: [],
+      modelCatalog: { loaded: true, activeDownloadModelId: null, recommendedDefaultModelId: null, models: [] },
+      modelDownloadProgress: null,
       selectedModel: "tiny.en",
       defaultModel: "tiny.en",
       aiMode: "heuristic-fallback" as const,
@@ -204,7 +206,7 @@ describe("simplified product surface", () => {
       diagnosticPreview: null,
       transcriptionBenchmarkActive: false,
       transcriptionBenchmarkNeedsRetry: false,
-      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onAiFallbackPreferenceChange: vi.fn(), onTranscriptionQualityChange: vi.fn(), onRunTranscriptionBenchmark: vi.fn(), onImportDictionary: vi.fn(), onSetDictionaryEnabled: vi.fn(), onAssignDictionary: vi.fn(), onReviewTerminology: vi.fn(), onDecideTerminology: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
+      onSectionChange: vi.fn(), onToggleAdvanced: vi.fn(), onVerifyModel: vi.fn(), onImportModel: vi.fn(), onImportCatalogModel: vi.fn(), onDownloadModel: vi.fn(), onCancelModelDownload: vi.fn(), onSelectedModelChange: vi.fn(), onAiModeChange: vi.fn(), onAiFallbackPreferenceChange: vi.fn(), onTranscriptionQualityChange: vi.fn(), onRunTranscriptionBenchmark: vi.fn(), onImportDictionary: vi.fn(), onSetDictionaryEnabled: vi.fn(), onAssignDictionary: vi.fn(), onReviewTerminology: vi.fn(), onDecideTerminology: vi.fn(), onInstructSetupOpenChange: vi.fn(), onInstructAssetKindChange: vi.fn(), onInstructExpectedShaChange: vi.fn(), onImportInstructAsset: vi.fn(), onRefreshLicense: vi.fn(), onDeactivateLicense: vi.fn(), onAcknowledgeMic: vi.fn(), onAcknowledgeSystem: vi.fn(), onRecordSystem: vi.fn(), onRecordBoth: vi.fn(), onOpenExport: vi.fn(), onRefreshLocalSettings: vi.fn(), onPrepareDiagnostics: vi.fn(), onSaveDiagnostics: vi.fn(),
     };
     const basicMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen={false} />);
     const advancedMarkup = renderToStaticMarkup(<SettingsView {...baseProps} advancedOpen />);
@@ -343,7 +345,7 @@ describe("simplified product surface", () => {
 
   it("offers permanent deletion only for a finished local meeting", () => {
     const markup = renderToStaticMarkup(
-      <MeetingDetailView title="Finished meeting" selectedRecording={{ recordingId: "rec-1", label: "Finished meeting", state: "finished", audioDurationMs: 10, audioChunkCount: 1, transcriptSegmentCount: 1, updatedAtMs: 2 }} selectedRecordingId="rec-1" detailSection="summary" transcriptContent={<div />} transcriptTotalCount={1} notesMarkdown="" notesDirty={false} recap={null} askQuestion="" askAnswer={null} aiModeStatus="Quick local fallback" privacyReceipt={receipt} networkCapabilities={network} busy={false} onDetailSectionChange={vi.fn()} onReview={vi.fn()} onDelete={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onRetryRecapWithLocalAi={vi.fn()} onAskQuestionChange={vi.fn()} onAsk={vi.fn()} onRetryAskWithLocalAi={vi.fn()} />,
+      <MeetingDetailView title="Finished meeting" selectedRecording={{ recordingId: "rec-1", label: "Finished meeting", state: "finished", audioDurationMs: 10, audioChunkCount: 1, transcriptSegmentCount: 1, updatedAtMs: 2 }} selectedRecordingId="rec-1" detailSection="summary" transcriptContent={<div />} transcriptTotalCount={1} notesMarkdown="" notesDirty={false} recap={null} askQuestion="" askAnswer={null} aiModeStatus="Quick local fallback" privacyReceipt={receipt} networkCapabilities={network} busy={false} onDetailSectionChange={vi.fn()} onReview={vi.fn()} onDelete={vi.fn()} onNotesChange={vi.fn()} onSaveNotes={vi.fn()} onGenerateRecap={vi.fn()} onRetryRecapWithLocalAi={vi.fn()} onAskQuestionChange={vi.fn()} onAsk={vi.fn()} onRetryAskWithLocalAi={vi.fn()} onTranscriptRevisionChanged={vi.fn()} />,
     );
     expect(markup).toContain("Delete meeting");
     expect(markup).toContain("Review report");

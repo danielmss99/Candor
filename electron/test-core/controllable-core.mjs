@@ -52,6 +52,7 @@ function resultFor(request) {
         } : null,
         sources: {},
         rawPathExposed: false,
+        keyMaterialExposedToRenderer: false,
       };
     case "capture.startMic":
       captureActive = true;

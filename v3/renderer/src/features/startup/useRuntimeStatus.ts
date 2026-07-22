@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { CandorClient } from "../../core/candor-client";
 import {
   asObject,
@@ -63,11 +63,30 @@ export interface DiagnosticRunResult {
 }
 
 export async function runBackgroundDiagnostics(tasks: DiagnosticTask[]): Promise<DiagnosticRunResult> {
-  const settled = await Promise.allSettled(tasks.map((task) => task.run()));
+  const settled: PromiseSettledResult<void>[] = [];
+  // The local core transport is intentionally serial. Queueing every diagnostic at once lets
+  // short request budgets expire behind a legitimate full bundle verification.
+  for (const task of tasks) {
+    try {
+      await task.run();
+      settled.push({ status: "fulfilled", value: undefined });
+    } catch (reason) {
+      settled.push({ status: "rejected", reason } as const);
+    }
+  }
   return {
     failed: settled.flatMap((result, index) => result.status === "rejected" ? [tasks[index].label] : []),
     completed: settled.filter((result) => result.status === "fulfilled").length,
   };
+}
+
+export async function runCheapThenExpensive<TCheap, TExpensive>(
+  cheap: () => Promise<TCheap>,
+  expensive: () => Promise<TExpensive>,
+): Promise<[TCheap, TExpensive]> {
+  const cheapResult = await cheap();
+  const expensiveResult = await expensive();
+  return [cheapResult, expensiveResult];
 }
 
 export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient | null) {
@@ -98,6 +117,7 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
   const [diagnosticFailures, setDiagnosticFailures] = useState<string[]>([]);
   const [jobs, setJobs] = useState<BackgroundTask[]>([]);
   const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const modelRefreshInFlight = useRef<Promise<void> | null>(null);
 
   const loadCritical = useCallback(async () => {
     if (!api || !client) throw new Error("Candor preload API is unavailable");
@@ -124,6 +144,29 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
       setJobs((current) => [payload, ...current.filter((job) => job.jobId !== payload.jobId)]);
     });
   }, [api]);
+
+  useEffect(() => {
+    if (!api || !client || bundledAiStatus.state !== "checking") return;
+    let cancelled = false;
+    let timer = 0;
+    const pollBundleVerification = async () => {
+      try {
+        const next = await client.bundledAiStatus();
+        if (cancelled) return;
+        setBundledAiStatus(next);
+        if (next.state === "checking") {
+          timer = window.setTimeout(() => void pollBundleVerification(), 750);
+        }
+      } catch {
+        if (!cancelled) setBundledAiStatus(UNAVAILABLE_BUNDLED_AI_STATUS);
+      }
+    };
+    timer = window.setTimeout(() => void pollBundleVerification(), 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [api, bundledAiStatus.state, client]);
 
   useEffect(() => {
     if (!api) return;
@@ -271,26 +314,38 @@ export function useRuntimeStatus(api: CoreApi | undefined, client: CandorClient 
     };
   }, [api, captureStatus.active, client, refreshCapture, refreshRecordingStatus]);
 
-  const refreshModelsAndAi = useCallback(async () => {
-    if (!api || !client) return;
-    const [nextModels, nextAi, nextBundledAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription, nextQuality] = await Promise.all([
-      client.models(),
-      client.object("ai.status", () => api.ai.getStatus()),
-      client.bundledAiStatus().catch(() => UNAVAILABLE_BUNDLED_AI_STATUS),
-      client.object("ai.instructAssetsStatus", () => api.ai.getEnhancedAssetsStatus()),
-      client.object("ai.instructStatus", () => api.ai.getEnhancedStatus()),
-      client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus()),
-      client.object("transcription.status", () => api.transcript.getStatus()),
-      api.transcript.getQuality().then(parseTranscriptionQualityStatus),
-    ]);
-    setModelStatus({ models: nextModels as unknown as LocalJsonValue });
-    setAiStatus(nextAi);
-    setBundledAiStatus(nextBundledAi);
-    setInstructAssetsStatus(nextInstructAssets);
-    setInstructStatus(nextInstruct);
-    setSchedulerStatus(nextScheduler);
-    setTranscriptionStatus(nextTranscription);
-    setTranscriptionQualityStatus(nextQuality);
+  const refreshModelsAndAi = useCallback((): Promise<void> => {
+    if (!api || !client) return Promise.resolve();
+    if (modelRefreshInFlight.current) return modelRefreshInFlight.current;
+    const refresh = (async () => {
+      const [cheapResults, nextBundledAi] = await runCheapThenExpensive(
+        () => Promise.all([
+          client.models(),
+          client.object("ai.status", () => api.ai.getStatus()),
+          client.object("ai.instructAssetsStatus", () => api.ai.getEnhancedAssetsStatus()),
+          client.object("ai.instructStatus", () => api.ai.getEnhancedStatus()),
+          client.object("ai.schedulerStatus", () => api.ai.getWorkloadStatus()),
+          client.object("transcription.status", () => api.transcript.getStatus()),
+          api.transcript.getQuality().then(parseTranscriptionQualityStatus),
+        ]),
+        () => client.bundledAiStatus().catch(() => UNAVAILABLE_BUNDLED_AI_STATUS),
+      );
+      const [nextModels, nextAi, nextInstructAssets, nextInstruct, nextScheduler, nextTranscription, nextQuality] = cheapResults;
+      setModelStatus({ models: nextModels as unknown as LocalJsonValue });
+      setAiStatus(nextAi);
+      setBundledAiStatus(nextBundledAi);
+      setInstructAssetsStatus(nextInstructAssets);
+      setInstructStatus(nextInstruct);
+      setSchedulerStatus(nextScheduler);
+      setTranscriptionStatus(nextTranscription);
+      setTranscriptionQualityStatus(nextQuality);
+    })();
+    modelRefreshInFlight.current = refresh;
+    void refresh.then(
+      () => { if (modelRefreshInFlight.current === refresh) modelRefreshInFlight.current = null; },
+      () => { if (modelRefreshInFlight.current === refresh) modelRefreshInFlight.current = null; },
+    );
+    return refresh;
   }, [api, client]);
 
   const refreshPrivacyFacts = useCallback(async () => {

@@ -17,6 +17,7 @@ export interface M0SmokeOptions {
   networkGuard: NetworkGuard;
   createSmokeWindow(): BrowserWindow;
   getLicenseService(): LicenseService;
+  prepareRendererSetup(): Promise<void>;
   installSessionHardening(): void;
   corePath(): string;
   outputPath: string;
@@ -503,7 +504,7 @@ async function runRendererIsolationProbe(windowRef: BrowserWindow): Promise<Json
       (async () => {
         const root = globalThis;
         const candor = root.candor;
-        const domainNames = ["app", "capture", "meetings", "transcript", "ai", "exports", "settings", "licensing", "events"];
+        const domainNames = ["app", "capture", "meetings", "transcript", "liveTranscript", "diarization", "ai", "exports", "settings", "licensing", "events"];
         const domains = Object.fromEntries(domainNames.map((name) => [name, candor?.[name] ?? {}]));
         const coreKeys = domainNames.flatMap((name) => Object.keys(domains[name]).map((key) => name + "." + key)).sort();
         const licenseKeys = Object.keys(domains.licensing).sort();
@@ -684,6 +685,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
   smokeScaleFactor = smokeOptions.scaleFactor;
   try {
     smokeOptions.installSessionHardening();
+    await smokeOptions.prepareRendererSetup();
     await ensureCoreHandshake();
     const restartExercise = await exerciseCoreRestartForSmoke();
     const designFixture = await seedDesignSmokeMeeting();
@@ -726,7 +728,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
     const rendererBridge = (await windowRef.webContents.executeJavaScript(
       `
         (async () => {
-          if (window.candor?.version !== 3) {
+          if (window.candor?.version !== 4) {
             throw new Error("Candor preload bridge is not present.");
           }
           const [status, capabilities, auditSnapshot, updateStatus, importStatus, consentStatus, aiStatus, instructAssetsStatus, instructStatus, schedulerStatus, transcriptionStatus, vaultStatusBeforeOpen, licenseStatus, licensePortalInfo, diagnosticPreview] = await Promise.all([
@@ -922,7 +924,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
       networkBlockProbe: networkBlockEvidence,
       sessionNetworkGuard: networkGuardSnapshot(),
     });
-    requestCoreShutdown();
+    await requestCoreShutdown();
     app.exit(0);
   } catch (error) {
     await writeSmokeResult({
@@ -934,7 +936,7 @@ export async function runM0Smoke(smokeOptions: M0SmokeOptions): Promise<void> {
       appIsPackaged: app.isPackaged,
       error: error instanceof Error ? error.message : String(error),
     });
-    requestCoreShutdown();
+    await requestCoreShutdown();
     app.exit(1);
   }
 }

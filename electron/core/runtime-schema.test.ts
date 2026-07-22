@@ -24,4 +24,31 @@ describe("capture session runtime schema", () => {
   it("continues to accept an inactive null session", () => {
     expect(schema.parse({ activeSession: null })).toEqual({ activeSession: null });
   });
+
+  it("rejects false custody claims at any renderer-visible depth", () => {
+    expect(() => schema.parse({
+      activeSession: null,
+      rawPathExposed: true,
+    })).toThrowError(/renderer custody sentinel/);
+    expect(() => schema.parse({
+      activeSession: null,
+      nested: { keyMaterialExposedToRenderer: true },
+    })).toThrowError(/renderer custody sentinel/);
+    expect(() => schema.parse({
+      activeSession: null,
+      nested: { rawPathExposed: "false" },
+    })).toThrowError(/renderer custody sentinel/);
+  });
+
+  it("accepts explicit false custody sentinels", () => {
+    expect(schema.parse({
+      activeSession: null,
+      rawPathExposed: false,
+      nested: { keyMaterialExposedToRenderer: false },
+    })).toEqual({
+      activeSession: null,
+      rawPathExposed: false,
+      nested: { keyMaterialExposedToRenderer: false },
+    });
+  });
 });

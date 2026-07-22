@@ -99,9 +99,7 @@ impl LocalAiService {
         store: &RecordingStore,
         params: LocalRecapParams,
     ) -> Result<Value, LocalAiError> {
-        let transcript = store.transcript(RecordingIdParams {
-            recording_id: params.recording_id,
-        })?;
+        let transcript = store.transcript_for_local_ai(params.recording_id)?;
         Ok(build_recap(transcript))
     }
 
@@ -111,9 +109,7 @@ impl LocalAiService {
         params: LocalAskParams,
     ) -> Result<Value, LocalAiError> {
         let question = normalize_question(params.question)?;
-        let transcript = store.transcript(RecordingIdParams {
-            recording_id: params.recording_id,
-        })?;
+        let transcript = store.transcript_for_local_ai(params.recording_id)?;
         Ok(build_ask(transcript, &question))
     }
 
@@ -266,6 +262,18 @@ fn write_segment(
 }
 
 fn build_recap(transcript: Value) -> Value {
+    let input_revision_id = transcript
+        .get("inputRevisionId")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let input_revision_kind = transcript
+        .get("inputRevisionKind")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let cleanup_fallback_applied = transcript
+        .get("cleanupFallbackApplied")
+        .cloned()
+        .unwrap_or(Value::Bool(true));
     let segments = parse_segments(&transcript);
     let decisions = build_items(
         &segments,
@@ -301,6 +309,9 @@ fn build_recap(transcript: Value) -> Value {
 
     json!({
         "recordingId": transcript.get("recordingId").cloned().unwrap_or(Value::Null),
+        "inputRevisionId": input_revision_id,
+        "inputRevisionKind": input_revision_kind,
+        "cleanupFallbackApplied": cleanup_fallback_applied,
         "label": transcript.get("label").cloned().unwrap_or(Value::Null),
         "engine": "heuristic-local",
         "mode": "extractive",
@@ -321,6 +332,18 @@ fn build_recap(transcript: Value) -> Value {
 }
 
 fn build_ask(transcript: Value, question: &str) -> Value {
+    let input_revision_id = transcript
+        .get("inputRevisionId")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let input_revision_kind = transcript
+        .get("inputRevisionKind")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let cleanup_fallback_applied = transcript
+        .get("cleanupFallbackApplied")
+        .cloned()
+        .unwrap_or(Value::Bool(true));
     let segments = parse_segments(&transcript);
     let intent = AskIntent::from_question(question);
     let (answer, citations) = match intent {
@@ -399,6 +422,9 @@ fn build_ask(transcript: Value, question: &str) -> Value {
 
     json!({
         "recordingId": transcript.get("recordingId").cloned().unwrap_or(Value::Null),
+        "inputRevisionId": input_revision_id,
+        "inputRevisionKind": input_revision_kind,
+        "cleanupFallbackApplied": cleanup_fallback_applied,
         "label": transcript.get("label").cloned().unwrap_or(Value::Null),
         "question": question,
         "answer": answer,

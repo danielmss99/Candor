@@ -6,7 +6,7 @@ import type {
   SettingsSection,
 } from "../core/contracts";
 
-export type MeetingTab = "summary" | "transcript" | "notes";
+export type MeetingTab = "summary" | "transcript" | "history" | "notes";
 
 export type AppRoute =
   | { name: "home" }

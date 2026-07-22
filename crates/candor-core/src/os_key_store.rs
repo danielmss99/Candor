@@ -75,6 +75,7 @@ mod platform {
     use std::path::{Path, PathBuf};
     use std::ptr::{null, null_mut};
     use std::slice;
+    use std::sync::{Mutex, MutexGuard};
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{
         BCryptGenRandom, CryptProtectData, CryptUnprotectData, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
@@ -83,6 +84,10 @@ mod platform {
 
     const KEY_BYTES: usize = 32;
     const KEY_FILE: &str = "vault-key.dpapi";
+    // Capture and the encrypted-search backfill can initialize the same root
+    // concurrently. Keep the first DPAPI key creation and all reads atomic
+    // within the single core process so no caller retains a losing key.
+    static KEY_STORE_LOCK: Mutex<()> = Mutex::new(());
 
     pub fn status(_root: &Path) -> OsKeyStoreStatus {
         OsKeyStoreStatus {
@@ -120,21 +125,10 @@ mod platform {
     }
 
     pub fn get_or_create_key(root: &Path) -> Result<OsKey, OsKeyStoreError> {
+        let _guard = key_store_guard();
         let path = key_path(root);
         if path.exists() {
-            let protected = fs::read(&path)
-                .map_err(|err| OsKeyStoreError::new("OS_KEY_READ_FAILED", err.to_string()))?;
-            let bytes = unprotect(&protected)?;
-            if bytes.len() != KEY_BYTES {
-                return Err(OsKeyStoreError::new(
-                    "OS_KEY_INVALID_LENGTH",
-                    "stored DPAPI key had an unexpected length",
-                ));
-            }
-            return Ok(OsKey {
-                bytes,
-                created: false,
-            });
+            return get_existing_key_unlocked(root);
         }
 
         let parent = path.parent().ok_or_else(|| {
@@ -152,6 +146,40 @@ mod platform {
             bytes,
             created: true,
         })
+    }
+
+    pub fn get_existing_key(root: &Path) -> Result<OsKey, OsKeyStoreError> {
+        let _guard = key_store_guard();
+        get_existing_key_unlocked(root)
+    }
+
+    fn get_existing_key_unlocked(root: &Path) -> Result<OsKey, OsKeyStoreError> {
+        let path = key_path(root);
+        if !path.is_file() {
+            return Err(OsKeyStoreError::new(
+                "OS_KEY_NOT_FOUND",
+                "the existing local encryption key was not found",
+            ));
+        }
+        let protected = fs::read(&path)
+            .map_err(|err| OsKeyStoreError::new("OS_KEY_READ_FAILED", err.to_string()))?;
+        let bytes = unprotect(&protected)?;
+        if bytes.len() != KEY_BYTES {
+            return Err(OsKeyStoreError::new(
+                "OS_KEY_INVALID_LENGTH",
+                "stored DPAPI key had an unexpected length",
+            ));
+        }
+        Ok(OsKey {
+            bytes,
+            created: false,
+        })
+    }
+
+    fn key_store_guard() -> MutexGuard<'static, ()> {
+        KEY_STORE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn generate_key() -> Result<Vec<u8>, OsKeyStoreError> {
@@ -345,6 +373,30 @@ mod platform {
         }
     }
 
+    pub fn get_existing_key(root: &Path) -> Result<OsKey, OsKeyStoreError> {
+        let entry =
+            entry(root).map_err(|err| map_keyring_error("OS_KEY_STORAGE_UNAVAILABLE", err))?;
+        match entry.get_secret() {
+            Ok(bytes) => {
+                if bytes.len() != KEY_BYTES {
+                    return Err(OsKeyStoreError::new(
+                        "OS_KEY_INVALID_LENGTH",
+                        "stored native key had an unexpected length",
+                    ));
+                }
+                Ok(OsKey {
+                    bytes,
+                    created: false,
+                })
+            }
+            Err(KeyringError::NoEntry) => Err(OsKeyStoreError::new(
+                "OS_KEY_NOT_FOUND",
+                "the existing local encryption key was not found",
+            )),
+            Err(error) => Err(map_keyring_error("OS_KEY_READ_FAILED", error)),
+        }
+    }
+
     fn entry(root: &Path) -> Result<Entry, KeyringError> {
         Entry::new(SERVICE, &credential_name(root))
     }
@@ -419,10 +471,16 @@ pub fn get_or_create_key(root: &Path) -> Result<OsKey, OsKeyStoreError> {
     platform::get_or_create_key(root)
 }
 
+pub fn get_existing_key(root: &Path) -> Result<OsKey, OsKeyStoreError> {
+    platform::get_existing_key(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
+    #[cfg(windows)]
+    use std::sync::{Arc, Barrier};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_root() -> std::path::PathBuf {
@@ -454,5 +512,43 @@ mod tests {
         assert_eq!(proof["roundTrip"], true);
         assert_eq!(proof["stableAfterReopen"], true);
         assert_eq!(proof["keyBytes"], 32);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_dpapi_initialization_returns_one_key_identity() {
+        const CALLERS: usize = 8;
+        let root = temp_root();
+        let barrier = Arc::new(Barrier::new(CALLERS));
+        let handles = (0..CALLERS)
+            .map(|_| {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    get_or_create_key(&root).expect("initialize shared DPAPI key")
+                })
+            })
+            .collect::<Vec<_>>();
+        let keys = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("join DPAPI initializer"))
+            .collect::<Vec<_>>();
+        let first = keys.first().expect("at least one initialized key");
+
+        assert!(keys.iter().all(|key| key.same_material(first)));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn existing_key_lookup_never_creates_storage() {
+        let root = temp_root();
+        let error = match get_existing_key(&root) {
+            Err(error) => error,
+            Ok(_) => panic!("missing key must fail closed"),
+        };
+
+        assert_eq!(error.code, "OS_KEY_NOT_FOUND");
+        assert!(!root.exists());
     }
 }

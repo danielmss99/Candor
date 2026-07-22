@@ -1,4 +1,6 @@
 import { createVersionedCoreRequest } from "./core-rpc-envelope.mjs";
+import { waitForBundleVerification } from "./bundle-verification-readiness.mjs";
+import { removeTemporaryDirectory, stopChildProcess } from "./child-process-cleanup.mjs";
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -9,7 +11,6 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -63,6 +64,8 @@ const rendererSource = rendererSourcePaths(path.join(repoRoot, "v3", "renderer",
 const failures = [];
 const observations = [];
 let child = null;
+let coreLines = null;
+let bundledStatus = null;
 let status = null;
 let recap = null;
 let ask = null;
@@ -276,14 +279,14 @@ function spawnCore(envPatch) {
 }
 
 function makeRpc(childProcess) {
-  const lines = createInterface({ input: childProcess.stdout });
+  coreLines = createInterface({ input: childProcess.stdout });
   const pending = new Map();
 
   childProcess.stderr.on("data", (chunk) => {
     process.stderr.write(`[candor-core stderr] ${chunk}`);
   });
 
-  lines.on("line", (line) => {
+  coreLines.on("line", (line) => {
     const response = JSON.parse(line);
     const entry = pending.get(response.id);
     if (!entry) return;
@@ -407,6 +410,7 @@ function writeProofArtifact() {
     keyMaterialExposedToRenderer: false,
     observations,
     failures,
+    bundledStatus,
     status,
     recap,
     ask,
@@ -428,6 +432,17 @@ try {
     CANDOR_LOCAL_LLM_CONTEXT_TOKENS: "",
   });
   const call = makeRpc(core);
+
+  bundledStatus = await waitForBundleVerification(
+    () => call("ai.bundledAssetsStatus"),
+    { timeoutMs: 8_000 },
+  );
+  assertPathless(bundledStatus, "bundled AI verification status");
+  record(bundledStatus?.fixture === true, "bundled AI verification did not identify the fixture");
+  record(
+    bundledStatus?.language?.ready === true,
+    "bundled AI verification did not verify the fixture language assets",
+  );
 
   status = await call("ai.instructStatus");
   assertPathless(status, "AI instruct status");
@@ -465,9 +480,11 @@ try {
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
 } finally {
-  if (child && !child.killed) child.kill();
-  rmSync(dataDir, { recursive: true, force: true });
-  rmSync(fixtureDir, { recursive: true, force: true });
+  coreLines?.close();
+  if (child && !child.stdin.destroyed && !child.stdin.writableEnded) child.stdin.end();
+  if (child) await stopChildProcess(child);
+  removeTemporaryDirectory(dataDir);
+  removeTemporaryDirectory(fixtureDir);
   writeProofArtifact();
 }
 

@@ -7,6 +7,7 @@ export const requiredSourcePaths = [
   "electron/main.ts",
   "electron/preload.cts",
   "electron/core/json.ts",
+  "electron/core/live-transcript-event-bridge.ts",
   "electron/core/core-client.ts",
   "electron/core/core-errors.ts",
   "electron/core/capture-recovery-store.ts",
@@ -18,6 +19,7 @@ export const requiredSourcePaths = [
   "electron/diagnostics/diagnostic-report.ts",
   "electron/export/local-report.ts",
   "electron/ipc/core-ipc.ts",
+  "electron/ipc/capture-settings-ipc.ts",
   "electron/ipc/diagnostics-ipc.ts",
   "electron/ipc/export-ipc.ts",
   "electron/ipc/import-ipc.ts",
@@ -38,15 +40,30 @@ export const requiredSourcePaths = [
   "electron/window/navigation-policy.ts",
   "electron/license-service.ts",
   "scripts/build-release-core.mjs",
+  "scripts/release-binary-path-audit.mjs",
   "scripts/core-rpc-envelope.mjs",
   "scripts/electron-dev.mjs",
   "v3/renderer/index.html",
   "v3/renderer/src/candor-api.d.ts",
   "crates/candor-core/Cargo.toml",
+  "crates/candor-core/Cargo.lock",
+  "crates/candor-core/src/lib.rs",
+  "crates/candor-core/src/live_transcript_service.rs",
+  "crates/candor-core/src/live_transcription.rs",
   "crates/candor-core/src/main.rs",
   "crates/candor-core/src/dictionary_staging.rs",
   "crates/candor-core/src/job_manager.rs",
   "crates/candor-core/src/v2_importer.rs",
+  "crates/candor-tools/Cargo.toml",
+  "crates/candor-tools/Cargo.lock",
+  "crates/candor-tools/src/lib.rs",
+  "crates/candor-tools/src/cli.rs",
+  "crates/candor-tools/src/core_client.rs",
+  "crates/candor-tools/src/mcp.rs",
+  "crates/candor-tools/src/service.rs",
+  "crates/candor-tools/src/bin/candorctl.rs",
+  "crates/candor-tools/src/bin/candor-mcp.rs",
+  "docs/mcp-server.md",
   "scripts/spec3-verify-ai-bundle.mjs",
   "scripts/spec6-acquire-release-model.mjs",
   "scripts/spec6-release-publication-gate.mjs",
@@ -71,17 +88,27 @@ function toRepoPath(repoRoot, absolutePath) {
 }
 
 function isActiveSource(pathValue) {
-  return /^(electron|v3\/renderer\/src|crates\/candor-core\/src|scripts)\//.test(pathValue);
+  return /^(electron|v3\/renderer\/src|crates\/candor-core\/src|scripts)\//.test(pathValue) ||
+    /^crates\/candor-tools\/src\//.test(pathValue) ||
+    ["crates/candor-tools/Cargo.toml", "crates/candor-tools/Cargo.lock"].includes(pathValue) ||
+    pathValue === "docs/mcp-server.md";
 }
 
 export function collectSourceSecurityInput(repoRoot) {
   const normalizedRoot = resolve(repoRoot);
   const trackedActivePaths = runGit(normalizedRoot, [
     "ls-files",
+    "--cached",
+    "--others",
+    "--exclude-standard",
     "--",
     "electron",
     "v3/renderer/src",
     "crates/candor-core/src",
+    "crates/candor-tools/Cargo.toml",
+    "crates/candor-tools/Cargo.lock",
+    "crates/candor-tools/src",
+    "docs/mcp-server.md",
     "scripts",
   ]).filter(isActiveSource);
   const sourcePaths = new Set([...requiredSourcePaths, ...trackedActivePaths]);
@@ -116,6 +143,155 @@ function sourceText(input, pathValue) {
   return typeof input.sources[pathValue] === "string" ? input.sources[pathValue] : "";
 }
 
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function containsElectronNetCall(source) {
+  const netBindings = new Set();
+  const electronBindings = new Set();
+
+  for (const match of source.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*["']electron["']/g)) {
+    for (const specifier of match[1].split(",")) {
+      const binding = specifier.trim().match(/^net(?:\s+as\s+([A-Za-z_$][\w$]*))?$/);
+      if (binding) netBindings.add(binding[1] ?? "net");
+    }
+  }
+  for (const match of source.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*(?:await\s+)?(?:require\s*\(\s*["']electron["']\s*\)|import\s*\(\s*["']electron["']\s*\))/g)) {
+    for (const specifier of match[1].split(",")) {
+      const binding = specifier.trim().match(/^net(?:\s*:\s*([A-Za-z_$][\w$]*))?$/);
+      if (binding) netBindings.add(binding[1] ?? "net");
+    }
+  }
+  for (const pattern of [
+    /\bimport\s*\*\s*as\s*([A-Za-z_$][\w$]*)\s*from\s*["']electron["']/g,
+    /\bimport\s+([A-Za-z_$][\w$]*)\s+from\s*["']electron["']/g,
+    /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:await\s+)?(?:require\s*\(\s*["']electron["']\s*\)|import\s*\(\s*["']electron["']\s*\))/g,
+  ]) {
+    for (const match of source.matchAll(pattern)) electronBindings.add(match[1]);
+  }
+
+  if (netBindings.size > 0) return true;
+  for (const binding of electronBindings) {
+    if (new RegExp(`\\b${escapeRegExp(binding)}\\s*\\.\\s*net\\b`).test(source)) return true;
+  }
+  return /\(?\s*(?:await\s+)?(?:require\s*\(\s*["']electron["']\s*\)|import\s*\(\s*["']electron["']\s*\))\s*\)?\s*\.\s*net\b/.test(source);
+}
+
+function blankRustSource(value) {
+  return value.replace(/[^\r\n]/g, " ");
+}
+
+function blankRustCfgTestItems(value) {
+  const characters = value.split("");
+  const testAttribute = /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]/g;
+  for (const match of value.matchAll(testAttribute)) {
+    const start = match.index;
+    let cursor = start + match[0].length;
+    while (/\s/.test(value[cursor] ?? "")) cursor += 1;
+
+    let openingBrace = -1;
+    let terminator = -1;
+    let parentheses = 0;
+    let brackets = 0;
+    for (let index = cursor; index < value.length; index += 1) {
+      const character = value[index];
+      if (character === "(") parentheses += 1;
+      else if (character === ")") parentheses = Math.max(0, parentheses - 1);
+      else if (character === "[") brackets += 1;
+      else if (character === "]") brackets = Math.max(0, brackets - 1);
+      else if (parentheses === 0 && brackets === 0 && character === "{") {
+        openingBrace = index;
+        break;
+      } else if (parentheses === 0 && brackets === 0 && character === ";") {
+        terminator = index + 1;
+        break;
+      }
+    }
+
+    if (openingBrace >= 0) {
+      let depth = 1;
+      terminator = openingBrace + 1;
+      while (terminator < value.length && depth > 0) {
+        if (value[terminator] === "{") depth += 1;
+        else if (value[terminator] === "}") depth -= 1;
+        terminator += 1;
+      }
+    }
+    if (terminator < 0) terminator = value.length;
+    for (let index = start; index < terminator; index += 1) {
+      if (characters[index] !== "\r" && characters[index] !== "\n") characters[index] = " ";
+    }
+  }
+  return characters.join("");
+}
+
+function rustProductionCode(value) {
+  const source = value;
+  let output = "";
+  let index = 0;
+  while (index < source.length) {
+    if (source.startsWith("//", index)) {
+      const end = source.indexOf("\n", index);
+      const next = end < 0 ? source.length : end;
+      output += blankRustSource(source.slice(index, next));
+      index = next;
+      continue;
+    }
+    if (source.startsWith("/*", index)) {
+      const start = index;
+      let depth = 1;
+      index += 2;
+      while (index < source.length && depth > 0) {
+        if (source.startsWith("/*", index)) {
+          depth += 1;
+          index += 2;
+        } else if (source.startsWith("*/", index)) {
+          depth -= 1;
+          index += 2;
+        } else {
+          index += 1;
+        }
+      }
+      output += blankRustSource(source.slice(start, index));
+      continue;
+    }
+
+    const rawString = source.slice(index).match(/^(?:br|r)(#{0,16})"/);
+    if (rawString) {
+      const start = index;
+      const terminator = `"${rawString[1]}`;
+      index += rawString[0].length;
+      const end = source.indexOf(terminator, index);
+      index = end < 0 ? source.length : end + terminator.length;
+      output += blankRustSource(source.slice(start, index));
+      continue;
+    }
+
+    const byteString = source.startsWith('b"', index);
+    if (byteString || source[index] === '"') {
+      const start = index;
+      index += byteString ? 2 : 1;
+      while (index < source.length) {
+        if (source[index] === "\\") {
+          index = Math.min(source.length, index + 2);
+        } else if (source[index] === '"') {
+          index += 1;
+          break;
+        } else {
+          index += 1;
+        }
+      }
+      output += blankRustSource(source.slice(start, index));
+      continue;
+    }
+
+    output += source[index];
+    index += 1;
+  }
+  return blankRustCfgTestItems(output);
+}
+
 export function evaluateSourceSecurity(input) {
   const checks = [];
   const add = (id, ok, file, detail) => checks.push({ id, ok: Boolean(ok), file, detail });
@@ -136,13 +312,36 @@ export function evaluateSourceSecurity(input) {
   }
 
   const main = "electron/main.ts";
-  const electronRuntimeSource = Object.entries(input.sources)
+  const electronRuntimeEntries = Object.entries(input.sources)
     .filter(([sourcePath, content]) =>
       sourcePath.startsWith("electron/") &&
       sourcePath !== "electron/preload.cts" &&
       !sourcePath.endsWith(".test.ts") &&
       typeof content === "string"
-    )
+    );
+  const electronRuntimeSource = electronRuntimeEntries
+    .map(([, content]) => content)
+    .join("\n");
+  const electronNetworkSurfaceEntries = Object.entries(input.sources)
+    .filter(([sourcePath, content]) =>
+      (sourcePath.startsWith("electron/") || sourcePath.startsWith("v3/renderer/src/")) &&
+      !sourcePath.startsWith("electron/smoke/") &&
+      !sourcePath.startsWith("electron/test-core/") &&
+      !/\.test\.[cm]?[jt]sx?$/.test(sourcePath) &&
+      /\.[cm]?[jt]sx?$/.test(sourcePath) &&
+      typeof content === "string"
+    );
+  const electronNetworkSurfaceSource = electronNetworkSurfaceEntries
+    .map(([, content]) => content)
+    .join("\n");
+  const modelAcquisitionPath = "electron/models/model-acquisition-service.ts";
+  const electronNetworkSourceOutsideModelAcquisition = electronNetworkSurfaceEntries
+    .filter(([sourcePath]) => sourcePath !== modelAcquisitionPath)
+    .map(([, content]) => content)
+    .join("\n");
+  const modelAcquisitionSource = sourceText(input, modelAcquisitionPath);
+  const arbitraryShellOpenSource = electronRuntimeEntries
+    .filter(([sourcePath]) => sourcePath !== "electron/ipc/capture-settings-ipc.ts")
     .map(([, content]) => content)
     .join("\n");
   for (const [id, pattern] of [
@@ -180,7 +379,55 @@ export function evaluateSourceSecurity(input) {
   add("electron-main:no-context-disable", !/contextIsolation\s*:\s*false/.test(electronRuntimeSource), main, "context isolation stays enabled");
   add("electron-main:no-auto-updater", !/\bautoUpdater\b/.test(electronRuntimeSource), main, "background updater is absent");
   add("electron-main:no-crash-upload", !/crashReporter\.start\s*\(/.test(electronRuntimeSource), main, "crash upload is absent");
-  add("electron-main:no-shell-open", !/shell\.openExternal\s*\(/.test(electronRuntimeSource), main, "main does not open arbitrary URLs");
+  add("electron-main:no-shell-open", !/shell\.openExternal\s*\(/.test(arbitraryShellOpenSource), main, "main does not open arbitrary URLs");
+  add(
+    "electron-runtime:no-node-network-imports",
+    !/\bfrom\s*["'](?:node:)?(?:http|https|net|tls|dgram|dns(?:\/promises)?)["']|\b(?:require|import)\s*\(\s*["'](?:node:)?(?:http|https|net|tls|dgram|dns(?:\/promises)?)["']/.test(electronNetworkSourceOutsideModelAcquisition),
+    "electron/ and v3/renderer/src/",
+    "production Electron and renderer source imports no Node network module outside the reviewed model-acquisition broker",
+  );
+  add(
+    "model-acquisition:https-only",
+    /from\s*["']node:https["']/.test(modelAcquisitionSource)
+      && !/from\s*["'](?:node:)?(?:net|tls|dgram|dns(?:\/promises)?)["']/.test(modelAcquisitionSource)
+      && !/\b(?:fetch|WebSocket|EventSource)\s*\(/.test(modelAcquisitionSource),
+    modelAcquisitionPath,
+    "the sole model acquisition broker uses bounded HTTPS without raw sockets, DNS APIs, fetch, or browser transports",
+  );
+  add(
+    "electron-runtime:no-network-calls",
+    !/\b(?:fetch|WebSocket|EventSource)\s*\(/.test(electronNetworkSurfaceSource) &&
+      !Object.entries(input.sources)
+        .filter(([sourcePath, content]) =>
+          (sourcePath.startsWith("electron/") || sourcePath.startsWith("v3/renderer/src/")) &&
+          !sourcePath.startsWith("electron/smoke/") &&
+          !sourcePath.startsWith("electron/test-core/") &&
+          !/\.test\.[cm]?[jt]sx?$/.test(sourcePath) &&
+          /\.[cm]?[jt]sx?$/.test(sourcePath) &&
+          typeof content === "string"
+        )
+        .some(([, content]) => containsElectronNetCall(content)),
+    "electron/ and v3/renderer/src/",
+    "production Electron and renderer source opens no fetch, WebSocket, EventSource, or Electron net request",
+  );
+  excludes(
+    "electron-runtime:no-network-dependencies",
+    "package.json",
+    /"(?:axios|undici|node-fetch|got|superagent|ws|socket\.io|socket\.io-client)"\s*:/i,
+    "root package has no direct Electron or renderer network client dependency",
+  );
+  includes(
+    "electron-main:fixed-windows-microphone-settings",
+    "electron/ipc/capture-settings-ipc.ts",
+    'return "ms-settings:privacy-microphone";',
+    "Windows microphone settings use a fixed destination",
+  );
+  includes(
+    "electron-main:fixed-macos-microphone-settings",
+    "electron/ipc/capture-settings-ipc.ts",
+    'return "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone";',
+    "macOS microphone settings use a fixed destination",
+  );
   add("electron-main:no-sandbox-flag", !/--no-sandbox|ELECTRON_DISABLE_SANDBOX/.test(electronRuntimeSource), main, "sandbox bypass is absent");
   includes(
     "electron-main:permission-request-false",
@@ -270,7 +517,7 @@ export function evaluateSourceSecurity(input) {
   const preload = "electron/preload.cts";
   for (const [id, pattern] of [
     ["context-bridge", 'contextBridge.exposeInMainWorld("candor"'],
-    ["api-version", "version: 3 as const"],
+    ["api-version", "version: 4 as const"],
     ["app-frozen", "app: Object.freeze("],
     ["capture-frozen", "capture: Object.freeze("],
     ["meetings-frozen", "meetings: Object.freeze("],
@@ -330,9 +577,9 @@ export function evaluateSourceSecurity(input) {
 
   const rendererDeclaration = "v3/renderer/src/candor-api.d.ts";
   includes(
-    "renderer-api:v3",
+    "renderer-api:v4",
     rendererDeclaration,
-    "interface CandorApiV3",
+    "interface CandorApiV4",
     "renderer declaration matches the domain preload API version",
   );
   includes(
@@ -366,6 +613,7 @@ export function evaluateSourceSecurity(input) {
   for (const directive of [
     "default-src 'self'",
     "script-src 'self'",
+    "media-src 'self' blob:",
     "connect-src 'none'",
     "object-src 'none'",
     "base-uri 'none'",
@@ -430,11 +678,236 @@ export function evaluateSourceSecurity(input) {
   includes("core:protocol-handshake", coreMain, '"schemaVersion"', "Rust core reports the schema handshake");
 
   const coreCargo = "crates/candor-core/Cargo.toml";
+  const coreCargoLock = "crates/candor-core/Cargo.lock";
+  const coreProductionRust = Object.entries(input.sources)
+    .filter(([sourcePath, content]) =>
+      sourcePath.startsWith("crates/candor-core/src/") &&
+      sourcePath.endsWith(".rs") &&
+      typeof content === "string"
+    )
+    .map(([, content]) => rustProductionCode(content))
+    .join("\n");
+  const networkDependencyPattern = /^\s*(?:reqwest|hyper|ureq|curl|isahc|surf|axum|warp|actix-web|rocket|tonic|tungstenite|tokio-tungstenite|socket2)\s*=|\bpackage\s*=\s*"(?:reqwest|hyper|ureq|curl|isahc|surf|axum|warp|actix-web|rocket|tonic|tungstenite|tokio-tungstenite|socket2)"/m;
+  const lockedNetworkDependencyPattern = /^name\s*=\s*"(?:reqwest|hyper|ureq|curl|isahc|surf|axum|warp|actix-web|rocket|tonic|tungstenite|tokio-tungstenite|socket2)"$/m;
   excludes(
     "core:no-network-client-dependency",
     coreCargo,
-    /^\s*(?:reqwest|hyper|ureq|curl|isahc|surf)\s*=/m,
-    "Rust core has no HTTP client dependency",
+    networkDependencyPattern,
+    "Rust core has no network client, server, or socket dependency",
+  );
+  excludes(
+    "core:no-network-client-dependency-locked",
+    coreCargoLock,
+    lockedNetworkDependencyPattern,
+    "Rust core lockfile contains no network client, server, or socket package",
+  );
+  add(
+    "core:no-network-apis",
+    !/\b(?:TcpListener|TcpStream|UdpSocket|ToSocketAddrs)\b|\bstd\s*::\s*net\b|\btokio\s*::\s*net\b|\bhyper\s*::\s*Server\b|\baxum\s*::\s*serve\b/.test(coreProductionRust),
+    "crates/candor-core/src",
+    "Rust core production source opens no network listener, stream, datagram, or address resolver",
+  );
+
+  const automationCargo = "crates/candor-tools/Cargo.toml";
+  const automationCargoLock = "crates/candor-tools/Cargo.lock";
+  const automationCoreClient = "crates/candor-tools/src/core_client.rs";
+  const automationService = "crates/candor-tools/src/service.rs";
+  const automationCli = "crates/candor-tools/src/cli.rs";
+  const automationMcp = "crates/candor-tools/src/mcp.rs";
+  const automationDocs = "docs/mcp-server.md";
+  const automationRust = [
+    "crates/candor-tools/src/lib.rs",
+    automationCli,
+    automationCoreClient,
+    automationMcp,
+    automationService,
+    "crates/candor-tools/src/bin/candorctl.rs",
+    "crates/candor-tools/src/bin/candor-mcp.rs",
+  ].map((sourcePath) => sourceText(input, sourcePath)).join("\n");
+  const automationProductionRust = [
+    "crates/candor-tools/src/lib.rs",
+    automationCli,
+    automationCoreClient,
+    automationMcp,
+    automationService,
+    "crates/candor-tools/src/bin/candorctl.rs",
+    "crates/candor-tools/src/bin/candor-mcp.rs",
+  ].map((sourcePath) => sourceText(input, sourcePath).split("#[cfg(test)]", 1)[0]).join("\n");
+  const quotedMatchArms = (content, startPattern, endPattern) => {
+    const start = content.search(startPattern);
+    if (start < 0) return [];
+    const tail = content.slice(start);
+    const end = tail.search(endPattern);
+    const body = end < 0 ? tail : tail.slice(0, end);
+    return [...body.matchAll(/^\s*"([^"]+)"\s*=>/gm)].map((match) => match[1]);
+  };
+  const exactList = (actual, expected) =>
+    actual.length === expected.length && actual.every((value, index) => value === expected[index]);
+  const coreAllowlistMatch = sourceText(input, automationCoreClient).match(
+    /pub const ALLOWED_CORE_METHODS:\s*&\[&str\]\s*=\s*&\[(.*?)\];/s,
+  );
+  const coreAllowlist = coreAllowlistMatch
+    ? [...coreAllowlistMatch[1].matchAll(/"([^"]+)"/g)].map((match) => match[1])
+    : [];
+  const expectedCoreAllowlist = [
+    "recording.durable.listPage",
+    "recording.durable.transcriptPage",
+    "recording.durable.search",
+    "core.shutdown",
+  ];
+  add(
+    "automation:exact-core-allowlist",
+    exactList(coreAllowlist, expectedCoreAllowlist),
+    automationCoreClient,
+    "automation companions can call only the reviewed read methods and lifecycle shutdown",
+  );
+  const toolInvokeAllowlist = quotedMatchArms(
+    sourceText(input, automationService),
+    /let result = match tool\s*\{/,
+    /^\s*_\s*=>\s*Err/m,
+  );
+  const expectedToolAllowlist = [
+    "list_meetings",
+    "search_meetings",
+    "meeting_summary",
+    "get_transcript",
+    "export_meeting",
+    "library_statistics",
+  ];
+  add(
+    "automation:exact-tool-allowlist",
+    exactList(toolInvokeAllowlist, expectedToolAllowlist),
+    automationService,
+    "automation tool dispatch remains on the reviewed read-only allowlist",
+  );
+  const toolDefinitionMatch = sourceText(input, automationService).match(
+    /pub fn tool_definitions\(\) -> Value\s*\{(.*?)\n\}/s,
+  );
+  const toolDefinitions = toolDefinitionMatch
+    ? [...toolDefinitionMatch[1].matchAll(/"name"\s*:\s*"([^"]+)"/g)].map((match) => match[1])
+    : [];
+  add(
+    "automation:exact-tool-definitions",
+    exactList(toolDefinitions, expectedToolAllowlist),
+    automationService,
+    "MCP tool definitions exactly match the reviewed read-only dispatch allowlist",
+  );
+  const cliAllowlist = quotedMatchArms(
+    sourceText(input, automationCli),
+    /match command\s*\{/,
+    /^\s*_\s*=>\s*Err/m,
+  );
+  add(
+    "automation:exact-cli-allowlist",
+    exactList(cliAllowlist, ["list", "search", "summary", "transcript", "export", "stats"]),
+    automationCli,
+    "candorctl exposes only the reviewed read-only commands",
+  );
+  const cliOptionAllowlist = quotedMatchArms(
+    sourceText(input, automationCli),
+    /match argument\.as_str\(\)\s*\{/,
+    /^\s*_\s*=>\s*return Err/m,
+  );
+  add(
+    "automation:exact-cli-option-allowlist",
+    exactList(cliOptionAllowlist, ["--limit", "--cursor", "--format"]),
+    automationCli,
+    "candorctl accepts no path, destination, command, or generic dispatch option",
+  );
+  const mcpAllowlist = quotedMatchArms(
+    sourceText(input, automationMcp),
+    /match method\s*\{/,
+    /^\s*_\s*=>\s*write_jsonrpc_error/m,
+  );
+  add(
+    "automation:exact-mcp-allowlist",
+    exactList(mcpAllowlist, ["initialize", "ping", "tools/list", "tools/call"]),
+    automationMcp,
+    "candor-mcp exposes only initialization, health, and fixed tool operations",
+  );
+  excludes(
+    "automation:no-network-dependencies",
+    automationCargo,
+    networkDependencyPattern,
+    "automation companions have no network client, server, or socket dependency",
+  );
+  excludes(
+    "automation:no-network-dependencies-locked",
+    automationCargoLock,
+    lockedNetworkDependencyPattern,
+    "automation companion lockfile contains no network client, server, or socket package",
+  );
+  add(
+    "automation:no-network-apis",
+    !/\b(?:TcpListener|TcpStream|UdpSocket|ToSocketAddrs)\b|\bstd::net\b|\btokio::net\b|\bhyper::Server\b|\baxum::serve\b/.test(automationRust),
+    "crates/candor-tools/src",
+    "automation companion source opens no network listener or socket",
+  );
+  add(
+    "automation:no-webhook-surface",
+    !/\bwebhooks?\b/i.test(automationRust),
+    "crates/candor-tools/src",
+    "automation companion source exposes no webhook surface",
+  );
+  add(
+    "automation:no-path-or-key-exposure-enabled",
+    !/raw_path_exposed\s*:\s*true|key_material_exposed_to_renderer\s*:\s*true|"rawPathExposed"\s*:\s*true|"keyMaterialExposedToRenderer"\s*:\s*true/.test(automationRust),
+    "crates/candor-tools/src",
+    "automation responses never enable raw path or key material exposure",
+  );
+  add(
+    "automation:no-raw-path-output-fields",
+    !/"(?!rawPathExposed")[^"]*(?:Path|path)[^"]*"\s*:/.test(automationProductionRust),
+    "crates/candor-tools/src",
+    "automation production responses define no raw, local, source, or destination path field",
+  );
+  includes(
+    "automation:export-destination-fixed",
+    automationService,
+    '"destination": "stdout-only"',
+    "the only export destination is the caller-controlled stdout stream",
+  );
+  includes(
+    "automation:sanitized-meeting-output",
+    automationService,
+    "fn sanitize_summary(value: &Value) -> Option<Value>",
+    "meeting metadata is reconstructed through a fixed output allowlist",
+  );
+  includes(
+    "automation:sanitized-transcript-output",
+    automationService,
+    "fn sanitize_segment(value: &Value) -> Option<Value>",
+    "transcript segments are reconstructed through a fixed output allowlist",
+  );
+  includes(
+    "automation:unknown-tool-denied",
+    automationService,
+    'ToolError::denied("Tool is not on the read-only allowlist")',
+    "unknown automation tools are denied",
+  );
+  includes(
+    "automation:mcp-unknown-method-denied",
+    automationMcp,
+    '"Method is not on the MCP allowlist"',
+    "unknown MCP methods are denied",
+  );
+  includes(
+    "automation:stdout-only-export",
+    automationCli,
+    "never accepts a filesystem destination",
+    "CLI export is content-only and never accepts an arbitrary destination path",
+  );
+  includes(
+    "automation:documented-stdio-boundary",
+    automationDocs,
+    "MCP JSON-RPC on stdin and stdout",
+    "automation documentation fixes MCP transport to local stdio",
+  );
+  includes(
+    "automation:documented-no-network-boundary",
+    automationDocs,
+    "never open a TCP listener, create a socket, make an outbound request, accept a webhook",
+    "automation documentation explicitly prohibits listeners, sockets, outbound requests, and webhooks",
   );
 
   const backgroundTask = "electron/core/background-task.ts";
@@ -555,7 +1028,10 @@ export function evaluateSourceSecurity(input) {
     ],
   ];
   const secretFindings = [];
-  for (const sourcePath of input.trackedActivePaths) {
+  const automationReviewPaths = requiredSourcePaths.filter((sourcePath) =>
+    sourcePath.startsWith("crates/candor-tools/") || sourcePath === "docs/mcp-server.md"
+  );
+  for (const sourcePath of new Set([...input.trackedActivePaths, ...automationReviewPaths])) {
     const content = sourceText(input, sourcePath);
     for (const [kind, pattern] of secretPatterns) {
       for (const match of content.matchAll(pattern)) {
@@ -593,6 +1069,15 @@ export function runSourceSecuritySelfTest(input) {
   const proofScript = sourceText(input, "scripts/m0-packaged-smoke.mjs");
   const dictionaryStaging = sourceText(input, "crates/candor-core/src/dictionary_staging.rs");
   const publicationGate = sourceText(input, "scripts/spec6-release-publication-gate.mjs");
+  const coreCargo = sourceText(input, "crates/candor-core/Cargo.toml");
+  const coreCargoLock = sourceText(input, "crates/candor-core/Cargo.lock");
+  const coreMainSource = sourceText(input, "crates/candor-core/src/main.rs");
+  const packageSource = sourceText(input, "package.json");
+  const automationCargo = sourceText(input, "crates/candor-tools/Cargo.toml");
+  const automationCargoLock = sourceText(input, "crates/candor-tools/Cargo.lock");
+  const automationCoreClient = sourceText(input, "crates/candor-tools/src/core_client.rs");
+  const automationService = sourceText(input, "crates/candor-tools/src/service.rs");
+  const automationMcp = sourceText(input, "crates/candor-tools/src/mcp.rs");
   const testSecretName = ["api", "Key"].join("");
   const testSecret = ["sk", "prod", "1234567890abcdefgh"].join("-");
   const cases = [
@@ -687,14 +1172,266 @@ export function runSourceSecuritySelfTest(input) {
       ),
       expectedFailure: "release:github-asset-limit",
     },
+    {
+      name: "electron-node-network-import-added",
+      input: withSource(
+        input,
+        "electron/main.ts",
+        `${main}\nimport { request as unsafeRequest } from "node:https";\n`,
+      ),
+      expectedFailure: "electron-runtime:no-node-network-imports",
+    },
+    {
+      name: "model-acquisition-raw-tls-added",
+      input: withSource(
+        input,
+        "electron/models/model-acquisition-service.ts",
+        `${sourceText(input, "electron/models/model-acquisition-service.ts")}\nimport { connect as unsafeTlsConnect } from "node:tls";\n`,
+      ),
+      expectedFailure: "model-acquisition:https-only",
+    },
+    {
+      name: "electron-renderer-fetch-added",
+      input: withSource(
+        input,
+        "v3/renderer/src/candor-api.d.ts",
+        `${sourceText(input, "v3/renderer/src/candor-api.d.ts")}\nconst unsafeFetch = () => fetch("https://example.invalid");\n`,
+      ),
+      expectedFailure: "electron-runtime:no-network-calls",
+    },
+    {
+      name: "electron-net-aliased-import-call-added",
+      input: withSource(
+        input,
+        "electron/main.ts",
+        `${main}\nimport { net as electronNet } from "electron";\nelectronNet.request("https://example.invalid");\n`,
+      ),
+      expectedFailure: "electron-runtime:no-network-calls",
+    },
+    {
+      name: "electron-net-commonjs-member-alias-added",
+      input: withSource(
+        input,
+        "electron/main.ts",
+        `${main}\nconst electronNet = require("electron").net;\nelectronNet.request("https://example.invalid");\n`,
+      ),
+      expectedFailure: "electron-runtime:no-network-calls",
+    },
+    {
+      name: "electron-net-dynamic-import-member-alias-added",
+      input: withSource(
+        input,
+        "electron/main.ts",
+        `${main}\nconst electronNet = (await import("electron")).net;\nelectronNet.request("https://example.invalid");\n`,
+      ),
+      expectedFailure: "electron-runtime:no-network-calls",
+    },
+    {
+      name: "electron-network-dependency-added",
+      input: withSource(
+        input,
+        "package.json",
+        packageSource.replace('"dependencies": {', '"dependencies": {\n    "axios": "1.0.0",'),
+      ),
+      expectedFailure: "electron-runtime:no-network-dependencies",
+    },
+    {
+      name: "core-network-dependency-added",
+      input: withSource(
+        input,
+        "crates/candor-core/Cargo.toml",
+        `${coreCargo}\nreqwest = "0.12"\n`,
+      ),
+      expectedFailure: "core:no-network-client-dependency",
+    },
+    {
+      name: "core-network-dependency-locked",
+      input: withSource(
+        input,
+        "crates/candor-core/Cargo.lock",
+        `${coreCargoLock}\n[[package]]\nname = "reqwest"\nversion = "0.12.0"\n`,
+      ),
+      expectedFailure: "core:no-network-client-dependency-locked",
+    },
+    {
+      name: "core-std-net-path-added",
+      input: withSource(
+        input,
+        "crates/candor-core/src/main.rs",
+        `${coreMainSource}\nfn unsafe_network_path() { let _ = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST); }\n`,
+      ),
+      expectedFailure: "core:no-network-apis",
+    },
+    {
+      name: "core-tcp-stream-added",
+      input: withSource(
+        input,
+        "crates/candor-core/src/main.rs",
+        `${coreMainSource}\nfn unsafe_tcp_stream(stream: TcpStream) { drop(stream); }\n`,
+      ),
+      expectedFailure: "core:no-network-apis",
+    },
+    {
+      name: "core-udp-socket-added",
+      input: withSource(
+        input,
+        "crates/candor-core/src/main.rs",
+        `${coreMainSource}\nfn unsafe_udp_socket(socket: UdpSocket) { drop(socket); }\n`,
+      ),
+      expectedFailure: "core:no-network-apis",
+    },
+    {
+      name: "core-address-resolution-added",
+      input: withSource(
+        input,
+        "crates/candor-core/src/main.rs",
+        `${coreMainSource}\nfn unsafe_address_resolution<T: ToSocketAddrs>(_target: T) {}\n`,
+      ),
+      expectedFailure: "core:no-network-apis",
+    },
+    {
+      name: "core-network-names-in-comments-ignored",
+      input: withSource(
+        input,
+        "crates/candor-core/src/main.rs",
+        `// std::net::TcpStream UdpSocket ToSocketAddrs\n/* TcpListener and tokio::net are prohibited here. */\n${coreMainSource}`,
+      ),
+      expectedSuccess: true,
+    },
+    {
+      name: "core-network-names-in-tests-ignored",
+      input: withSource(
+        input,
+        "crates/candor-core/src/main.rs",
+        `${coreMainSource}\n#[cfg(test)]\nfn network_name_fixture(_tcp: TcpStream, _udp: UdpSocket, _target: impl ToSocketAddrs) {}\n`,
+      ),
+      expectedSuccess: true,
+    },
+    {
+      name: "automation-network-dependency-added",
+      input: withSource(
+        input,
+        "crates/candor-tools/Cargo.toml",
+        `${automationCargo}\nreqwest = "0.12"\n`,
+      ),
+      expectedFailure: "automation:no-network-dependencies",
+    },
+    {
+      name: "automation-network-dependency-locked",
+      input: withSource(
+        input,
+        "crates/candor-tools/Cargo.lock",
+        `${automationCargoLock}\n[[package]]\nname = "reqwest"\nversion = "0.12.0"\n`,
+      ),
+      expectedFailure: "automation:no-network-dependencies-locked",
+    },
+    {
+      name: "automation-network-listener-added",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/core_client.rs",
+        `${automationCoreClient}\nfn unsafe_listener() { let _ = std::net::TcpListener::bind("127.0.0.1:0"); }\n`,
+      ),
+      expectedFailure: "automation:no-network-apis",
+    },
+    {
+      name: "automation-webhook-added",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/service.rs",
+        `${automationService}\nfn webhook() {}\n`,
+      ),
+      expectedFailure: "automation:no-webhook-surface",
+    },
+    {
+      name: "automation-mutating-core-method-added",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/core_client.rs",
+        automationCoreClient.replace(
+          '    "recording.durable.transcriptPage",',
+          '    "recording.durable.transcriptPage",\n    "recording.delete",',
+        ),
+      ),
+      expectedFailure: "automation:exact-core-allowlist",
+    },
+    {
+      name: "automation-tool-allowlist-drift",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/service.rs",
+        automationService.replace(
+          '            "library_statistics" => self.library_statistics(arguments),',
+          '            "library_statistics" => self.library_statistics(arguments),\n            "delete_meeting" => self.library_statistics(arguments),',
+        ),
+      ),
+      expectedFailure: "automation:exact-tool-allowlist",
+    },
+    {
+      name: "automation-tool-definition-drift",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/service.rs",
+        automationService.replace('"name": "library_statistics"', '"name": "delete_meeting"'),
+      ),
+      expectedFailure: "automation:exact-tool-definitions",
+    },
+    {
+      name: "automation-cli-path-option-added",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/cli.rs",
+        sourceText(input, "crates/candor-tools/src/cli.rs").replace(
+          '            "--format" => ("format", "string"),',
+          '            "--format" => ("format", "string"),\n            "--destination" => ("destination", "string"),',
+        ),
+      ),
+      expectedFailure: "automation:exact-cli-option-allowlist",
+    },
+    {
+      name: "automation-mcp-allowlist-drift",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/mcp.rs",
+        automationMcp.replace(
+          '            _ => write_jsonrpc_error(writer, id, -32601, "Method is not on the MCP allowlist")?,',
+          '            "resources/read" => write_jsonrpc_result(writer, id, json!({}))?,\n            _ => write_jsonrpc_error(writer, id, -32601, "Method is not on the MCP allowlist")?,',
+        ),
+      ),
+      expectedFailure: "automation:exact-mcp-allowlist",
+    },
+    {
+      name: "automation-raw-path-exposure-enabled",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/service.rs",
+        automationService.replace("raw_path_exposed: false", "raw_path_exposed: true"),
+      ),
+      expectedFailure: "automation:no-path-or-key-exposure-enabled",
+    },
+    {
+      name: "automation-raw-path-output-field-added",
+      input: withSource(
+        input,
+        "crates/candor-tools/src/service.rs",
+        automationService.replace(
+          '        "rawPathExposed": false,',
+          '        "rawPath": "C:/unsafe",\n        "rawPathExposed": false,',
+        ),
+      ),
+      expectedFailure: "automation:no-raw-path-output-fields",
+    },
   ];
 
   const results = cases.map((testCase) => {
     const result = evaluateSourceSecurity(testCase.input);
+    const expectsSuccess = testCase.expectedSuccess === true;
     return {
       name: testCase.name,
-      ok: !result.ok && result.failures.some((failure) => failure.id === testCase.expectedFailure),
-      expectedFailure: testCase.expectedFailure,
+      ok: expectsSuccess
+        ? result.ok
+        : !result.ok && result.failures.some((failure) => failure.id === testCase.expectedFailure),
+      expectedFailure: expectsSuccess ? "no source-security failure" : testCase.expectedFailure,
       observedFailures: result.failures.map((failure) => failure.id),
     };
   });

@@ -4,6 +4,7 @@ import { validateCompletedJobResult } from "./operation-registry.js";
 
 export const BACKGROUND_TASK_KINDS = [
   "transcription",
+  "transcript-cleanup",
   "recap",
   "ask",
   "export",
@@ -14,6 +15,7 @@ export const BACKGROUND_TASK_KINDS = [
   "speech-model-verification",
   "dictionary-import",
   "dictionary-index",
+  "media-import",
 ] as const;
 
 export const BACKGROUND_TASK_STATES = [

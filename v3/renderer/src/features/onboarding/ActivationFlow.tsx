@@ -1,4 +1,18 @@
-import { asBool, asNumber, asObject, metric, type BundledAiStatus, type JsonObject, type OnboardingStep } from "../../core/contracts";
+import { useEffect, useRef, useState } from "react";
+import { asArray, asBool, asObject, asString, type BundledAiStatus, type JsonObject, type OnboardingStep } from "../../core/contracts";
+import { LicenseSetupStep } from "./LicenseSetupStep";
+import { LocalAiSetupStep } from "./LocalAiSetupStep";
+import { MicrophoneSetupStep } from "./MicrophoneSetupStep";
+import { OnboardingProgress } from "./SetupProgress";
+import { ShortcutSetupStep } from "./ShortcutSetupStep";
+import { StorageSetupStep } from "./StorageSetupStep";
+import { SystemAudioSetupStep } from "./SystemAudioSetupStep";
+import type { NativeSetupApi } from "./setup-api";
+import { persistedSetupStep, SETUP_STEPS, type PersistedSetupStep } from "./setup-types";
+import type { MicrophoneSetupController } from "./useMicrophoneSetup";
+import { useMicrophoneSetup } from "./useMicrophoneSetup";
+import type { ShortcutSetupController } from "./useShortcutSetup";
+import { useShortcutSetup } from "./useShortcutSetup";
 
 interface ActivationGateProps {
   licenseKey: string;
@@ -12,9 +26,21 @@ interface ActivationGateProps {
   onActivate: () => void;
   onStartTrial: () => void;
   onContinueLocal: () => void;
+  error?: string;
+  onDismissError?: () => void;
 }
 
-export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, licenseBusy, licenseStatus, onLicenseKeyChange, onLicenseEmailChange, onLicenseKeyBlur, onActivate, onStartTrial, onContinueLocal }: ActivationGateProps) {
+export function FirstRunOperationError({ error, onDismiss }: { error?: string; onDismiss?: () => void }) {
+  if (!error) return null;
+  return (
+    <div className="setup-inline-error first-run-operation-error" role="alert">
+      <p>{error}</p>
+      {onDismiss ? <button className="text-button" type="button" onClick={onDismiss}>Dismiss</button> : null}
+    </div>
+  );
+}
+
+export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, licenseBusy, licenseStatus, onLicenseKeyChange, onLicenseEmailChange, onLicenseKeyBlur, onActivate, onStartTrial, onContinueLocal, error, onDismissError }: ActivationGateProps) {
   return (
     <main className="activation-shell" data-view="activation" aria-label="Candor activation onboarding">
       <section className="activation-hero">
@@ -22,6 +48,7 @@ export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, li
         <div className="activation-proof-grid" aria-label="Ownership promises"><article><strong>Buy it once</strong><span>Activate this device with a local license record.</span></article><article><strong>Start locally</strong><span>Use a trial without creating an account.</span></article><article><strong>Stay private</strong><span>Recording, notes, AI, and exports remain local by default.</span></article></div>
       </section>
       <section className="activation-card" aria-label="Activate Candor">
+        <FirstRunOperationError error={error} onDismiss={onDismissError} />
         <form onSubmit={(event) => { event.preventDefault(); onActivate(); }}>
           <header><h2>Activate License</h2><p>Enter your purchase key, or start a local trial while production licensing is connected.</p></header>
           <label className="activation-field" htmlFor="candor-license-key"><span>License key <em>required for activation</em></span><input id="candor-license-key" value={licenseKey} onBlur={onLicenseKeyBlur} onChange={(event) => onLicenseKeyChange(event.target.value)} aria-invalid={licenseKeyInvalid} aria-describedby="candor-license-key-help" autoCapitalize="characters" autoCorrect="off" spellCheck={false} placeholder="CANDOR-DEV-LOCAL" /><small id="candor-license-key-help" role={licenseKeyInvalid ? "alert" : undefined}>{licenseKeyInvalid ? "Enter a license key or choose Start Trial." : "Development accepts CANDOR-DEV keys until production verification is connected."}</small></label>
@@ -35,7 +62,7 @@ export function ActivationGate({ licenseKey, licenseEmail, licenseKeyInvalid, li
   );
 }
 
-interface OnboardingSetupProps {
+export interface OnboardingSetupProps {
   step: OnboardingStep;
   licenseState: string;
   licenseStatus: JsonObject;
@@ -47,49 +74,91 @@ interface OnboardingSetupProps {
   aiModeStatus: string;
   instructReady: boolean;
   busy: string;
-  onStepChange: (step: OnboardingStep) => void;
-  onCompleteMic: () => void;
-  onCompleteSystemAudio: () => void;
-  onCompleteStorage: () => void;
+  onStepChange: (step: OnboardingStep) => void | Promise<void>;
+  onCompleteLicense?: () => void | Promise<void>;
+  onCompleteMic: () => void | Promise<void>;
+  onCompleteShortcut?: () => void | Promise<void>;
+  onCompleteSystemAudio: () => void | Promise<void>;
+  onCompleteStorage: () => void | Promise<void>;
   onImportSpeechModel: () => void;
-  onFinish: () => void;
+  onFinish: () => void | Promise<void>;
+  onDeferStep?: (step: OnboardingStep) => void | Promise<void>;
+  setupApi?: NativeSetupApi;
+  setupStatus?: JsonObject;
+  microphoneController?: MicrophoneSetupController;
+  shortcutController?: ShortcutSetupController;
+  error?: string;
+  onDismissError?: () => void;
 }
 
-function OnboardingProgress({ step }: { step: OnboardingStep }) {
-  const steps: Array<[OnboardingStep, string]> = [["yours", "License"], ["microphone", "Microphone"], ["system-audio", "System audio"], ["storage", "Storage"], ["local-ai", "Local AI"]];
-  const activeIndex = Math.max(0, steps.findIndex(([id]) => id === step));
-  return <ol className="onboarding-progress" aria-label="Setup progress">{steps.map(([id, label], index) => <li key={id} data-active={id === step} data-complete={index < activeIndex}><span>{index + 1}</span><strong>{label}</strong></li>)}</ol>;
+interface SetupStepProps extends OnboardingSetupProps {
+  microphoneController: MicrophoneSetupController;
+  shortcutController: ShortcutSetupController;
 }
 
-function SetupStep({ step, licenseState, licenseStatus, captureStatus, consentStatus, vaultStatus, modelStatus, bundledAiStatus, aiModeStatus, instructReady, busy, onStepChange, onCompleteMic, onCompleteSystemAudio, onCompleteStorage, onImportSpeechModel, onFinish }: OnboardingSetupProps) {
-  const systemImplemented = asBool(asObject(asObject(captureStatus.sources).system).implemented);
-  const verifiedModelCount = asNumber(modelStatus.verifiedModelCount);
-  const trialDays = asNumber(licenseStatus.trialDaysRemaining, -1);
-  const licenseLabel = licenseState === "trial" && trialDays >= 0 ? `${trialDays} trial days remaining` : licenseState === "activated" ? "Activated on this device" : "Local trial";
-  if (step === "microphone") return <section className="setup-card"><header><span>Step 2</span><h1>Microphone Permission</h1><p>Candor needs explicit local consent before recording microphone audio.</p></header><div className="setup-status-row"><span className={asBool(consentStatus.readyForMicRecording) ? "status-dot ok" : "status-dot"} /><strong>{asBool(consentStatus.readyForMicRecording) ? "Microphone consent saved" : "Microphone consent required"}</strong></div><div className="setup-actions"><button className="secondary-button" type="button" onClick={() => onStepChange("yours")}>Back</button><button className="primary-button" type="button" onClick={onCompleteMic} disabled={busy === "consent"}>{asBool(consentStatus.readyForMicRecording) ? "Continue" : "Acknowledge Microphone"}</button></div></section>;
-  if (step === "system-audio") return <section className="setup-card"><header><span>Step 3</span><h1>System Audio</h1><p>Enable meeting audio capture from this computer when the OS capture path is available.</p></header><div className="setup-status-row"><span className={systemImplemented && asBool(consentStatus.readyForSystemAudioRecording) ? "status-dot ok" : "status-dot"} /><strong>{!systemImplemented ? "System audio capture unavailable on this OS build" : asBool(consentStatus.readyForSystemAudioRecording) ? "System audio consent saved" : "System audio consent required"}</strong></div><div className="setup-actions"><button className="secondary-button" type="button" onClick={() => onStepChange("microphone")}>Back</button><button className="primary-button" type="button" onClick={onCompleteSystemAudio} disabled={busy === "consent"}>{!systemImplemented || asBool(consentStatus.readyForSystemAudioRecording) ? "Continue" : "Acknowledge System Audio"}</button></div></section>;
-  if (step === "storage") return <section className="setup-card"><header><span>Step 4</span><h1>Local Storage</h1><p>Candor protects recordings, notes, transcripts, and reports on this device.</p></header><dl className="setup-facts"><div><dt>Meeting data</dt><dd>{asBool(vaultStatus.encrypted) ? "Encrypted locally" : "Stored locally"}</dd></div><div><dt>Protection</dt><dd>Managed by this computer</dd></div><div><dt>Cloud upload</dt><dd>Off</dd></div></dl><div className="setup-actions"><button className="secondary-button" type="button" onClick={() => onStepChange("system-audio")}>Back</button><button className="primary-button" type="button" onClick={onCompleteStorage} disabled={busy === "storage"}>Use Local Storage</button></div></section>;
-  if (step === "local-ai") {
-    const speechReady = bundledAiStatus.speech.ready || verifiedModelCount > 0;
-    const repairRequired = bundledAiStatus.repairRequired;
-    const checking = bundledAiStatus.state === "checking";
-    const statusUnavailable = bundledAiStatus.state === "unavailable";
-    const description = checking
-      ? "Checking the included local AI tools on this device."
-      : repairRequired
-      ? "Local AI needs an app repair, but your existing meetings remain available."
-      : bundledAiStatus.speech.ready
-        ? "Local transcription is included and verified for offline use."
-        : statusUnavailable
-          ? "Included AI status is unavailable. Recording, notes, and existing meetings still work locally."
-          : "Add a verified speech model now, or finish setup and use local notes and recording.";
-    const transcriptionLabel = checking ? "Checking..." : speechReady ? "Ready on this device" : "Not set up";
-    const summaryLabel = checking ? "Checking..." : instructReady ? "Ready" : repairRequired ? "Needs app repair" : "Local fallback available";
-    return <section className="setup-card"><header><span>Step 5</span><h1>Local AI Setup</h1><p>{description}</p></header><dl className="setup-facts"><div><dt>Transcription</dt><dd>{transcriptionLabel}</dd></div><div><dt>Recap mode</dt><dd>{aiModeStatus}</dd></div><div><dt>Enhanced summaries</dt><dd>{summaryLabel}</dd></div></dl><div className="setup-actions">{!speechReady && !repairRequired && !checking ? <button className="secondary-button" type="button" onClick={onImportSpeechModel} disabled={Boolean(busy)}>Choose Speech Model</button> : null}<button className="primary-button" type="button" onClick={onFinish}>Finish Setup</button></div></section>;
+export async function persistSetupTransition(
+  persist: (() => void | Promise<void>) | undefined,
+  advance: () => void | Promise<void>,
+): Promise<void> {
+  await persist?.();
+  await advance();
+}
+
+export async function runGuardedSetupTransition(
+  guard: { current: boolean },
+  persist: (() => void | Promise<void>) | undefined,
+  advance: () => void | Promise<void>,
+  setPending: (pending: boolean) => void,
+): Promise<boolean> {
+  if (guard.current) return false;
+  guard.current = true;
+  setPending(true);
+  try {
+    await persistSetupTransition(persist, advance);
+    return true;
+  } finally {
+    guard.current = false;
+    setPending(false);
   }
-  return <section className="setup-card"><header><span>Step 1</span><h1>Candor is yours</h1><p>{licenseLabel}. Normal app use does not require a persistent account or sign-in.</p></header><dl className="setup-facts"><div><dt>Plan</dt><dd>{metric(licenseStatus.planName, "Candor Professional")}</dd></div><div><dt>License</dt><dd>{metric(licenseStatus.licenseId, "Local trial")}</dd></div><div><dt>Verification</dt><dd>{metric(licenseStatus.productionVerification, "pending")}</dd></div></dl><div className="setup-actions"><button className="secondary-button" type="button" onClick={onFinish}>Open App</button><button className="primary-button" type="button" onClick={() => onStepChange("microphone")}>Continue Setup</button></div></section>;
+}
+
+function SetupStep({ step, licenseState, licenseStatus, captureStatus, consentStatus, vaultStatus, modelStatus, bundledAiStatus, aiModeStatus, instructReady, busy, onStepChange, onCompleteLicense, onCompleteMic, onCompleteShortcut, onCompleteSystemAudio, onCompleteStorage, onImportSpeechModel, onFinish, onDeferStep, microphoneController, shortcutController }: SetupStepProps) {
+  const systemImplemented = asBool(asObject(asObject(captureStatus.sources).system).implemented);
+  const transitionRef = useRef(false);
+  const [transitionBusy, setTransitionBusy] = useState(false);
+  const defer = async (current: OnboardingStep, next: OnboardingStep) => {
+    try {
+      await runGuardedSetupTransition(
+        transitionRef,
+        onDeferStep ? () => onDeferStep(current) : undefined,
+        () => onStepChange(next),
+        setTransitionBusy,
+      );
+    } catch {
+      // The onboarding owner reports persistence errors. Stay on this step so retry is safe.
+    }
+  };
+  if (step === "microphone") return <MicrophoneSetupStep controller={microphoneController} consentReady={asBool(consentStatus.readyForMicRecording)} navigationBusy={busy === "setup" || transitionBusy} onBack={() => onStepChange("yours")} onContinue={onCompleteMic} onDefer={() => defer("microphone", "shortcut")} />;
+  if (step === "shortcut") return <ShortcutSetupStep controller={shortcutController} navigationBusy={busy === "setup" || transitionBusy} onBack={() => onStepChange("microphone")} onContinue={() => onCompleteShortcut ? onCompleteShortcut() : onStepChange("system-audio")} onDefer={() => defer("shortcut", "system-audio")} />;
+  if (step === "system-audio") return <SystemAudioSetupStep implemented={systemImplemented} consentReady={asBool(consentStatus.readyForSystemAudioRecording)} busy={busy === "consent" || busy === "setup" || transitionBusy} onBack={() => onStepChange("shortcut")} onContinue={onCompleteSystemAudio} onDefer={() => defer("system-audio", "storage")} />;
+  if (step === "storage") return <StorageSetupStep encrypted={asBool(vaultStatus.encrypted)} busy={busy === "storage" || busy === "setup" || transitionBusy} onBack={() => onStepChange("system-audio")} onContinue={onCompleteStorage} onDefer={() => defer("storage", "local-ai")} />;
+  if (step === "local-ai") return <LocalAiSetupStep modelStatus={modelStatus} bundledAiStatus={bundledAiStatus} aiModeStatus={aiModeStatus} instructReady={instructReady} busy={Boolean(busy)} finishing={busy === "setup"} onBack={() => onStepChange("storage")} onImportSpeechModel={onImportSpeechModel} onFinish={onFinish} />;
+  return <LicenseSetupStep busy={busy === "setup" || transitionBusy} licenseState={licenseState} licenseStatus={licenseStatus} onOpenApp={onFinish} onContinue={() => onCompleteLicense ? onCompleteLicense() : onStepChange("microphone")} />;
 }
 
 export function OnboardingSetup(props: OnboardingSetupProps) {
-  return <main className="activation-shell setup-shell" data-view="onboarding" aria-label="Candor first run setup"><aside className="setup-side"><button className="wordmark setup-wordmark" type="button" onClick={() => props.onStepChange("yours")}><img src="./candor-mark.png" width="28" height="28" alt="" aria-hidden="true" /><span>Candor</span></button><OnboardingProgress step={props.step} /><p>Everything here is local setup. The License Portal remains optional and is not required for normal use.</p></aside><section className="setup-main"><SetupStep {...props} /></section></main>;
+  const mainRef = useRef<HTMLElement>(null);
+  const nativeMicrophoneController = useMicrophoneSetup({ active: props.step === "microphone" && !props.microphoneController, api: props.setupApi });
+  const nativeShortcutController = useShortcutSetup({ active: props.step === "shortcut" && !props.shortcutController, api: props.setupApi });
+  const validStepIds = new Set<string>(SETUP_STEPS.map(({ id }) => persistedSetupStep(id)));
+  const setup = asObject(props.setupStatus?.setup);
+  const setupSteps = (field: "completed" | "deferred"): PersistedSetupStep[] => asArray(setup[field])
+    .map((item) => asString(item))
+    .filter((item): item is PersistedSetupStep => validStepIds.has(item));
+
+  useEffect(() => {
+    mainRef.current?.querySelector<HTMLHeadingElement>("h1")?.focus();
+  }, [props.step]);
+
+  return <main className="activation-shell setup-shell" data-view="onboarding" aria-label="Candor first run setup"><aside className="setup-side"><button className="wordmark setup-wordmark" type="button" onClick={() => props.onStepChange("yours")}><img src="./candor-mark.png" width="28" height="28" alt="" aria-hidden="true" /><span>Candor</span></button><OnboardingProgress step={props.step} completed={setupSteps("completed")} deferred={setupSteps("deferred")} /><p>Everything here is local setup. The License Portal remains optional and is not required for normal use.</p></aside><section ref={mainRef} className="setup-main"><FirstRunOperationError error={props.error} onDismiss={props.onDismissError} /><SetupStep {...props} microphoneController={props.microphoneController ?? nativeMicrophoneController} shortcutController={props.shortcutController ?? nativeShortcutController} /></section></main>;
 }

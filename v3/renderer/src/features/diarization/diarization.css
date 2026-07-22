@@ -1,0 +1,84 @@
+.diarization-settings .diarization-gate-copy {
+  margin: 0;
+  color: var(--text-secondary, #64748b);
+  line-height: 1.55;
+}
+
+.diarization-facts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.diarization-message {
+  margin: 0;
+  color: var(--text-secondary, #475569);
+}
+
+.diarization-message.error {
+  color: var(--danger, #b42318);
+}
+
+.diarization-speaker-names {
+  border: 1px solid var(--border-subtle, #dce3ea);
+  border-radius: 12px;
+  padding: 0.8rem 0.9rem;
+}
+
+.diarization-speaker-names summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.diarization-speaker-names > p {
+  color: var(--text-secondary, #64748b);
+  line-height: 1.45;
+}
+
+.diarization-speaker-names ul {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0.8rem 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diarization-speaker-names li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.diarization-speaker-names li span {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.diarization-speaker-names li small,
+.diarization-empty {
+  color: var(--text-secondary, #64748b);
+}
+
+.diarization-speaker-names form {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.65fr) minmax(10rem, 1fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+}
+
+.diarization-speaker-names label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.diarization-speaker-names label > span {
+  color: var(--text-secondary, #64748b);
+  font-size: 0.78rem;
+  font-weight: 650;
+}
+
+@media (max-width: 720px) {
+  .diarization-facts,
+  .diarization-speaker-names form {
+    grid-template-columns: 1fr;
+  }
+}

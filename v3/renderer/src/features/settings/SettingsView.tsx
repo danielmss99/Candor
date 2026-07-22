@@ -1,5 +1,13 @@
 import { PrivacyReceipt } from "../privacy/PrivacyReceipt";
 import { TerminologySettings } from "../terminology/TerminologySettings";
+import { MicrophoneSetupControl } from "../onboarding/MicrophoneSetupStep";
+import { ShortcutSetupControl } from "../onboarding/ShortcutSetupStep";
+import { ProfilesSettingsPanel } from "../profiles";
+import { DiarizationSettings } from "../diarization";
+import { LocalModelLibrary } from "../models/LocalModelLibrary";
+import type { LocalModelCatalogState, ModelDownloadProgress } from "../models/model-library";
+import { useMicrophoneSetup } from "../onboarding/useMicrophoneSetup";
+import { useShortcutSetup } from "../onboarding/useShortcutSetup";
 import { asArray, asBool, asNumber, asObject, asString, formatBytes, metric, type AiMode, type BundledAiStatus, type InstructAssetKind, type JsonObject, type MeetingPrivacyReceipt, type ModelRow, type NetworkCapabilities, type SettingsSection, type TerminologyCorrectionProposal, type TerminologyStatus, type TranscriptionLanguagePreference, type TranscriptionQualityStatus, type TranscriptionQualityTier } from "../../core/contracts";
 
 interface SettingsStatuses {
@@ -27,6 +35,8 @@ interface SettingsViewProps {
   terminologyProposals: TerminologyCorrectionProposal[];
   selectedRecordingId: string;
   models: ModelRow[];
+  modelCatalog: LocalModelCatalogState;
+  modelDownloadProgress: ModelDownloadProgress | null;
   selectedModel: string;
   defaultModel: string;
   aiMode: AiMode;
@@ -50,6 +60,9 @@ interface SettingsViewProps {
   onToggleAdvanced: () => void;
   onVerifyModel: () => void;
   onImportModel: () => void;
+  onImportCatalogModel: (modelId: string) => void;
+  onDownloadModel: (modelId: string) => void;
+  onCancelModelDownload: (modelId: string) => void;
   onSelectedModelChange: (modelId: string) => void;
   onAiModeChange: (mode: AiMode) => void;
   onAiFallbackPreferenceChange: (preference: "ask-first" | "automatic" | "never") => void;
@@ -77,6 +90,9 @@ interface SettingsViewProps {
 }
 
 export function SettingsView(props: SettingsViewProps) {
+  const recordingSettingsActive = props.section === "recording";
+  const microphoneSetup = useMicrophoneSetup({ active: recordingSettingsActive && !props.activeCapture });
+  const shortcutSetup = useShortcutSetup({ active: recordingSettingsActive });
   const renderLocalAi = () => {
     const availableModels = props.models.length ? props.models : [{ modelId: props.defaultModel, language: "english", installed: false, verified: false, bytes: 0, failureCode: "" }];
     const repairRequired = props.bundledAiStatus.repairRequired;
@@ -129,9 +145,24 @@ export function SettingsView(props: SettingsViewProps) {
           <dl className="settings-facts">
             <div><dt>Transcription</dt><dd>{transcriptionLabel}</dd></div>
             <div><dt>Meeting summaries</dt><dd>{summaryLabel}</dd></div>
-            <div><dt>Required downloads</dt><dd>None</dd></div>
+            <div><dt>Required downloads</dt><dd>Only when you choose another model</dd></div>
           </dl>
         </section>
+        <LocalModelLibrary
+          catalog={props.modelCatalog}
+          progress={props.modelDownloadProgress}
+          activeCapture={props.activeCapture}
+          busy={Boolean(props.busy)}
+          selectedModelId={props.selectedModel}
+          onDownload={props.onDownloadModel}
+          onCancel={props.onCancelModelDownload}
+          onImportSpeechModel={props.onImportCatalogModel}
+          onSelectSpeechModel={props.onSelectedModelChange}
+          onOpenManualSetup={() => {
+            if (!props.advancedOpen) props.onToggleAdvanced();
+            props.onInstructSetupOpenChange(true);
+          }}
+        />
         <section className="settings-group" aria-labelledby="transcription-quality-heading">
           <div className="settings-group-heading">
             <div>
@@ -208,6 +239,7 @@ export function SettingsView(props: SettingsViewProps) {
           onReview={props.onReviewTerminology}
           onDecide={props.onDecideTerminology}
         />
+        <DiarizationSettings selectedRecordingId={props.selectedRecordingId} />
         <section className="settings-group">
           <div className="settings-row-title">
             <div>
@@ -287,16 +319,55 @@ export function SettingsView(props: SettingsViewProps) {
     return <div className="settings-panel-content"><header><h2>License</h2><p>Optional ownership tools. Sign-in is not required for normal app use.</p></header><section className="settings-group"><div className="settings-row-title"><div><strong>{metric(props.licenseStatus.planName, "Candor Professional")}</strong><span>{props.licenseActive ? "Activated or trialing locally" : "No local activation"}</span></div><div className="settings-actions"><button type="button" onClick={props.onRefreshLicense} disabled={Boolean(props.busy)}>Refresh</button><button type="button" onClick={props.onDeactivateLicense} disabled={Boolean(props.busy) || !props.licenseActive}>Deactivate device</button></div></div><dl className="settings-facts license-facts"><div><dt>Status</dt><dd>{metric(props.licenseStatus.state, "inactive")}</dd></div><div><dt>License ID</dt><dd>{metric(props.licenseStatus.licenseId, "Not activated")}</dd></div><div><dt>Device</dt><dd>{metric(props.licenseStatus.deviceLabel, "This device")}</dd></div><div><dt>Secure storage</dt><dd>{asBool(props.licenseStatus.secureStorageAvailable) ? "Available" : "Metadata only"}</dd></div><div><dt>Account required</dt><dd>No</dd></div><div><dt>Portal</dt><dd>{asBool(props.licensePortalInfo.available) ? "Available" : "Production pending"}</dd></div></dl></section><section className="settings-group"><h3>Portal actions</h3><div className="portal-action-list">{portalActions.map((action) => <article key={asString(action.id)}><span className={asBool(action.enabled) ? "status-dot ok" : "status-dot"} /><div><strong>{asString(action.label)}</strong><small>{asString(action.note)}</small></div></article>)}</div></section></div>;
   };
   const renderPanel = () => {
+    if (props.section === "profiles") return (
+      <div className="settings-panel-content">
+        <header>
+          <h2>Meeting profiles</h2>
+          <p>Save local capture, language, model, terminology, recap, and live-transcript preferences.</p>
+        </header>
+        <ProfilesSettingsPanel
+          liveTranscriptRuntimeAvailable={asBool(props.statuses.transcription.whisperFeatureEnabled)}
+          verifiedLiveModelIds={props.models.filter((model) => model.verified).map((model) => model.modelId)}
+        />
+      </div>
+    );
     if (props.section === "models") return renderLocalAi();
     if (props.section === "license") return renderLicense();
-    if (props.section === "recording") return <div className="settings-panel-content"><header><h2>Recording</h2><p>Explicit local capture consent</p></header><section className="settings-group"><div className="consent-grid">{asArray(props.statuses.consent.items).map((item) => { const object = asObject(item); return <article key={asString(object.id)}><span className={asBool(object.acknowledged) ? "status-dot ok" : "status-dot"} /><div><strong>{asString(object.label)}</strong><small>{asBool(object.acknowledged) ? "Acknowledged locally" : "Required"}</small></div></article>; })}</div><div className="settings-actions"><button type="button" onClick={props.onAcknowledgeMic} disabled={Boolean(props.busy)}>Acknowledge microphone</button><button type="button" onClick={props.onAcknowledgeSystem} disabled={Boolean(props.busy)}>Acknowledge system audio</button></div></section><section className="settings-group"><h3>Capture sources</h3><dl className="settings-facts"><div><dt>Microphone</dt><dd>{asBool(asObject(asObject(props.statuses.capture.sources).microphone).implemented) ? "Available" : "Unavailable"}</dd></div><div><dt>System audio</dt><dd>{asBool(asObject(asObject(props.statuses.capture.sources).system).implemented) ? "Available" : "Unavailable"}</dd></div><div><dt>Combined</dt><dd>{props.combinedCaptureAvailable ? "Available" : "Unavailable"}</dd></div></dl><div className="settings-actions"><button type="button" onClick={props.onRecordSystem} disabled={Boolean(props.busy) || props.activeCapture}>Record system audio</button><button type="button" onClick={props.onRecordBoth} disabled={Boolean(props.busy) || props.activeCapture || !props.combinedCaptureAvailable}>Record both</button></div></section></div>;
+    if (props.section === "recording") return (
+      <div className="settings-panel-content">
+        <header><h2>Audio</h2><p>Choose devices, test audio locally, and control the optional recorder shortcut.</p></header>
+        <section className="settings-group" aria-labelledby="settings-microphone-heading">
+          <h3 id="settings-microphone-heading">Microphone</h3>
+          {props.activeCapture
+            ? <p role="status">Microphone testing is unavailable while a meeting is recording.</p>
+            : <MicrophoneSetupControl controller={microphoneSetup} consentReady={asBool(props.statuses.consent.readyForMicRecording)} compact />}
+        </section>
+        <section className="settings-group" aria-labelledby="settings-shortcut-heading">
+          <h3 id="settings-shortcut-heading">Recorder shortcut</h3>
+          <ShortcutSetupControl controller={shortcutSetup} compact />
+        </section>
+        <section className="settings-group">
+          <h3>Recording consent</h3>
+          <div className="consent-grid">{asArray(props.statuses.consent.items).map((item) => {
+            const object = asObject(item);
+            return <article key={asString(object.id)}><span className={asBool(object.acknowledged) ? "status-dot ok" : "status-dot"} /><div><strong>{asString(object.label)}</strong><small>{asBool(object.acknowledged) ? "Acknowledged locally" : "Required"}</small></div></article>;
+          })}</div>
+          <div className="settings-actions"><button type="button" onClick={props.onAcknowledgeMic} disabled={Boolean(props.busy)}>Acknowledge microphone</button><button type="button" onClick={props.onAcknowledgeSystem} disabled={Boolean(props.busy)}>Acknowledge system audio</button></div>
+        </section>
+        <section className="settings-group">
+          <h3>Capture sources</h3>
+          <dl className="settings-facts"><div><dt>Microphone</dt><dd>{asBool(asObject(asObject(props.statuses.capture.sources).microphone).implemented) ? "Available" : "Unavailable"}</dd></div><div><dt>System audio</dt><dd>{asBool(asObject(asObject(props.statuses.capture.sources).system).implemented) ? "Available" : "Unavailable"}</dd></div><div><dt>Combined</dt><dd>{props.combinedCaptureAvailable ? "Available" : "Unavailable"}</dd></div></dl>
+          <div className="settings-actions"><button type="button" onClick={props.onRecordSystem} disabled={Boolean(props.busy) || props.activeCapture}>Record system audio</button><button type="button" onClick={props.onRecordBoth} disabled={Boolean(props.busy) || props.activeCapture || !props.combinedCaptureAvailable}>Record both</button></div>
+        </section>
+      </div>
+    );
     if (props.section === "privacy") return <div className="settings-panel-content" aria-label="Privacy and network"><header><h2>Privacy and network</h2><p>Measured local-custody and optional connection facts</p></header><PrivacyReceipt receipt={props.privacyReceipt} network={props.networkCapabilities} /><dl className="settings-facts privacy-facts">{props.custodyItems.map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl></div>;
     if (props.section === "storage") return <div className="settings-panel-content"><header><h2>Storage and retention</h2><p>How Candor protects and keeps meeting data on this device</p></header><dl className="settings-facts"><div><dt>Protection</dt><dd>{asBool(props.statuses.vault.encrypted) ? "Encrypted locally" : "Local storage"}</dd></div><div><dt>Deletion</dt><dd>{asString(props.statuses.retention.policy) === "manual-delete-only" ? "Only when you choose" : metric(props.statuses.retention.policy, "Manual only")}</dd></div><div><dt>Automatic deletion</dt><dd>{asBool(props.statuses.retention.automaticDeletion) ? "On" : "Off"}</dd></div></dl><details className="technical-settings"><summary>Technical details</summary><dl className="settings-facts"><div><dt>Storage engine</dt><dd>{metric(props.statuses.vault.backend, "Encrypted local store")}</dd></div><div><dt>Connection protocol</dt><dd>{metric(props.statuses.core.sidecarTransport, "Local process")}</dd></div></dl></details></div>;
     if (props.section === "diagnostics") return <div className="settings-panel-content"><header><h2>Diagnostics</h2><p>Inspect a content-free report before saving it</p></header><section className="settings-group diagnostic-export"><div className="settings-row-title"><div><strong>Safe diagnostic report</strong><span>App metadata only. Meeting content, secrets, and complete paths are excluded.</span></div><div className="settings-actions"><button type="button" onClick={props.onPrepareDiagnostics} disabled={Boolean(props.busy)}>Prepare preview</button><button type="button" onClick={props.onSaveDiagnostics} disabled={Boolean(props.busy)}>Save JSON</button></div></div>{props.diagnosticPreview ? <details><summary>Inspect exact report</summary><pre>{JSON.stringify(props.diagnosticPreview, null, 2)}</pre></details> : null}</section></div>;
     if (props.section === "export") return <div className="settings-panel-content"><header><h2>Export</h2><p>Local files only</p></header><dl className="settings-facts"><div><dt>Markdown</dt><dd>Available locally</dd></div><div><dt>WAV</dt><dd>Available locally</dd></div><div><dt>Word</dt><dd>Editable, local</dd></div><div><dt>PDF</dt><dd>Searchable, local</dd></div><div><dt>Public links</dt><dd>Unavailable</dd></div></dl><button className="primary-button" type="button" onClick={props.onOpenExport}>Open export flow</button></div>;
     return <div className="settings-panel-content"><header><h2>General</h2><p>Everyday controls for this computer</p></header><dl className="settings-facts"><div><dt>Meeting storage</dt><dd>{asBool(props.statuses.vault.encrypted) ? "Encrypted on this device" : "Stored on this device"}</dd></div><div><dt>Updates</dt><dd>{asBool(props.statuses.updates.backgroundChecks) ? "Background checks on" : "Manual checks only"}</dd></div><div><dt>Deletion</dt><dd>{asString(props.statuses.retention.policy) === "manual-delete-only" ? "Delete only when you choose" : "Managed locally"}</dd></div><div><dt>Account</dt><dd>Not required</dd></div></dl><button type="button" className="secondary-button" onClick={props.onRefreshLocalSettings} disabled={Boolean(props.busy)}>Refresh local settings</button></div>;
   };
-  const basicSections: Array<[SettingsSection, string]> = [["general", "General"], ["recording", "Recording"], ["models", "AI & Transcription"], ["export", "Export"], ["license", "License"]];
+  const basicSections: Array<[SettingsSection, string]> = [["general", "General"], ["recording", "Audio"], ["profiles", "Meeting profiles"], ["models", "AI & Transcription"], ["export", "Export"], ["license", "License"]];
   const advancedSections: Array<[SettingsSection, string]> = [["storage", "Storage and retention"], ["privacy", "Privacy and network"], ["diagnostics", "Diagnostics"]];
   return <section className="page-view" data-view="settings"><header className="screen-heading"><h1>Settings</h1><p>Local controls for Candor on this computer</p></header><div className="settings-layout"><nav aria-label="Settings sections"><span>Basic</span>{basicSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}<button type="button" className="advanced-settings-toggle" aria-expanded={props.advancedOpen} onClick={props.onToggleAdvanced}>{props.advancedOpen ? "Hide advanced settings" : "Show advanced settings"}</button>{props.advancedOpen ? <><span>Advanced</span>{advancedSections.map(([id, label]) => <button type="button" aria-current={props.section === id ? "page" : undefined} key={id} onClick={() => props.onSectionChange(id)}>{label}</button>)}</> : null}</nav><section className="settings-panel">{renderPanel()}</section></div></section>;
 }

@@ -24,6 +24,13 @@ import {
 import type { useLocalJob } from "../ai/useLocalJob";
 import type { RunOperation } from "../jobs/useOperationRunner";
 import { BackgroundJobFailure, waitForJob } from "../../core/jobs";
+import {
+  EMPTY_MODEL_CATALOG,
+  parseLocalModelCatalog,
+  parseModelDownloadProgress,
+  type LocalModelCatalogState,
+  type ModelDownloadProgress,
+} from "../models/model-library";
 
 type CoreApi = NonNullable<Window["candor"]>;
 type LocalJob = ReturnType<typeof useLocalJob>;
@@ -69,6 +76,19 @@ export function canOfferExplicitFallback(error: unknown): error is BackgroundJob
   return error instanceof BackgroundJobFailure
     && error.state === "failed"
     && FALLBACK_OFFERABLE_CODES.has(error.code);
+}
+
+export function recordingScopedRecapRequest(
+  recordingId: string,
+  intent: "default" | "strict-retry" | "explicit-heuristic",
+) {
+  return { recordingId, intent };
+}
+
+export async function prepareTranscriptHandoff(api: CoreApi, recordingId: string): Promise<"cleaned" | "original"> {
+  const accepted = await api.ai.cleanupTranscript(recordingId);
+  const result = asObject(await waitForJob(api, accepted));
+  return asBool(result.fallbackApplied) ? "original" : "cleaned";
 }
 
 interface UseLocalAiWorkspaceOptions {
@@ -179,6 +199,32 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const [instructExpectedSha256, setInstructExpectedSha256] = useState("");
   const [instructAssetError, setInstructAssetError] = useState("");
   const [instructSetupOpen, setInstructSetupOpen] = useState(false);
+  const [modelCatalog, setModelCatalog] = useState<LocalModelCatalogState>(EMPTY_MODEL_CATALOG);
+  const [modelDownloadProgress, setModelDownloadProgress] = useState<ModelDownloadProgress | null>(null);
+
+  const refreshModelCatalog = useCallback(async () => {
+    if (!api) return;
+    setModelCatalog(parseLocalModelCatalog(await api.ai.getModelCatalog() as unknown as LocalJsonValue));
+  }, [api]);
+
+  useEffect(() => {
+    if (!api) return;
+    let cancelled = false;
+    void api.ai.getModelCatalog().then((value) => {
+      if (!cancelled) setModelCatalog(parseLocalModelCatalog(value as unknown as LocalJsonValue));
+    }).catch(() => {
+      if (!cancelled) setModelCatalog({ ...EMPTY_MODEL_CATALOG, loaded: true });
+    });
+    const unsubscribe = api.events.subscribe("model.downloadProgress", (payload) => {
+      if (cancelled) return;
+      const progress = parseModelDownloadProgress(payload as unknown as LocalJsonValue);
+      if (progress) setModelDownloadProgress(progress);
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [api]);
 
   useEffect(() => {
     if (!api) return;
@@ -245,6 +291,11 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     ));
   }, [bundledAiStatus]);
 
+  useEffect(() => {
+    if (explicitModelSelection.current || !modelCatalog.recommendedDefaultModelId) return;
+    setSelectedModel(modelCatalog.recommendedDefaultModelId);
+  }, [modelCatalog.recommendedDefaultModelId]);
+
   const startBenchmarkJob = useCallback(async (tier: "balanced" | "maximum") => {
     if (!api) return;
     const accepted = await api.transcript.startQualityBenchmark({ tier });
@@ -305,19 +356,42 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     setSelectedModel(modelId);
   }, []);
 
-  const importModel = useCallback(async () => {
+  const importModel = useCallback(async (requestedModelId?: string) => {
     if (!api) return;
+    const modelId = requestedModelId ?? selectedModel;
+    if (requestedModelId) selectModel(requestedModelId);
     await run("import", async () => {
-      const accepted = asObject(await api.ai.chooseSpeechModel(selectedModel));
+      const accepted = asObject(await api.ai.chooseSpeechModel(modelId));
       if (asBool(accepted.canceled)) {
         setNotice("Import canceled");
         return;
       }
       const result = asObject(await waitForJob(api, accepted));
-      setNotice(asBool(result.imported) ? `${selectedModel} verified and installed` : "Model import finished");
-      await refreshModelsAndAi();
+      setNotice(asBool(result.imported) ? `${modelId} verified and installed` : "Model import finished");
+      await Promise.all([refreshModelsAndAi(), refreshModelCatalog()]);
     }, "local-model", "model-import");
-  }, [api, refreshModelsAndAi, run, selectedModel, setNotice]);
+  }, [api, refreshModelCatalog, refreshModelsAndAi, run, selectModel, selectedModel, setNotice]);
+
+  const downloadModel = useCallback(async (modelId: string) => {
+    if (!api || activeCapture) return;
+    await run("model download", async () => {
+      setModelDownloadProgress({ modelId, state: "downloading", bytesReceived: 0, totalBytes: 0 });
+      const accepted = await api.ai.downloadModel(modelId);
+      const result = asObject(await waitForJob(api, accepted));
+      if (!asBool(result.verified) && !asBool(result.imported)) {
+        throw new Error("The downloaded model did not finish its local integrity check.");
+      }
+      setModelDownloadProgress(null);
+      setNotice(`${modelId} downloaded, verified, and stored locally`);
+      await Promise.all([refreshModelsAndAi(), refreshModelCatalog()]);
+    }, "local-model", "model-download");
+  }, [activeCapture, api, refreshModelCatalog, refreshModelsAndAi, run, setNotice]);
+
+  const cancelModelDownload = useCallback(async (modelId: string) => {
+    if (!api) return;
+    const result = asObject(await api.ai.cancelModelDownload(modelId));
+    if (asBool(result.canceled)) setNotice("Model download canceled");
+  }, [api, setNotice]);
 
   const importInstructAsset = useCallback(async () => {
     if (!api) return;
@@ -389,8 +463,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       await Promise.all([
         loadRecording(selectedRecordingId, true),
         refreshLibrary(0),
-        refreshModelsAndAi(),
       ]);
+      await refreshModelsAndAi();
     }, "local-model", "transcription");
   }, [api, loadRecording, refreshLibrary, refreshModelsAndAi, run, selectedModel, selectedRecordingId, selectedTrack, setNotice]);
 
@@ -437,10 +511,13 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const generateRecap = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("recap", async () => {
-      const accepted = await api.ai.generateRecap({
-        recordingId: selectedRecordingId,
-        intent: aiMode === "heuristic-fallback" ? "explicit-heuristic" : "default",
-      });
+      const recapInput = aiMode === "local-llm"
+        ? await prepareTranscriptHandoff(api, selectedRecordingId)
+        : "original";
+      const accepted = await api.ai.generateRecap(recordingScopedRecapRequest(
+        selectedRecordingId,
+        aiMode === "heuristic-fallback" ? "explicit-heuristic" : "default",
+      ));
       let result: LocalJsonValue;
       try {
         result = await waitForJob(api, accepted);
@@ -457,7 +534,11 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
       const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
       setRecap(nextRecap);
       setFallbackOffer(null);
-      setNotice(nextRecap.provenance.fallbackUsed ? "Recap created with the disclosed local fallback" : "Local AI recap generated");
+      setNotice(nextRecap.provenance.fallbackUsed
+        ? "Recap created with the disclosed local fallback"
+        : recapInput === "cleaned"
+          ? "Local AI recap generated from the cleaned transcript"
+          : "Local AI recap generated from the original transcript");
       await refreshPrivacyReceipt();
     }, "local-model", "recap");
   }, [aiFallbackPreference, aiMode, api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
@@ -465,15 +546,18 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
   const retryRecapWithLocalAi = useCallback(async () => {
     if (!api || !selectedRecordingId) return;
     await run("recap", async () => {
-      const accepted = await api.ai.generateRecap({
-        recordingId: selectedRecordingId,
-        intent: "strict-retry",
-      });
+      const recapInput = await prepareTranscriptHandoff(api, selectedRecordingId);
+      const accepted = await api.ai.generateRecap(recordingScopedRecapRequest(
+        selectedRecordingId,
+        "strict-retry",
+      ));
       const result = await waitForJob(api, accepted);
       const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
       setRecap(nextRecap);
       setFallbackOffer(null);
-      setNotice("Local AI recap generated");
+      setNotice(recapInput === "cleaned"
+        ? "Local AI recap generated from the cleaned transcript"
+        : "Local AI recap generated from the original transcript");
       await refreshPrivacyReceipt();
     }, "local-model", "recap");
   }, [api, client, refreshPrivacyReceipt, run, selectedRecordingId, setNotice]);
@@ -537,10 +621,10 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     const offer = fallbackOffer;
     await run("quick fallback", async () => {
       if (offer.kind === "recap") {
-        const accepted = await api.ai.generateRecap({
-          recordingId: offer.recordingId,
-          intent: "explicit-heuristic",
-        });
+        const accepted = await api.ai.generateRecap(recordingScopedRecapRequest(
+          offer.recordingId,
+          "explicit-heuristic",
+        ));
         const result = await waitForJob(api, accepted);
         const nextRecap = client ? await client.recap(async () => result) : parseRecap(result);
         setRecap(nextRecap);
@@ -576,6 +660,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     instructRunnerAsset,
     instructModelAsset,
     models,
+    modelCatalog,
+    modelDownloadProgress,
     transcriptionQualityStatus,
     benchmarkActive,
     benchmarkNeedsRetry,
@@ -591,6 +677,8 @@ export function useLocalAiWorkspace(options: UseLocalAiWorkspaceOptions) {
     setInstructSetupOpen,
     resetMeetingAi,
     importModel,
+    downloadModel,
+    cancelModelDownload,
     importInstructAsset,
     verifyModel,
     updateTranscriptionQuality,

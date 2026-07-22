@@ -105,7 +105,7 @@ export function captureMachineReducer(
 }
 
 export type JobPhase = "idle" | "queued" | "running" | "canceling" | "completed" | "failed";
-export type JobKind = "transcription" | "recap" | "ask" | "notes-save" | "export" | "model-import" | "local-ai-benchmark";
+export type JobKind = "transcription" | "recap" | "ask" | "notes-save" | "export" | "model-import" | "model-download" | "local-ai-benchmark";
 
 export interface JobMachineState {
   phase: JobPhase;

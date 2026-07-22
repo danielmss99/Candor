@@ -1,11 +1,22 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt as UnixOpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt as WindowsOpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process;
+#[cfg(feature = "sqlcipher-vault")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::meeting_profiles::MeetingProcessingProfileSnapshot;
 use crate::os_key_store;
 use crate::report_export::{
     render_docx, render_markdown as render_report_markdown, render_pdf, ExportDocumentOptions,
@@ -18,20 +29,90 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+#[cfg(feature = "sqlcipher-vault")]
+use rusqlite::{params, Connection, OpenFlags, TransactionBehavior};
 
 const MANIFEST_FILE: &str = "manifest.json";
 const RECORDINGS_DIR: &str = "recordings";
 const QUARANTINE_RECEIPTS_DIR: &str = "recovery/quarantine";
 const DELETION_DATA_DIR: &str = "deletions/data";
 const DELETION_PENDING_DIR: &str = "deletions/pending";
-const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 2;
+// Schema 3 added durable transcription-attempt membership. Schema 4 adds
+// encrypted raw, pre-normalization transcript chunks referenced by immutable
+// revisions. Older binaries must reject schema 4 instead of misclassifying
+// those internal chunks as ordinary transcript content.
+const CURRENT_MANIFEST_SCHEMA_VERSION: u32 = 5;
 const ENCRYPTED_CHUNK_MAGIC: &[u8] = b"CANDORCHUNK1\n";
 const ENCRYPTED_CHUNK_EXT: &str = ".cchunk";
 const PLAINTEXT_CHUNK_EXT: &str = ".raw";
+const TRANSCRIPTION_ATTEMPT_FILE_MARKER: &str = "-attempt-";
+const RAW_TRANSCRIPT_FILE_MARKER: &str = "-raw-transcript";
 const RECORDING_CHUNK_KEY_LABEL: &[u8] = b"recording-chunk-v1";
 const MAX_DURABLE_CHUNK_BYTES: usize = 512 * 1024;
+const MAX_ENCRYPTED_DURABLE_CHUNK_BYTES: u64 =
+    (MAX_DURABLE_CHUNK_BYTES + ENCRYPTED_CHUNK_MAGIC.len() + 12 + 16) as u64;
+const COMBINED_TRANSCRIPTION_CHANNEL: &str = "combined";
+const MAX_COMBINED_TRANSCRIPTION_CHANNELS: usize = 8;
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_RAW_TRANSCRIPT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_COMPARISON_TEXT_BYTES_PER_SIDE: usize = 64 * 1024;
+const MAX_REVISION_DETAIL_SEGMENTS: usize = MAX_PAGE_LIMIT as usize;
+const MAX_REVISION_DETAIL_SEGMENT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_NOTES_MARKDOWN_BYTES: usize = 512 * 1024;
 const MAX_DOCUMENT_EXPORT_BYTES: usize = 16 * 1024 * 1024;
+const MAX_TRANSCRIPT_REVISIONS: usize = 512;
+const MAX_PROCESSING_RECEIPTS: usize = 2_048;
+const MAX_REVISION_CHUNK_INDICES: usize = 100_000;
+const MAX_SEARCH_MATCHES: usize = 500;
+const MAX_AUTOMATION_LIST_SCAN_RECORDINGS: usize = 2_000;
+const MAX_AUTOMATION_LIST_DIRECTORY_ENTRIES: usize = 4_000;
+const MAX_AUTOMATION_LIST_CHUNK_DESCRIPTORS: usize = 100_000;
+const MAX_AUTOMATION_LIST_MANIFEST_BYTES_TOTAL: u64 = 32 * 1024 * 1024;
+const MAX_AUTOMATION_QUARANTINE_DETAILS: usize = 100;
+const MAX_AUTOMATION_LIST_PAGE_RECORDINGS: usize = 50;
+const MAX_AUTOMATION_LIST_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_AUTOMATION_SEARCHABLE_RECORDINGS: usize = 100;
+const MAX_AUTOMATION_SEARCH_DIRECTORY_ENTRIES: usize = 2_000;
+const MAX_AUTOMATION_SEARCHABLE_CHUNK_DESCRIPTORS: usize = 50_000;
+const MAX_AUTOMATION_SEARCHABLE_MANIFEST_BYTES_TOTAL: u64 = 16 * 1024 * 1024;
+const MAX_AUTOMATION_SEARCHABLE_ROWS: usize = 50_000;
+const MAX_AUTOMATION_SEARCHABLE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_AUTOMATION_SEARCH_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_AUTOMATION_TRANSCRIPT_PAGE_SEGMENTS: usize = 50;
+const MAX_AUTOMATION_TRANSCRIPT_SEGMENT_RESPONSE_BYTES: usize = 4 * 1024;
+const MAX_AUTOMATION_TRANSCRIPT_RESPONSE_BYTES: usize = 512 * 1024;
+const MAX_AUTOMATION_LABEL_RESPONSE_BYTES: usize = 256;
+const MAX_AUTOMATION_CHANNEL_RESPONSE_BYTES: usize = 32;
+const MAX_AUTOMATION_SPEAKER_RESPONSE_BYTES: usize = 128;
+#[cfg(feature = "sqlcipher-vault")]
+const MAX_SEARCHABLE_ROWS: usize = 100_000;
+#[cfg(feature = "sqlcipher-vault")]
+const MAX_SEARCHABLE_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(feature = "sqlcipher-vault")]
+const MAX_SEARCHABLE_RECORDINGS: usize = 10_000;
+#[cfg(feature = "sqlcipher-vault")]
+const MAX_SEARCHABLE_CHUNK_DESCRIPTORS: usize = 100_000;
+#[cfg(feature = "sqlcipher-vault")]
+const MAX_SEARCHABLE_MANIFEST_BYTES_TOTAL: u64 = 64 * 1024 * 1024;
+#[cfg(not(feature = "sqlcipher-vault"))]
+const MAX_FALLBACK_SEARCHABLE_ROWS: usize = 64;
+#[cfg(not(feature = "sqlcipher-vault"))]
+const MAX_FALLBACK_SEARCHABLE_BYTES: u64 = 2 * 1024 * 1024;
+#[cfg(not(feature = "sqlcipher-vault"))]
+const MAX_FALLBACK_SEARCHABLE_RECORDINGS: usize = 64;
+const TRUST_SEARCH_DIR: &str = "search";
+#[cfg(any(feature = "sqlcipher-vault", test))]
+const TRUST_SEARCH_FILE: &str = "trust-history.sqlcipher";
+#[cfg(feature = "sqlcipher-vault")]
+const TRUST_SEARCH_SCHEMA_VERSION: i64 = 2;
+#[cfg(all(feature = "sqlcipher-vault", not(test)))]
+const TRUST_SEARCH_INVALIDATION_WAIT_MS: u64 = 5_000;
+#[cfg(all(feature = "sqlcipher-vault", test))]
+const TRUST_SEARCH_INVALIDATION_WAIT_MS: u64 = 1_000;
+#[cfg(feature = "sqlcipher-vault")]
+const TRUST_SEARCH_INVALIDATION_POLL_MS: u64 = 5;
 const DEFAULT_PAGE_LIMIT: u64 = 50;
 const MAX_PAGE_LIMIT: u64 = 500;
 const LOW_DISK_THRESHOLD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
@@ -39,6 +120,7 @@ const CAPTURE_START_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
 const CHUNK_WRITE_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 const MANIFEST_WRITE_HEADROOM_BYTES: u64 = 1024 * 1024;
 static NEXT_RECORDING_ID_SUFFIX: AtomicU64 = AtomicU64::new(1);
+static NEXT_TRANSCRIPTION_ATTEMPT_SUFFIX: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug)]
 pub struct RecordingStoreError {
@@ -55,16 +137,71 @@ impl RecordingStoreError {
     }
 }
 
+#[cfg(feature = "sqlcipher-vault")]
+#[derive(Clone, Debug)]
+struct TrustSearchBackfillFailure {
+    code: &'static str,
+    message: &'static str,
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+impl TrustSearchBackfillFailure {
+    fn from_error(error: &RecordingStoreError) -> Self {
+        match error.code {
+            "OS_KEY_NOT_FOUND" | "OS_KEY_READ_FAILED" | "OS_KEY_UNPROTECT_FAILED" => Self {
+                code: "TRUST_SEARCH_KEY_UNAVAILABLE",
+                message: "encrypted local search could not access its device-protected key",
+            },
+            "TRUST_SEARCH_SQLCIPHER_UNAVAILABLE" => Self {
+                code: "TRUST_SEARCH_SQLCIPHER_UNAVAILABLE",
+                message: "encrypted local search requires SQLCipher in this core build",
+            },
+            _ => Self {
+                code: "TRUST_SEARCH_BACKFILL_FAILED",
+                message: "encrypted local search could not prepare its local index",
+            },
+        }
+    }
+
+    fn as_error(&self) -> RecordingStoreError {
+        RecordingStoreError::new(self.code, self.message)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct RecordingStore {
     root: PathBuf,
     root_kind: &'static str,
+    /// Serializes every complete manifest mutation transaction across clones.
+    ///
+    /// A mutation must hold this guard from its first manifest read through
+    /// any durable chunk write and the final atomic manifest replacement. A
+    /// store-wide lock is deliberately used here because clones are handed to
+    /// capture, transcription, and main-process workers, and correctness is
+    /// more important than parallel metadata writes across meetings.
+    manifest_mutation_lock: Arc<Mutex<()>>,
+    #[cfg(feature = "sqlcipher-vault")]
+    trust_search_lock: Arc<Mutex<()>>,
+    #[cfg(feature = "sqlcipher-vault")]
+    trust_search_source_generation: Arc<AtomicU64>,
+    #[cfg(feature = "sqlcipher-vault")]
+    trust_search_index_generation: Arc<AtomicU64>,
+    #[cfg(feature = "sqlcipher-vault")]
+    trust_search_backfill_running: Arc<AtomicBool>,
+    #[cfg(feature = "sqlcipher-vault")]
+    trust_search_backfill_failure: Arc<Mutex<Option<TrustSearchBackfillFailure>>>,
     #[cfg(test)]
     available_space_override: Option<u64>,
     #[cfg(test)]
     fail_space_probe: bool,
     #[cfg(test)]
     fail_tombstone_removal: bool,
+    #[cfg(test)]
+    fail_finish: bool,
+    #[cfg(test)]
+    fail_abort_unfinished: bool,
+    #[cfg(test)]
+    fail_transcription_commit: bool,
 }
 
 #[cfg_attr(not(feature = "local-whisper"), allow(dead_code))]
@@ -173,6 +310,114 @@ pub struct SearchRecordingsParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TranscriptRevisionParams {
+    pub recording_id: String,
+    pub revision_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReprocessingPrepareParams {
+    pub recording_id: String,
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptComparisonDraft {
+    pub(crate) raw_text_sha256: String,
+    pub(crate) normalized_text_sha256: String,
+    pub(crate) raw_text_bytes: u64,
+    pub(crate) normalized_text_bytes: u64,
+    pub(crate) raw_segment_count: u64,
+    pub(crate) normalized_segment_count: u64,
+    pub(crate) changed: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptionSuccessDraft {
+    pub(crate) recording_id: String,
+    /// A local Whisper attempt owns every segment it writes. The attempt id is
+    /// resolved against durable chunk metadata at commit time so chunks from a
+    /// failed or cancelled attempt can never be swept into a later revision.
+    pub(crate) attempt_id: Option<String>,
+    /// Retained only for legacy/import-style internal callers that commit
+    /// already-durable, non-attempt transcript segments.
+    pub(crate) chunk_indices: Vec<u32>,
+    pub(crate) engine: String,
+    pub(crate) model_id: Option<String>,
+    pub(crate) model_sha256: Option<String>,
+    pub(crate) started_at_ms: u128,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) comparison: TranscriptComparisonDraft,
+    /// Core-internal raw Whisper output captured before trimming and
+    /// deterministic replacement rules. This value is never serialized into
+    /// a job result, receipt, log, or renderer-facing history list.
+    pub(crate) raw_text: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TranscriptionFailureDraft {
+    pub(crate) recording_id: String,
+    pub(crate) engine: String,
+    pub(crate) model_id: Option<String>,
+    pub(crate) started_at_ms: u128,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) error_code: String,
+    pub(crate) cancelled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CleanupSuccessDraft {
+    pub(crate) recording_id: String,
+    pub(crate) attempt_id: String,
+    pub(crate) parent_revision_id: String,
+    pub(crate) engine: String,
+    pub(crate) model_id: String,
+    pub(crate) model_sha256: String,
+    pub(crate) prompt_template_sha256: String,
+    pub(crate) started_at_ms: u128,
+    pub(crate) elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CleanupFailureDraft {
+    pub(crate) recording_id: String,
+    pub(crate) parent_revision_id: String,
+    pub(crate) engine: String,
+    pub(crate) model_id: Option<String>,
+    pub(crate) model_sha256: Option<String>,
+    pub(crate) prompt_template_sha256: String,
+    pub(crate) started_at_ms: u128,
+    pub(crate) elapsed_ms: u64,
+    pub(crate) error_code: String,
+    pub(crate) cancelled: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RecapReceiptDraft {
+    pub(crate) recording_id: String,
+    pub(crate) input_revision_id: String,
+    pub(crate) engine: String,
+    pub(crate) model_id: Option<String>,
+    pub(crate) model_sha256: Option<String>,
+    pub(crate) prompt_template_sha256: String,
+    pub(crate) validation_result: String,
+    pub(crate) fallback_applied: bool,
+    pub(crate) started_at_ms: u128,
+    pub(crate) elapsed_ms: u64,
+}
+
+#[derive(Clone, Debug)]
+enum TranscriptCommitKind {
+    Transcription,
+    ProtectedTermReview {
+        expected_current_revision_id: String,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExportRecordingParams {
     pub recording_id: String,
     #[serde(default = "default_export_format")]
@@ -200,6 +445,12 @@ struct DurableChunk {
     encrypted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cipher: Option<String>,
+    /// Hash of the plaintext bytes captured before at-rest encryption. New
+    /// audio chunks carry this value so a reprocessing request can be planned
+    /// from bounded manifest metadata while the background transcription job
+    /// performs the actual chunk reads and integrity checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content_sha256: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     speaker: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -214,6 +465,11 @@ struct DurableChunk {
     start_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duration_ms: Option<u64>,
+    /// Present only while/after a core-owned local transcription attempt.
+    /// Attempt chunks are excluded from every content surface until an
+    /// immutable transcript revision references them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcription_attempt_id: Option<String>,
     created_at_ms: u128,
 }
 
@@ -222,6 +478,7 @@ struct DurableChunk {
 enum DurableChunkKind {
     TranscriptText,
     TranscriptSegment,
+    RawTranscriptText,
     AudioPcm16le,
     NotesMarkdown,
 }
@@ -238,12 +495,162 @@ struct RecordingManifest {
     chunks: Vec<DurableChunk>,
     #[serde(default)]
     privacy_events: Vec<PrivacyEvent>,
+    #[serde(default)]
+    transcript_revisions: Vec<TranscriptRevision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_transcript_revision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    current_cleaned_revision_id: Option<String>,
+    #[serde(default)]
+    processing_receipts: Vec<ProcessingReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    processing_profile: Option<MeetingProcessingProfileSnapshot>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum TranscriptRevisionKind {
+    RawAsr,
+    Normalized,
+    AiCleaned,
+    #[default]
+    Legacy,
+}
+
+impl TranscriptRevisionKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RawAsr => "raw-asr",
+            Self::Normalized => "normalized",
+            Self::AiCleaned => "ai-cleaned",
+            Self::Legacy => "legacy",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptRevision {
+    revision_id: String,
+    version: u32,
+    source: String,
+    #[serde(default)]
+    kind: TranscriptRevisionKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_revision_id: Option<String>,
+    chunk_indices: Vec<u32>,
+    engine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_sha256: Option<String>,
+    /// `None` identifies a legacy revision created before schema 4. `Some`
+    /// identifies a captured raw transcript, including `Some([])` for an
+    /// intentionally empty raw output. Indices are never sent to the renderer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    raw_text_chunk_indices: Option<Vec<u32>>,
+    comparison: TranscriptComparisonMetadata,
+    created_at_ms: u128,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct TranscriptComparisonMetadata {
+    raw_text_sha256: String,
+    normalized_text_sha256: String,
+    raw_text_bytes: u64,
+    normalized_text_bytes: u64,
+    raw_segment_count: u64,
+    normalized_segment_count: u64,
+    changed: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ProcessingOutcome {
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ProcessingReceipt {
+    receipt_id: String,
+    attempt: u32,
+    operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stage: Option<String>,
+    outcome: ProcessingOutcome,
+    engine: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    revision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_revision_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    input_revision_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    prompt_template_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    validation_result: Option<String>,
+    #[serde(default)]
+    fallback_applied: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    comparison: Option<TranscriptComparisonMetadata>,
+    started_at_ms: u128,
+    finished_at_ms: u128,
+    elapsed_ms: u64,
 }
 
 #[derive(Debug)]
 struct RecordingManifestCollection {
     items: Vec<(RecordingManifest, PathBuf)>,
     quarantined: Vec<Value>,
+}
+
+#[derive(Debug)]
+struct BoundedReadOnlyManifestCollection {
+    collection: RecordingManifestCollection,
+    source_truncated: bool,
+    inspected_directory_entries: usize,
+    manifest_bytes_read: u64,
+    quarantined_count: u64,
+}
+
+#[derive(Debug)]
+struct ReadOnlyListCandidate {
+    recording_id: String,
+    directory: PathBuf,
+    modified_at_ns: u128,
+}
+
+#[derive(Debug)]
+struct BoundedReadOnlyListCandidates {
+    candidates: Vec<ReadOnlyListCandidate>,
+    source_truncated: bool,
+    inspected_directory_entries: usize,
+    quarantined: Vec<Value>,
+    quarantined_count: u64,
+    quarantine_details_truncated: bool,
+}
+
+#[derive(Debug)]
+struct SearchableTextRow {
+    recording_id: String,
+    label: Option<String>,
+    state: &'static str,
+    chunk_index: u32,
+    channel: String,
+    row_kind: &'static str,
+    text: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -286,12 +693,29 @@ impl RecordingStore {
                 return Self {
                     root: PathBuf::from(path),
                     root_kind: "env-override",
+                    manifest_mutation_lock: Arc::new(Mutex::new(())),
+                    #[cfg(feature = "sqlcipher-vault")]
+                    trust_search_lock: Arc::new(Mutex::new(())),
+                    #[cfg(feature = "sqlcipher-vault")]
+                    trust_search_source_generation: Arc::new(AtomicU64::new(1)),
+                    #[cfg(feature = "sqlcipher-vault")]
+                    trust_search_index_generation: Arc::new(AtomicU64::new(0)),
+                    #[cfg(feature = "sqlcipher-vault")]
+                    trust_search_backfill_running: Arc::new(AtomicBool::new(false)),
+                    #[cfg(feature = "sqlcipher-vault")]
+                    trust_search_backfill_failure: Arc::new(Mutex::new(None)),
                     #[cfg(test)]
                     available_space_override: None,
                     #[cfg(test)]
                     fail_space_probe: false,
                     #[cfg(test)]
                     fail_tombstone_removal: false,
+                    #[cfg(test)]
+                    fail_finish: false,
+                    #[cfg(test)]
+                    fail_abort_unfinished: false,
+                    #[cfg(test)]
+                    fail_transcription_commit: false,
                 };
             }
         }
@@ -299,12 +723,29 @@ impl RecordingStore {
         Self {
             root: default_data_root(),
             root_kind: "local-user-data",
+            manifest_mutation_lock: Arc::new(Mutex::new(())),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_lock: Arc::new(Mutex::new(())),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_source_generation: Arc::new(AtomicU64::new(1)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_index_generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_backfill_running: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_backfill_failure: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             available_space_override: None,
             #[cfg(test)]
             fail_space_probe: false,
             #[cfg(test)]
             fail_tombstone_removal: false,
+            #[cfg(test)]
+            fail_finish: false,
+            #[cfg(test)]
+            fail_abort_unfinished: false,
+            #[cfg(test)]
+            fail_transcription_commit: false,
         }
     }
 
@@ -313,9 +754,23 @@ impl RecordingStore {
         Self {
             root,
             root_kind: "test-root",
+            manifest_mutation_lock: Arc::new(Mutex::new(())),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_lock: Arc::new(Mutex::new(())),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_source_generation: Arc::new(AtomicU64::new(1)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_index_generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_backfill_running: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_backfill_failure: Arc::new(Mutex::new(None)),
             available_space_override: Some(u64::MAX),
             fail_space_probe: false,
             fail_tombstone_removal: false,
+            fail_finish: false,
+            fail_abort_unfinished: false,
+            fail_transcription_commit: false,
         }
     }
 
@@ -335,6 +790,54 @@ impl RecordingStore {
     fn with_failed_tombstone_removal(mut self) -> Self {
         self.fail_tombstone_removal = true;
         self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_failed_finish(mut self) -> Self {
+        self.fail_finish = true;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_failed_abort_unfinished(mut self) -> Self {
+        self.fail_abort_unfinished = true;
+        self
+    }
+
+    #[cfg(test)]
+    fn with_failed_transcription_commit(mut self) -> Self {
+        self.fail_transcription_commit = true;
+        self
+    }
+
+    fn manifest_mutation_guard(&self) -> MutexGuard<'_, ()> {
+        self.manifest_mutation_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn trust_search_invalidation_guard(&self) -> Option<MutexGuard<'_, ()>> {
+        let started = std::time::Instant::now();
+        loop {
+            match self.trust_search_lock.try_lock() {
+                Ok(guard) => return Some(guard),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                    return Some(poisoned.into_inner());
+                }
+                Err(std::sync::TryLockError::WouldBlock)
+                    if started.elapsed()
+                        >= std::time::Duration::from_millis(TRUST_SEARCH_INVALIDATION_WAIT_MS) =>
+                {
+                    return None;
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        TRUST_SEARCH_INVALIDATION_POLL_MS,
+                    ));
+                }
+            }
+        }
     }
 
     pub fn status(&self) -> Result<Value, RecordingStoreError> {
@@ -359,6 +862,11 @@ impl RecordingStore {
             "audioChunkReadMethod": "recording.durable.readAudioChunk",
             "structuredTranscriptSegments": true,
             "transcriptReadMethod": "recording.durable.transcript",
+            "transcriptRevisions": true,
+            "processingReceipts": true,
+            "reprocessingFromOriginalAudio": true,
+            "searchBackend": if cfg!(feature = "sqlcipher-vault") { "sqlcipher-fts5-query-only" } else { "strictly-bounded-memory-scan" },
+            "plaintextSearchIndexPersisted": false,
             "chunkEncryptionAvailable": encryption.available,
             "chunkEncryption": encryption.label,
             "chunkCipher": encryption.cipher,
@@ -488,13 +996,26 @@ impl RecordingStore {
         self.root.clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn local_data_root_for_core(&self) -> PathBuf {
         self.root.clone()
     }
 
     pub fn start(&self, params: StartRecordingParams) -> Result<Value, RecordingStoreError> {
+        self.start_with_processing_profile(params, None)
+    }
+
+    pub(crate) fn start_with_processing_profile(
+        &self,
+        params: StartRecordingParams,
+        processing_profile: Option<MeetingProcessingProfileSnapshot>,
+    ) -> Result<Value, RecordingStoreError> {
+        let _mutation_guard = self.manifest_mutation_guard();
         self.ensure_capture_start_space()?;
+        if let Some(profile) = &processing_profile {
+            profile
+                .validate()
+                .map_err(|error| RecordingStoreError::new(error.code, error.message))?;
+        }
         let recording_id = new_recording_id();
         let dir = self.recording_dir(&recording_id)?;
         fs::create_dir_all(&dir).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
@@ -509,10 +1030,30 @@ impl RecordingStore {
             updated_at_ms: now,
             chunks: Vec::new(),
             privacy_events: Vec::new(),
+            transcript_revisions: Vec::new(),
+            current_transcript_revision_id: None,
+            current_cleaned_revision_id: None,
+            processing_receipts: Vec::new(),
+            processing_profile,
         };
         write_manifest(&dir, &manifest)?;
 
         Ok(recording_summary(&manifest, self.root_kind))
+    }
+
+    pub(crate) fn processing_profile(
+        &self,
+        recording_id: &str,
+    ) -> Result<Option<MeetingProcessingProfileSnapshot>, RecordingStoreError> {
+        validate_id(recording_id)?;
+        let dir = self.recording_dir(recording_id)?;
+        if !dir.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NOT_FOUND",
+                "the local recording was not found",
+            ));
+        }
+        Ok(read_manifest(&dir)?.processing_profile)
     }
 
     pub fn write_text_chunk(&self, params: WriteChunkParams) -> Result<Value, RecordingStoreError> {
@@ -535,6 +1076,7 @@ impl RecordingStore {
             ));
         }
 
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(&params.recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         if manifest.state != RecordingState::Recording {
@@ -579,6 +1121,7 @@ impl RecordingStore {
             stored_bytes,
             encrypted,
             cipher,
+            content_sha256: None,
             speaker: None,
             confidence: None,
             sample_rate_hz: None,
@@ -586,10 +1129,13 @@ impl RecordingStore {
             bits_per_sample: None,
             start_ms: None,
             duration_ms: None,
+            transcription_attempt_id: None,
             created_at_ms: now_ms(),
         });
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
 
         Ok(recording_summary(&manifest, self.root_kind))
     }
@@ -597,6 +1143,80 @@ impl RecordingStore {
     pub fn write_transcript_segment(
         &self,
         params: WriteTranscriptSegmentParams,
+    ) -> Result<Value, RecordingStoreError> {
+        self.write_transcript_segment_inner(params, None)
+    }
+
+    pub(crate) fn begin_transcription_attempt(
+        &self,
+        recording_id: &str,
+    ) -> Result<String, RecordingStoreError> {
+        validate_id(recording_id)?;
+        let dir = self.recording_dir(recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        if manifest.state == RecordingState::NeedsRecovery {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NEEDS_RECOVERY",
+                "recording must be recovered before local transcription can begin",
+            ));
+        }
+        if manifest.transcript_revisions.len() >= MAX_TRANSCRIPT_REVISIONS {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_LIMIT_REACHED",
+                "transcript revision history reached its local safety limit",
+            ));
+        }
+        if manifest.processing_receipts.len() >= MAX_PROCESSING_RECEIPTS {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_LIMIT_REACHED",
+                "processing receipt history reached its local safety limit",
+            ));
+        }
+        for _ in 0..16 {
+            let suffix = NEXT_TRANSCRIPTION_ATTEMPT_SUFFIX.fetch_add(1, Ordering::Relaxed);
+            let attempt_id = format!("ta-{}-{suffix}", now_ms());
+            if manifest
+                .chunks
+                .iter()
+                .all(|chunk| chunk.transcription_attempt_id.as_deref() != Some(attempt_id.as_str()))
+            {
+                return Ok(attempt_id);
+            }
+        }
+        Err(RecordingStoreError::new(
+            "TRANSCRIPTION_ATTEMPT_ID_EXHAUSTED",
+            "a unique local transcription attempt identifier could not be allocated",
+        ))
+    }
+
+    pub(crate) fn begin_cleanup_attempt(
+        &self,
+        recording_id: &str,
+    ) -> Result<String, RecordingStoreError> {
+        self.begin_transcription_attempt(recording_id)
+    }
+
+    pub(crate) fn write_transcription_attempt_segment(
+        &self,
+        attempt_id: &str,
+        params: WriteTranscriptSegmentParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_history_id(attempt_id, "TRANSCRIPTION_ATTEMPT_ID_INVALID")?;
+        self.write_transcript_segment_inner(params, Some(attempt_id.to_string()))
+    }
+
+    pub(crate) fn write_cleanup_attempt_segment(
+        &self,
+        attempt_id: &str,
+        params: WriteTranscriptSegmentParams,
+    ) -> Result<Value, RecordingStoreError> {
+        self.write_transcription_attempt_segment(attempt_id, params)
+    }
+
+    fn write_transcript_segment_inner(
+        &self,
+        params: WriteTranscriptSegmentParams,
+        transcription_attempt_id: Option<String>,
     ) -> Result<Value, RecordingStoreError> {
         validate_id(&params.recording_id)?;
         validate_channel(&params.channel)?;
@@ -622,6 +1242,7 @@ impl RecordingStore {
         let duration_ms =
             transcript_duration_ms(params.start_ms, params.duration_ms, params.end_ms)?;
 
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(&params.recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         if manifest.state == RecordingState::NeedsRecovery {
@@ -629,6 +1250,9 @@ impl RecordingStore {
                 "RECORDING_NEEDS_RECOVERY",
                 "recording must be recovered before transcript segments can be written",
             ));
+        }
+        if transcription_attempt_id.is_some() {
+            manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
         }
 
         let index = manifest.chunks.len() as u32;
@@ -638,7 +1262,7 @@ impl RecordingStore {
             Some(payload) => {
                 let stored_bytes = payload.len() as u64;
                 (
-                    format!("chunk-{index:06}.cchunk"),
+                    transcript_segment_file_name(index, true, transcription_attempt_id.as_deref()),
                     stored_bytes,
                     true,
                     Some("chacha20poly1305".to_string()),
@@ -646,7 +1270,7 @@ impl RecordingStore {
                 )
             }
             None => (
-                format!("chunk-{index:06}.raw"),
+                transcript_segment_file_name(index, false, transcription_attempt_id.as_deref()),
                 bytes.len() as u64,
                 false,
                 None,
@@ -657,6 +1281,9 @@ impl RecordingStore {
         self.ensure_chunk_write_space(payload.len())?;
         write_durable_chunk_file(&chunk_path, &payload)?;
 
+        #[cfg(feature = "sqlcipher-vault")]
+        let changes_search_index =
+            transcription_attempt_id.is_none() && manifest.current_transcript_revision_id.is_none();
         manifest.chunks.push(DurableChunk {
             index,
             kind: DurableChunkKind::TranscriptSegment,
@@ -666,6 +1293,7 @@ impl RecordingStore {
             stored_bytes,
             encrypted,
             cipher,
+            content_sha256: None,
             speaker,
             confidence,
             sample_rate_hz: None,
@@ -673,10 +1301,15 @@ impl RecordingStore {
             bits_per_sample: None,
             start_ms: Some(params.start_ms),
             duration_ms: Some(duration_ms),
+            transcription_attempt_id,
             created_at_ms: now_ms(),
         });
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        if changes_search_index {
+            self.committed_trust_search_source_change();
+        }
 
         Ok(recording_summary(&manifest, self.root_kind))
     }
@@ -716,6 +1349,7 @@ impl RecordingStore {
             ));
         }
 
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(&params.recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         if manifest.state != RecordingState::Recording {
@@ -769,6 +1403,7 @@ impl RecordingStore {
             stored_bytes,
             encrypted,
             cipher,
+            content_sha256: Some(hex_digest(&Sha256::digest(&bytes))),
             speaker: None,
             confidence: None,
             sample_rate_hz: Some(params.sample_rate_hz),
@@ -776,6 +1411,7 @@ impl RecordingStore {
             bits_per_sample: Some(params.bits_per_sample),
             start_ms: Some(start_ms),
             duration_ms: Some(duration_ms),
+            transcription_attempt_id: None,
             created_at_ms: now_ms(),
         });
         manifest.updated_at_ms = now_ms();
@@ -785,7 +1421,15 @@ impl RecordingStore {
     }
 
     pub fn finish(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
+        #[cfg(test)]
+        if self.fail_finish {
+            return Err(RecordingStoreError::new(
+                "RECORDING_FINISH_FAILED",
+                "injected persistent recording finish failure",
+            ));
+        }
         validate_id(&params.recording_id)?;
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(&params.recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         if manifest.state == RecordingState::Finished {
@@ -794,7 +1438,75 @@ impl RecordingStore {
         manifest.state = RecordingState::Finished;
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
         Ok(recording_summary(&manifest, self.root_kind))
+    }
+
+    pub(crate) fn require_finished(&self, recording_id: &str) -> Result<(), RecordingStoreError> {
+        validate_id(recording_id)?;
+        let dir = self.recording_dir(recording_id)?;
+        if !dir.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NOT_FOUND",
+                "the local recording was not found",
+            ));
+        }
+        let manifest = read_manifest(&dir)?;
+        if manifest.state != RecordingState::Finished {
+            return Err(RecordingStoreError::new(
+                "RECORDING_DELETE_NOT_FINALIZED",
+                "only a durably finished recording can be permanently deleted",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Removes a newly-created recording that never reached durable finish.
+    /// This primitive is intentionally crate-private and refuses finalized
+    /// meetings so import rollback cannot become a general deletion bypass.
+    pub(crate) fn abort_unfinished(
+        &self,
+        params: RecordingIdParams,
+    ) -> Result<Value, RecordingStoreError> {
+        #[cfg(test)]
+        if self.fail_abort_unfinished {
+            return Err(RecordingStoreError::new(
+                "RECORDING_ABORT_REMOVE_FAILED",
+                "injected unfinished recording cleanup failure",
+            ));
+        }
+        validate_id(&params.recording_id)?;
+        let recording_id = params.recording_id;
+        let _mutation_guard = self.manifest_mutation_guard();
+        let dir = self.recording_dir(&recording_id)?;
+        let metadata =
+            fs::symlink_metadata(&dir).map_err(io_error("RECORDING_ABORT_READ_FAILED"))?;
+        if metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+            || !metadata.is_dir()
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_ABORT_TARGET_INVALID",
+                "unfinished recording target was not an owned directory",
+            ));
+        }
+        let manifest = read_manifest(&dir)?;
+        if manifest.state == RecordingState::Finished {
+            return Err(RecordingStoreError::new(
+                "RECORDING_ABORT_FINALIZED",
+                "a durably finished recording cannot be aborted",
+            ));
+        }
+        fs::remove_dir_all(&dir).map_err(io_error("RECORDING_ABORT_REMOVE_FAILED"))?;
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
+        Ok(json!({
+            "recordingId": recording_id,
+            "aborted": true,
+            "recordingDataRemoved": !dir.exists(),
+            "rawPathExposed": false
+        }))
     }
 
     pub(crate) fn mark_needs_recovery(
@@ -802,22 +1514,67 @@ impl RecordingStore {
         params: RecordingIdParams,
     ) -> Result<Value, RecordingStoreError> {
         validate_id(&params.recording_id)?;
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(&params.recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         if manifest.state != RecordingState::Finished {
             manifest.state = RecordingState::NeedsRecovery;
             manifest.updated_at_ms = now_ms();
             write_manifest(&dir, &manifest)?;
+            #[cfg(feature = "sqlcipher-vault")]
+            self.committed_trust_search_source_change();
         }
         Ok(recording_summary(&manifest, self.root_kind))
     }
 
     pub fn delete_finished(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
+        let _mutation_guard = self.manifest_mutation_guard();
+        self.delete_finished_unlocked(params)
+    }
+
+    fn delete_finished_unlocked(
+        &self,
+        params: RecordingIdParams,
+    ) -> Result<Value, RecordingStoreError> {
         validate_id(&params.recording_id)?;
         let recording_id = params.recording_id;
         let active_dir = self.recording_dir(&recording_id)?;
         let tombstone_dir = self.deletion_tombstone_dir(&recording_id)?;
         let pending_marker = self.deletion_pending_marker(&recording_id)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        // A confirmed permanent deletion must not bounce back to the renderer
+        // merely because a fully-derived index rebuild is in progress. Wait
+        // only for the bounded maintenance interval. If it cannot yield, the
+        // durable intent retains the user's confirmation and recovery resumes
+        // deletion without exposing or removing content prematurely.
+        let _search_guard = match self.trust_search_invalidation_guard() {
+            Some(guard) => guard,
+            None => {
+                return self.queue_confirmed_deletion(
+                    &recording_id,
+                    &active_dir,
+                    &tombstone_dir,
+                    &pending_marker,
+                );
+            }
+        };
+        macro_rules! invalidate_search_before_delete {
+            () => {
+                match self.invalidate_trust_search_index_unlocked() {
+                    Ok(value) => value,
+                    #[cfg(feature = "sqlcipher-vault")]
+                    Err(error) if error.code == "TRUST_SEARCH_INVALIDATE_BUSY" => {
+                        return self.queue_confirmed_deletion(
+                            &recording_id,
+                            &active_dir,
+                            &tombstone_dir,
+                            &pending_marker,
+                        );
+                    }
+                    Err(error) => return Err(error),
+                }
+            };
+        }
 
         if active_dir.exists() {
             if tombstone_dir.exists() {
@@ -833,6 +1590,7 @@ impl RecordingStore {
                     "only a durably finished recording can be permanently deleted",
                 ));
             }
+            invalidate_search_before_delete!();
             self.write_deletion_intent(&recording_id, &pending_marker)?;
             let tombstone_root = self.root.join(DELETION_DATA_DIR);
             fs::create_dir_all(&tombstone_root)
@@ -847,6 +1605,7 @@ impl RecordingStore {
                     "deletion tombstone did not contain a finished recording",
                 ));
             }
+            invalidate_search_before_delete!();
             if !pending_marker.exists() {
                 self.write_deletion_intent(&recording_id, &pending_marker)?;
             }
@@ -857,7 +1616,179 @@ impl RecordingStore {
             ));
         }
 
-        self.remove_deletion_tombstone(&recording_id, &tombstone_dir)
+        invalidate_search_before_delete!();
+        #[cfg(feature = "sqlcipher-vault")]
+        self.mark_trust_search_source_change();
+        let result = self.remove_deletion_tombstone(&recording_id, &tombstone_dir);
+        #[cfg(feature = "sqlcipher-vault")]
+        {
+            drop(_search_guard);
+            self.schedule_trust_search_backfill();
+        }
+        result
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn queue_confirmed_deletion(
+        &self,
+        recording_id: &str,
+        active_dir: &Path,
+        tombstone_dir: &Path,
+        pending_marker: &Path,
+    ) -> Result<Value, RecordingStoreError> {
+        if active_dir.exists() {
+            if tombstone_dir.exists() {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_TOMBSTONE_CONFLICT",
+                    "active recording and deletion tombstone both exist",
+                ));
+            }
+            if read_manifest(active_dir)?.state != RecordingState::Finished {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_NOT_FINALIZED",
+                    "only a durably finished recording can be permanently deleted",
+                ));
+            }
+        } else if tombstone_dir.exists() {
+            if read_manifest(tombstone_dir)?.state != RecordingState::Finished {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_DELETE_NOT_FINALIZED",
+                    "deletion tombstone did not contain a finished recording",
+                ));
+            }
+        } else if !pending_marker.exists() {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NOT_FOUND",
+                "recording was not found in the local store",
+            ));
+        }
+
+        self.write_deletion_intent(recording_id, pending_marker)?;
+        let recording_data_removed = !active_dir.exists() && !tombstone_dir.exists();
+        Ok(json!({
+            "recordingId": recording_id,
+            "state": if recording_data_removed { "metadataCleanupPending" } else { "deletionQueued" },
+            "deleted": false,
+            "recordingDataRemoved": recording_data_removed,
+            "confirmationRetained": true,
+            "metadataCleanupComplete": false,
+            "retryRequired": true,
+            "permanent": true,
+            "rawPathExposed": false
+        }))
+    }
+
+    /// The encrypted FTS database is fully derived from meeting content. It is
+    /// removed before any meeting deletion so deleted transcript or note text
+    /// cannot survive indefinitely in a stale index.
+    pub(crate) fn invalidate_trust_search_index(&self) -> Result<Value, RecordingStoreError> {
+        #[cfg(feature = "sqlcipher-vault")]
+        let _search_guard = self.trust_search_invalidation_guard().ok_or_else(|| {
+            RecordingStoreError::new(
+                "TRUST_SEARCH_INVALIDATE_BUSY",
+                "encrypted search maintenance did not yield before the bounded cleanup timeout",
+            )
+        })?;
+        self.invalidate_trust_search_index_unlocked()
+    }
+
+    fn invalidate_trust_search_index_unlocked(&self) -> Result<Value, RecordingStoreError> {
+        let search_root = self.root.join(TRUST_SEARCH_DIR);
+        let metadata = match fs::symlink_metadata(&search_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(json!({
+                    "invalidated": false,
+                    "alreadyAbsent": true,
+                    "rawPathExposed": false
+                }));
+            }
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_INVALIDATE_FAILED",
+                    error.to_string(),
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+            || !metadata.is_dir()
+        {
+            return Err(RecordingStoreError::new(
+                "TRUST_SEARCH_INVALIDATE_FAILED",
+                "derived search storage was not an owned directory",
+            ));
+        }
+        #[cfg(not(feature = "sqlcipher-vault"))]
+        match fs::remove_dir_all(&search_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_INVALIDATE_FAILED",
+                    error.to_string(),
+                ));
+            }
+        }
+        #[cfg(feature = "sqlcipher-vault")]
+        {
+            let invalidation_started = std::time::Instant::now();
+            loop {
+                match fs::remove_dir_all(&search_root) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error)
+                        if windows_transient_search_remove_error(&error)
+                            && invalidation_started.elapsed()
+                                < std::time::Duration::from_millis(
+                                    TRUST_SEARCH_INVALIDATION_WAIT_MS,
+                                ) =>
+                    {
+                        // A prior store instance in this process can still be
+                        // closing its derived SQLCipher connection or finishing
+                        // creation of a temporary index file. Retry only known
+                        // transient Windows removal errors and preserve the
+                        // same bounded deletion wait used for the ownership
+                        // mutex.
+                        std::thread::sleep(std::time::Duration::from_millis(
+                            TRUST_SEARCH_INVALIDATION_POLL_MS,
+                        ));
+                    }
+                    Err(error) if windows_transient_search_remove_error(&error) => {
+                        return Err(RecordingStoreError::new(
+                        "TRUST_SEARCH_INVALIDATE_BUSY",
+                        "encrypted search storage remained in use through the bounded cleanup timeout",
+                    ));
+                    }
+                    Err(error) => {
+                        return Err(RecordingStoreError::new(
+                            "TRUST_SEARCH_INVALIDATE_FAILED",
+                            error.to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+        match fs::symlink_metadata(&search_root) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_INVALIDATE_FAILED",
+                    "derived search storage remained after invalidation",
+                ));
+            }
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_INVALIDATE_FAILED",
+                    error.to_string(),
+                ));
+            }
+        }
+        Ok(json!({
+            "invalidated": true,
+            "alreadyAbsent": false,
+            "rawPathExposed": false
+        }))
     }
 
     pub fn complete_deletion_metadata(
@@ -866,6 +1797,7 @@ impl RecordingStore {
     ) -> Result<Value, RecordingStoreError> {
         validate_id(&params.recording_id)?;
         let recording_id = params.recording_id;
+        let _mutation_guard = self.manifest_mutation_guard();
         let active_dir = self.recording_dir(&recording_id)?;
         let tombstone_dir = self.deletion_tombstone_dir(&recording_id)?;
         if active_dir.exists() || tombstone_dir.exists() {
@@ -911,6 +1843,11 @@ impl RecordingStore {
             .root
             .join(DELETION_PENDING_DIR)
             .join(format!("{recording_id}.json")))
+    }
+
+    pub(crate) fn deletion_pending(&self, recording_id: &str) -> bool {
+        self.deletion_pending_marker(recording_id)
+            .is_ok_and(|marker| marker.is_file())
     }
 
     fn write_deletion_intent(
@@ -981,7 +1918,7 @@ impl RecordingStore {
         }))
     }
 
-    fn recover_pending_deletions(&self) -> Result<Value, RecordingStoreError> {
+    fn recover_pending_deletions_unlocked(&self) -> Result<Value, RecordingStoreError> {
         let pending_root = self.root.join(DELETION_PENDING_DIR);
         if !pending_root.exists() {
             return Ok(json!({
@@ -1017,7 +1954,7 @@ impl RecordingStore {
                 pending = pending.saturating_add(1);
                 continue;
             }
-            match self.delete_finished(RecordingIdParams {
+            match self.delete_finished_unlocked(RecordingIdParams {
                 recording_id: recording_id.clone(),
             }) {
                 Ok(result)
@@ -1041,7 +1978,8 @@ impl RecordingStore {
     }
 
     pub fn recover(&self) -> Result<Value, RecordingStoreError> {
-        let deletion_recovery = self.recover_pending_deletions()?;
+        let _mutation_guard = self.manifest_mutation_guard();
+        let deletion_recovery = self.recover_pending_deletions_unlocked()?;
         let recordings_root = self.recordings_root();
         fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
 
@@ -1063,7 +2001,36 @@ impl RecordingStore {
             }
             let recovery_result = (|| -> Result<Option<Value>, RecordingStoreError> {
                 let mut manifest = self.load_or_rebuild_manifest(&id, &entry.path())?;
-                let scanned_chunks = self.scan_chunks(&id, &entry.path())?;
+                let mut scanned_chunks = self.scan_chunks(&id, &entry.path())?;
+                let owned_raw_indices = manifest
+                    .transcript_revisions
+                    .iter()
+                    .filter_map(|revision| revision.raw_text_chunk_indices.as_ref())
+                    .flatten()
+                    .copied()
+                    .collect::<HashSet<_>>();
+                let unowned_raw_files = scanned_chunks
+                    .iter()
+                    .filter(|chunk| {
+                        chunk.kind == DurableChunkKind::RawTranscriptText
+                            && !owned_raw_indices.contains(&chunk.index)
+                    })
+                    .map(|chunk| (chunk.index, entry.path().join(&chunk.file_name)))
+                    .collect::<Vec<_>>();
+                if !unowned_raw_files.is_empty() {
+                    let rebuilt_manifest_contains_unowned =
+                        unowned_raw_files.iter().any(|(index, _)| {
+                            manifest.chunks.iter().any(|chunk| chunk.index == *index)
+                        });
+                    for (_, path) in &unowned_raw_files {
+                        fs::remove_file(path)
+                            .map_err(io_error("TRANSCRIPT_RAW_RECOVERY_CLEANUP_FAILED"))?;
+                    }
+                    scanned_chunks = self.scan_chunks(&id, &entry.path())?;
+                    if rebuilt_manifest_contains_unowned {
+                        manifest.chunks = scanned_chunks.clone();
+                    }
+                }
                 if scanned_chunks.len() > manifest.chunks.len() {
                     manifest.chunks = scanned_chunks;
                 }
@@ -1081,6 +2048,9 @@ impl RecordingStore {
                 Err(error) => quarantined.push(self.quarantine_summary(&id, error.code)),
             }
         }
+
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
 
         Ok(json!({
             "rootKind": self.root_kind,
@@ -1123,36 +2093,398 @@ impl RecordingStore {
     pub fn list_page(&self, params: RecordingPageParams) -> Result<Value, RecordingStoreError> {
         let (offset, limit) = page_bounds(params.offset, params.limit)?;
         let collection = self.collect_recording_manifests()?;
-        let mut recordings = collection
-            .items
-            .into_iter()
-            .map(|(manifest, _dir)| recording_summary(&manifest, self.root_kind))
-            .collect::<Vec<_>>();
-        recordings.sort_by_key(|value| {
-            std::cmp::Reverse(
-                value
-                    .get("updatedAtMs")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0),
-            )
+        Ok(recording_page_value(
+            collection,
+            offset,
+            limit,
+            self.root_kind,
+        ))
+    }
+
+    /// Lists recordings without creating directories, recovery receipts, or
+    /// repaired manifests. Automation companions use this path so a second
+    /// process remains observational even while desktop capture is active.
+    pub fn list_page_read_only(
+        &self,
+        params: RecordingPageParams,
+    ) -> Result<Value, RecordingStoreError> {
+        let (offset, limit) = page_bounds(params.offset, params.limit)?;
+        if limit > MAX_AUTOMATION_LIST_PAGE_RECORDINGS {
+            return Err(RecordingStoreError::new(
+                "RECORDING_PAGE_LIMIT_INVALID",
+                format!(
+                    "read-only automation page limit must be between 1 and {MAX_AUTOMATION_LIST_PAGE_RECORDINGS}"
+                ),
+            ));
+        }
+        let bounded = self.collect_read_only_list_candidates_bounded(
+            MAX_AUTOMATION_LIST_SCAN_RECORDINGS,
+            MAX_AUTOMATION_LIST_DIRECTORY_ENTRIES,
+            MAX_AUTOMATION_QUARANTINE_DETAILS,
+        )?;
+        let response = self.automation_recording_page_value(bounded, offset, limit)?;
+        bounded_automation_response(
+            response,
+            MAX_AUTOMATION_LIST_RESPONSE_BYTES,
+            "AUTOMATION_LIST_RESPONSE_TOO_LARGE",
+        )
+    }
+
+    fn collect_read_only_list_candidates_bounded(
+        &self,
+        recording_limit: usize,
+        directory_entry_limit: usize,
+        quarantine_detail_limit: usize,
+    ) -> Result<BoundedReadOnlyListCandidates, RecordingStoreError> {
+        let recordings_root = self.recordings_root();
+        let root_metadata = match fs::symlink_metadata(&recordings_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BoundedReadOnlyListCandidates {
+                    candidates: Vec::new(),
+                    source_truncated: false,
+                    inspected_directory_entries: 0,
+                    quarantined: Vec::new(),
+                    quarantined_count: 0,
+                    quarantine_details_truncated: false,
+                });
+            }
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_STORE_READ_FAILED",
+                    error.to_string(),
+                ));
+            }
+        };
+        if root_metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&root_metadata)
+            || !root_metadata.is_dir()
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_STORE_READ_FAILED",
+                "recordings root must be an owned directory",
+            ));
+        }
+
+        let mut candidates = Vec::new();
+        let mut quarantined = Vec::new();
+        let mut source_truncated = false;
+        let mut inspected_directory_entries = 0_usize;
+        let mut quarantined_count = 0_u64;
+        let mut entries =
+            fs::read_dir(&recordings_root).map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
+        loop {
+            if inspected_directory_entries >= directory_entry_limit {
+                source_truncated = true;
+                break;
+            }
+            let Some(entry) = entries.next() else {
+                break;
+            };
+            inspected_directory_entries = inspected_directory_entries.saturating_add(1);
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    source_truncated = true;
+                    continue;
+                }
+            };
+            let recording_id = entry.file_name().to_string_lossy().to_string();
+            if validate_id(&recording_id).is_err() {
+                continue;
+            }
+            let directory = entry.path();
+            let metadata = match fs::symlink_metadata(&directory) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    quarantined_count = quarantined_count.saturating_add(1);
+                    if quarantined.len() < quarantine_detail_limit {
+                        quarantined.push(read_only_quarantine_summary(
+                            &recording_id,
+                            "RECORDING_DIRECTORY_READ_FAILED",
+                        ));
+                    }
+                    continue;
+                }
+            };
+            if metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+                || !metadata.is_dir()
+            {
+                quarantined_count = quarantined_count.saturating_add(1);
+                if quarantined.len() < quarantine_detail_limit {
+                    quarantined.push(read_only_quarantine_summary(
+                        &recording_id,
+                        "RECORDING_DIRECTORY_NOT_OWNED",
+                    ));
+                }
+                continue;
+            }
+            candidates.push(ReadOnlyListCandidate {
+                recording_id,
+                modified_at_ns: read_only_list_sort_time_ns(&directory, &metadata),
+                directory,
+            });
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .modified_at_ns
+                .cmp(&left.modified_at_ns)
+                .then_with(|| right.recording_id.cmp(&left.recording_id))
         });
-        let total_count = recordings.len();
-        let page = recordings
-            .into_iter()
-            .skip(offset)
-            .take(limit)
-            .collect::<Vec<_>>();
+        if candidates.len() > recording_limit {
+            candidates.truncate(recording_limit);
+            source_truncated = true;
+        }
+        let quarantine_details_truncated = quarantined_count > quarantined.len() as u64;
+        Ok(BoundedReadOnlyListCandidates {
+            candidates,
+            source_truncated,
+            inspected_directory_entries,
+            quarantined,
+            quarantined_count,
+            quarantine_details_truncated,
+        })
+    }
+
+    fn automation_recording_page_value(
+        &self,
+        bounded: BoundedReadOnlyListCandidates,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Value, RecordingStoreError> {
+        let BoundedReadOnlyListCandidates {
+            candidates,
+            source_truncated: scan_truncated,
+            inspected_directory_entries,
+            mut quarantined,
+            mut quarantined_count,
+            quarantine_details_truncated: initial_quarantine_details_truncated,
+        } = bounded;
+        let candidate_count = candidates.len();
+        let window_end = offset.saturating_add(limit).min(candidate_count);
+        let mut remaining_manifest_bytes = MAX_AUTOMATION_LIST_MANIFEST_BYTES_TOTAL;
+        let mut retained_chunk_descriptors = 0_usize;
+        let mut recordings = Vec::with_capacity(window_end.saturating_sub(offset));
+        let mut selected_candidate_failed = false;
+        let mut page_processing_truncated = false;
+
+        for candidate in candidates.iter().skip(offset).take(limit) {
+            match read_manifest_with_budget(&candidate.directory, &mut remaining_manifest_bytes) {
+                Ok(manifest) => {
+                    if manifest.chunks.len()
+                        > MAX_AUTOMATION_LIST_CHUNK_DESCRIPTORS
+                            .saturating_sub(retained_chunk_descriptors)
+                    {
+                        page_processing_truncated = true;
+                        break;
+                    }
+                    retained_chunk_descriptors =
+                        retained_chunk_descriptors.saturating_add(manifest.chunks.len());
+                    recordings.push(automation_recording_summary(&manifest, self.root_kind));
+                }
+                Err(error) if error.code == "RECORDING_MANIFEST_BUDGET_EXCEEDED" => {
+                    page_processing_truncated = true;
+                    break;
+                }
+                Err(error) => {
+                    selected_candidate_failed = true;
+                    quarantined_count = quarantined_count.saturating_add(1);
+                    if quarantined.len() < MAX_AUTOMATION_QUARANTINE_DETAILS {
+                        quarantined.push(read_only_quarantine_summary(
+                            &candidate.recording_id,
+                            error.code,
+                        ));
+                    }
+                }
+            }
+        }
+
+        let all_candidates_parsed =
+            offset == 0 && window_end == candidate_count && !page_processing_truncated;
+        let total_count_exact = all_candidates_parsed && !scan_truncated;
+        let total_count = if all_candidates_parsed {
+            recordings.len()
+        } else {
+            candidate_count
+        };
+        let stopped_before_later_candidates = (selected_candidate_failed
+            || page_processing_truncated)
+            && window_end < candidate_count;
+        let source_truncated =
+            scan_truncated || page_processing_truncated || stopped_before_later_candidates;
+        let has_more = !selected_candidate_failed
+            && !page_processing_truncated
+            && window_end < candidate_count;
+        let quarantine_details_truncated =
+            initial_quarantine_details_truncated || quarantined_count > quarantined.len() as u64;
+        let manifest_bytes_read =
+            MAX_AUTOMATION_LIST_MANIFEST_BYTES_TOTAL.saturating_sub(remaining_manifest_bytes);
+
         Ok(json!({
             "rootKind": self.root_kind,
             "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false,
             "offset": offset,
             "limit": limit,
             "totalCount": total_count,
-            "hasMore": offset.saturating_add(page.len()) < total_count,
-            "recordings": page,
-            "quarantinedCount": collection.quarantined.len(),
-            "quarantinedRecordings": collection.quarantined
+            "totalCountExact": total_count_exact,
+            "hasMore": has_more,
+            "sourceTruncated": source_truncated,
+            "scanLimit": MAX_AUTOMATION_LIST_SCAN_RECORDINGS,
+            "directoryEntryLimit": MAX_AUTOMATION_LIST_DIRECTORY_ENTRIES,
+            "inspectedDirectoryEntries": inspected_directory_entries,
+            "chunkDescriptorLimit": MAX_AUTOMATION_LIST_CHUNK_DESCRIPTORS,
+            "manifestByteLimit": MAX_AUTOMATION_LIST_MANIFEST_BYTES_TOTAL,
+            "manifestBytesRead": manifest_bytes_read,
+            "pageCandidateCount": window_end.saturating_sub(offset),
+            "ordering": "manifestModifiedAtThenRecordingId",
+            "recordings": recordings,
+            "quarantinedCount": quarantined_count,
+            "quarantineCountExact": total_count_exact,
+            "quarantineDetailsTruncated": quarantine_details_truncated,
+            "quarantinedRecordings": quarantined
         }))
+    }
+
+    fn collect_recording_manifests_read_only_bounded(
+        &self,
+        recording_limit: usize,
+        directory_entry_limit: usize,
+        chunk_descriptor_limit: usize,
+        manifest_bytes_limit: u64,
+        quarantine_detail_limit: usize,
+    ) -> Result<BoundedReadOnlyManifestCollection, RecordingStoreError> {
+        let recordings_root = self.recordings_root();
+        let root_metadata = match fs::symlink_metadata(&recordings_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(BoundedReadOnlyManifestCollection {
+                    collection: RecordingManifestCollection {
+                        items: Vec::new(),
+                        quarantined: Vec::new(),
+                    },
+                    source_truncated: false,
+                    inspected_directory_entries: 0,
+                    manifest_bytes_read: 0,
+                    quarantined_count: 0,
+                });
+            }
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_STORE_READ_FAILED",
+                    error.to_string(),
+                ));
+            }
+        };
+        if root_metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&root_metadata)
+            || !root_metadata.is_dir()
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_STORE_READ_FAILED",
+                "recordings root must be an owned directory",
+            ));
+        }
+
+        let mut candidates = Vec::new();
+        let mut quarantined = Vec::new();
+        let mut source_truncated = false;
+        let mut inspected_directory_entries = 0_usize;
+        let mut quarantined_count = 0_u64;
+        let mut entries =
+            fs::read_dir(&recordings_root).map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
+        loop {
+            if inspected_directory_entries >= directory_entry_limit {
+                source_truncated = true;
+                break;
+            }
+            let Some(entry) = entries.next() else {
+                break;
+            };
+            inspected_directory_entries = inspected_directory_entries.saturating_add(1);
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_) => {
+                    source_truncated = true;
+                    continue;
+                }
+            };
+            let id = entry.file_name().to_string_lossy().to_string();
+            if validate_id(&id).is_err() {
+                continue;
+            }
+            let path = entry.path();
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(_) => {
+                    quarantined_count = quarantined_count.saturating_add(1);
+                    if quarantined.len() < quarantine_detail_limit {
+                        quarantined.push(read_only_quarantine_summary(
+                            &id,
+                            "RECORDING_DIRECTORY_READ_FAILED",
+                        ));
+                    }
+                    continue;
+                }
+            };
+            if metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+                || !metadata.is_dir()
+            {
+                quarantined_count = quarantined_count.saturating_add(1);
+                if quarantined.len() < quarantine_detail_limit {
+                    quarantined.push(read_only_quarantine_summary(
+                        &id,
+                        "RECORDING_DIRECTORY_NOT_OWNED",
+                    ));
+                }
+                continue;
+            }
+            if candidates.len() >= recording_limit {
+                source_truncated = true;
+                break;
+            }
+            candidates.push((id, path));
+        }
+        candidates.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut items = Vec::new();
+        let mut retained_chunk_descriptors = 0_usize;
+        let mut remaining_manifest_bytes = manifest_bytes_limit;
+        for (id, path) in candidates {
+            match read_manifest_with_budget(&path, &mut remaining_manifest_bytes) {
+                Ok(manifest) => {
+                    if manifest.chunks.len()
+                        > chunk_descriptor_limit.saturating_sub(retained_chunk_descriptors)
+                    {
+                        source_truncated = true;
+                        continue;
+                    }
+                    retained_chunk_descriptors =
+                        retained_chunk_descriptors.saturating_add(manifest.chunks.len());
+                    items.push((manifest, path));
+                }
+                Err(error) if error.code == "RECORDING_MANIFEST_BUDGET_EXCEEDED" => {
+                    source_truncated = true;
+                    break;
+                }
+                Err(error) => {
+                    quarantined_count = quarantined_count.saturating_add(1);
+                    if quarantined.len() < quarantine_detail_limit {
+                        quarantined.push(read_only_quarantine_summary(&id, error.code));
+                    }
+                }
+            }
+        }
+        let manifest_bytes_read = manifest_bytes_limit.saturating_sub(remaining_manifest_bytes);
+        Ok(BoundedReadOnlyManifestCollection {
+            collection: RecordingManifestCollection { items, quarantined },
+            source_truncated,
+            inspected_directory_entries,
+            manifest_bytes_read,
+            quarantined_count,
+        })
     }
 
     pub fn read(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
@@ -1216,6 +2548,76 @@ impl RecordingStore {
             "recordingId": manifest.recording_id.as_str(),
             "label": manifest.label.as_deref(),
             "state": recording_state_label(&manifest.state),
+            "currentRevisionId": manifest.current_transcript_revision_id.as_deref(),
+            "revisionCount": manifest.transcript_revisions.len(),
+            "segmentCount": segments.len(),
+            "durationMs": duration_ms,
+            "segments": segments
+        }))
+    }
+
+    pub(crate) fn transcript_for_local_ai(
+        &self,
+        recording_id: String,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&recording_id)?;
+        let dir = self.recording_dir(&recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        let evidentiary_revision =
+            manifest
+                .current_transcript_revision_id
+                .as_deref()
+                .and_then(|revision_id| {
+                    manifest
+                        .transcript_revisions
+                        .iter()
+                        .find(|revision| revision.revision_id == revision_id)
+                });
+        let cleaned_revision = manifest
+            .current_cleaned_revision_id
+            .as_deref()
+            .and_then(|revision_id| {
+                manifest
+                    .transcript_revisions
+                    .iter()
+                    .find(|revision| revision.revision_id == revision_id)
+            })
+            .filter(|revision| {
+                revision.parent_revision_id.as_deref()
+                    == manifest.current_transcript_revision_id.as_deref()
+            });
+        let selected_revision = cleaned_revision.or(evidentiary_revision);
+        let selected_indices = selected_revision
+            .map(|revision| {
+                revision
+                    .chunk_indices
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_else(|| current_transcript_chunk_indices(&manifest));
+        let segments =
+            self.transcript_segments_for_indices(&manifest, &dir, Some(&selected_indices), true)?;
+        let duration_ms = segments
+            .iter()
+            .filter_map(|segment| segment.get("endMs").and_then(Value::as_u64))
+            .max()
+            .unwrap_or_default();
+        let input_revision_kind = selected_revision
+            .map(effective_revision_kind)
+            .unwrap_or(TranscriptRevisionKind::Legacy);
+        Ok(json!({
+            "rootKind": self.root_kind,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false,
+            "recordingId": manifest.recording_id.as_str(),
+            "label": manifest.label.as_deref(),
+            "state": recording_state_label(&manifest.state),
+            "currentRevisionId": manifest.current_transcript_revision_id.as_deref(),
+            "currentCleanedRevisionId": manifest.current_cleaned_revision_id.as_deref(),
+            "inputRevisionId": selected_revision.map(|revision| revision.revision_id.as_str()),
+            "inputRevisionKind": input_revision_kind.label(),
+            "cleanupFallbackApplied": cleaned_revision.is_none(),
             "segmentCount": segments.len(),
             "durationMs": duration_ms,
             "segments": segments
@@ -1248,12 +2650,1149 @@ impl RecordingStore {
             "recordingId": manifest.recording_id.as_str(),
             "label": manifest.label.as_deref(),
             "state": recording_state_label(&manifest.state),
+            "currentRevisionId": manifest.current_transcript_revision_id.as_deref(),
+            "revisionCount": manifest.transcript_revisions.len(),
             "offset": offset,
             "limit": limit,
             "segmentCount": total_count,
             "hasMore": offset.saturating_add(page.len()) < total_count,
             "durationMs": duration_ms,
             "segments": page
+        }))
+    }
+
+    /// Reads a transcript page without creating a missing OS key. A missing
+    /// key is an explicit read failure for automation, never an invitation to
+    /// mutate the user's key store.
+    pub fn transcript_page_read_only(
+        &self,
+        params: TranscriptPageParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let (offset, limit) = page_bounds(params.offset, params.limit)?;
+        if limit > MAX_AUTOMATION_TRANSCRIPT_PAGE_SEGMENTS {
+            return Err(RecordingStoreError::new(
+                "RECORDING_PAGE_LIMIT_INVALID",
+                format!(
+                    "read-only transcript page limit must be between 1 and {MAX_AUTOMATION_TRANSCRIPT_PAGE_SEGMENTS}"
+                ),
+            ));
+        }
+        let dir = self.recording_dir(&params.recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        let selected_indices = current_transcript_chunk_indices(&manifest);
+        let mut selected_chunks = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.kind == DurableChunkKind::TranscriptSegment
+                    && selected_indices.contains(&chunk.index)
+            })
+            .collect::<Vec<_>>();
+        selected_chunks.sort_by_key(|chunk| (chunk.start_ms.unwrap_or_default(), chunk.index));
+        let duration_ms = selected_chunks
+            .iter()
+            .map(|chunk| {
+                chunk
+                    .start_ms
+                    .unwrap_or_default()
+                    .saturating_add(chunk.duration_ms.unwrap_or_default())
+            })
+            .max()
+            .unwrap_or_default();
+        let total_count = selected_chunks.len();
+        let mut source_text_truncated = false;
+        let mut page = Vec::with_capacity(limit.min(total_count.saturating_sub(offset)));
+        for chunk in selected_chunks.iter().skip(offset).take(limit) {
+            let bytes = self.read_chunk_bytes_with_key_access(&manifest, chunk, &dir, false)?;
+            let text = String::from_utf8(bytes).map_err(|_| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_SEGMENT_TEXT_INVALID",
+                    "durable transcript segment was not valid UTF-8",
+                )
+            })?;
+            let text_truncated = text.len() > MAX_AUTOMATION_TRANSCRIPT_SEGMENT_RESPONSE_BYTES;
+            source_text_truncated |= text_truncated;
+            let start_ms = chunk.start_ms.unwrap_or_default();
+            let duration_ms = chunk.duration_ms.unwrap_or_default();
+            page.push(json!({
+                "index": chunk.index,
+                "kind": chunk_kind_label(&chunk.kind),
+                "channel": truncate_utf8(&chunk.channel, MAX_AUTOMATION_CHANNEL_RESPONSE_BYTES),
+                "speaker": chunk.speaker.as_deref().map(|speaker| {
+                    truncate_utf8(speaker, MAX_AUTOMATION_SPEAKER_RESPONSE_BYTES)
+                }),
+                "text": truncate_utf8(&text, MAX_AUTOMATION_TRANSCRIPT_SEGMENT_RESPONSE_BYTES),
+                "textTruncated": text_truncated,
+                "startMs": start_ms,
+                "durationMs": duration_ms,
+                "endMs": start_ms.saturating_add(duration_ms),
+                "confidence": chunk.confidence,
+                "rawPathExposed": false
+            }));
+        }
+        let response = json!({
+            "rootKind": self.root_kind,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false,
+            "recordingId": manifest.recording_id.as_str(),
+            "label": manifest.label.as_deref().map(|label| {
+                truncate_utf8(label, MAX_AUTOMATION_LABEL_RESPONSE_BYTES)
+            }),
+            "state": recording_state_label(&manifest.state),
+            "currentRevisionId": manifest.current_transcript_revision_id.as_deref(),
+            "revisionCount": manifest.transcript_revisions.len(),
+            "offset": offset,
+            "limit": limit,
+            "segmentCount": total_count,
+            "hasMore": offset.saturating_add(page.len()) < total_count,
+            "durationMs": duration_ms,
+            "segments": page,
+            "readOnlySnapshot": true,
+            "sourceTextTruncated": source_text_truncated,
+            "segmentTextByteLimit": MAX_AUTOMATION_TRANSCRIPT_SEGMENT_RESPONSE_BYTES
+        });
+        bounded_automation_response(
+            response,
+            MAX_AUTOMATION_TRANSCRIPT_RESPONSE_BYTES,
+            "AUTOMATION_TRANSCRIPT_RESPONSE_TOO_LARGE",
+        )
+    }
+
+    pub fn trust_history(&self, params: RecordingIdParams) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        let dir = self.recording_dir(&params.recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        let revisions = manifest
+            .transcript_revisions
+            .iter()
+            .map(public_transcript_revision)
+            .collect::<Vec<_>>();
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "currentRevisionId": manifest.current_transcript_revision_id,
+            "currentCleanedRevisionId": manifest.current_cleaned_revision_id,
+            "revisionCount": revisions.len(),
+            "revisions": revisions,
+            "receiptCount": manifest.processing_receipts.len(),
+            "processingReceipts": manifest.processing_receipts,
+            "immutableRevisions": true,
+            "originalAudioRetained": manifest.chunks.iter().any(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le),
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    pub fn transcript_revision(
+        &self,
+        params: TranscriptRevisionParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        validate_history_id(&params.revision_id, "TRANSCRIPT_REVISION_ID_INVALID")?;
+        let dir = self.recording_dir(&params.recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        let revision = manifest
+            .transcript_revisions
+            .iter()
+            .find(|revision| revision.revision_id == params.revision_id)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_REVISION_NOT_FOUND",
+                    "transcript revision was not found for this recording",
+                )
+            })?;
+        let segment_count = revision.chunk_indices.len();
+        let segments = self.transcript_revision_segments_preview(&manifest, &dir, revision)?;
+        let normalized_preview = transcript_text_from_segments(&segments);
+        let (normalized_text, normalized_text_truncated_by_limit) =
+            bounded_comparison_text(&normalized_preview);
+        let normalized_text_truncated = normalized_text_truncated_by_limit
+            || revision.comparison.normalized_text_bytes > normalized_text.len() as u64;
+        let comparison_view = match self.raw_transcript_preview(&manifest, &dir, revision)? {
+            Some((raw_text, raw_text_truncated)) => {
+                json!({
+                    "available": true,
+                    "rawText": raw_text,
+                    "normalizedText": normalized_text,
+                    "rawTextTruncated": raw_text_truncated,
+                    "normalizedTextTruncated": normalized_text_truncated,
+                    "maxTextBytesPerSide": MAX_COMPARISON_TEXT_BYTES_PER_SIDE,
+                    "encryptedAtRest": true,
+                    "rawPathExposed": false,
+                    "keyMaterialExposedToRenderer": false
+                })
+            }
+            None => json!({
+                "available": false,
+                "reason": "legacy-revision",
+                "maxTextBytesPerSide": MAX_COMPARISON_TEXT_BYTES_PER_SIDE,
+                "encryptedAtRest": false,
+                "rawPathExposed": false,
+                "keyMaterialExposedToRenderer": false
+            }),
+        };
+        let returned_segment_count = segments.len();
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "revision": public_transcript_revision(revision),
+            "current": manifest.current_transcript_revision_id.as_deref() == Some(revision.revision_id.as_str()),
+            "currentCleaned": manifest.current_cleaned_revision_id.as_deref() == Some(revision.revision_id.as_str()),
+            "segmentCount": segment_count,
+            "returnedSegmentCount": returned_segment_count,
+            "hasMore": returned_segment_count < segment_count,
+            "segments": segments,
+            "comparisonView": comparison_view,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    pub fn select_transcript_revision(
+        &self,
+        params: TranscriptRevisionParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        validate_history_id(&params.revision_id, "TRANSCRIPT_REVISION_ID_INVALID")?;
+        let _mutation_guard = self.manifest_mutation_guard();
+        let dir = self.recording_dir(&params.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        let revision = manifest
+            .transcript_revisions
+            .iter()
+            .find(|revision| revision.revision_id == params.revision_id)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_REVISION_NOT_FOUND",
+                    "transcript revision was not found for this recording",
+                )
+            })?;
+        if effective_revision_kind(revision) == TranscriptRevisionKind::AiCleaned {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_CLEANED_REVISION_SELECTION_INVALID",
+                "AI-cleaned text cannot replace the selected evidentiary transcript",
+            ));
+        }
+        let revision_id = revision.revision_id.clone();
+        let version = revision.version;
+        manifest.current_transcript_revision_id = Some(revision_id.clone());
+        manifest.updated_at_ms = now_ms();
+        write_manifest(&dir, &manifest)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "currentRevisionId": revision_id,
+            "currentVersion": version,
+            "olderRevisionsRetained": manifest.transcript_revisions.len().saturating_sub(1),
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    pub fn prepare_reprocessing(
+        &self,
+        params: ReprocessingPrepareParams,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&params.recording_id)?;
+        if let Some(channel) = params.channel.as_deref() {
+            validate_channel(channel)?;
+        }
+        let dir = self.recording_dir(&params.recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        if manifest.state != RecordingState::Finished {
+            return Err(RecordingStoreError::new(
+                "REPROCESSING_RECORDING_NOT_FINALIZED",
+                "reprocessing requires a durably finished recording",
+            ));
+        }
+        let requested_channel = params.channel.as_deref();
+        let source_channels = transcription_source_channels(&manifest, requested_channel);
+        if source_channels.is_empty() {
+            let (code, message) = if requested_channel
+                .is_some_and(|channel| channel != COMBINED_TRANSCRIPTION_CHANNEL)
+            {
+                (
+                    "REPROCESSING_AUDIO_CHANNEL_NOT_FOUND",
+                    "recording has no original durable audio for the selected channel",
+                )
+            } else {
+                (
+                    "REPROCESSING_AUDIO_UNAVAILABLE",
+                    "recording has no original durable audio to reprocess",
+                )
+            };
+            return Err(RecordingStoreError::new(code, message));
+        }
+        if source_channels.len() > MAX_COMBINED_TRANSCRIPTION_CHANNELS {
+            return Err(RecordingStoreError::new(
+                "REPROCESSING_AUDIO_SOURCE_LIMIT",
+                "reprocessing accepts at most eight aligned audio sources",
+            ));
+        }
+        let selected_channel = if requested_channel == Some(COMBINED_TRANSCRIPTION_CHANNEL)
+            || source_channels.len() > 1
+        {
+            COMBINED_TRANSCRIPTION_CHANNEL.to_string()
+        } else {
+            source_channels[0].clone()
+        };
+        let audio_chunks = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.kind == DurableChunkKind::AudioPcm16le
+                    && source_channels.contains(&chunk.channel)
+            })
+            .collect::<Vec<_>>();
+        if audio_chunks.is_empty() {
+            return Err(RecordingStoreError::new(
+                "REPROCESSING_AUDIO_CHANNEL_NOT_FOUND",
+                "recording has no original durable audio for the selected channel",
+            ));
+        }
+        let mut duration_ms = 0_u64;
+        for source_channel in &source_channels {
+            let channel_chunks = audio_chunks
+                .iter()
+                .copied()
+                .filter(|chunk| chunk.channel == *source_channel)
+                .collect::<Vec<_>>();
+            let first = channel_chunks.first().ok_or_else(|| {
+                RecordingStoreError::new(
+                    "REPROCESSING_AUDIO_CHANNEL_NOT_FOUND",
+                    "recording has no original durable audio for the selected channel",
+                )
+            })?;
+            let sample_rate_hz = first.sample_rate_hz.unwrap_or_default();
+            let channel_count = first.channel_count.unwrap_or_default();
+            let bits_per_sample = first.bits_per_sample.unwrap_or_default();
+            validate_audio_format(sample_rate_hz, channel_count, bits_per_sample)?;
+            for chunk in channel_chunks {
+                if chunk.sample_rate_hz.unwrap_or_default() != sample_rate_hz
+                    || chunk.channel_count.unwrap_or_default() != channel_count
+                    || chunk.bits_per_sample.unwrap_or_default() != bits_per_sample
+                {
+                    return Err(RecordingStoreError::new(
+                        "REPROCESSING_AUDIO_FORMAT_MISMATCH",
+                        "original audio chunks for each channel must share one PCM format",
+                    ));
+                }
+                duration_ms = duration_ms.max(
+                    chunk
+                        .start_ms
+                        .unwrap_or_default()
+                        .saturating_add(chunk.duration_ms.unwrap_or_default()),
+                );
+            }
+        }
+        let first = audio_chunks[0];
+        let combined = selected_channel == COMBINED_TRANSCRIPTION_CHANNEL;
+        let sample_rate_hz = if combined {
+            16_000
+        } else {
+            first.sample_rate_hz.unwrap_or_default()
+        };
+        let channel_count = if combined {
+            1
+        } else {
+            first.channel_count.unwrap_or_default()
+        };
+        let bits_per_sample = if combined {
+            16
+        } else {
+            first.bits_per_sample.unwrap_or_default()
+        };
+        let source_audio_sha256 = source_audio_manifest_digest(&selected_channel, &audio_chunks);
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "channel": selected_channel,
+            "inputKind": "originalDurableAudio",
+            "audioChunkIndices": audio_chunks.iter().map(|chunk| chunk.index).collect::<Vec<_>>(),
+            "audioChunkCount": audio_chunks.len(),
+            "sourceAudioSha256": source_audio_sha256,
+            "sourceAudioIntegrity": if audio_chunks.iter().all(|chunk| chunk.content_sha256.is_some()) {
+                "pending-background-content-hash-verification"
+            } else if audio_chunks.iter().all(|chunk| chunk.encrypted) {
+                "pending-background-encrypted-chunk-authentication"
+            } else {
+                "pending-background-legacy-read"
+            },
+            "sampleRateHz": sample_rate_hz,
+            "channelCount": channel_count,
+            "bitsPerSample": bits_per_sample,
+            "durationMs": duration_ms,
+            "currentRevisionId": manifest.current_transcript_revision_id,
+            "revisionCount": manifest.transcript_revisions.len(),
+            "dispatchInput": {
+                "recordingId": manifest.recording_id,
+                "channel": selected_channel
+            },
+            "originalAudioModified": false,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transcript_chunk_indices(
+        &self,
+        recording_id: &str,
+    ) -> Result<Vec<u32>, RecordingStoreError> {
+        validate_id(recording_id)?;
+        let dir = self.recording_dir(recording_id)?;
+        let manifest = read_manifest(&dir)?;
+        Ok(manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == DurableChunkKind::TranscriptSegment)
+            .map(|chunk| chunk.index)
+            .collect())
+    }
+
+    pub(crate) fn complete_transcription_attempt(
+        &self,
+        draft: TranscriptionSuccessDraft,
+    ) -> Result<Value, RecordingStoreError> {
+        self.complete_transcript_attempt_with_kind(draft, TranscriptCommitKind::Transcription)
+    }
+
+    pub(crate) fn complete_protected_term_review_attempt(
+        &self,
+        draft: TranscriptionSuccessDraft,
+        expected_current_revision_id: String,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_history_id(
+            &expected_current_revision_id,
+            "PROTECTED_TERM_REVISION_ID_INVALID",
+        )?;
+        self.complete_transcript_attempt_with_kind(
+            draft,
+            TranscriptCommitKind::ProtectedTermReview {
+                expected_current_revision_id,
+            },
+        )
+    }
+
+    pub(crate) fn complete_cleanup_attempt(
+        &self,
+        draft: CleanupSuccessDraft,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&draft.recording_id)?;
+        validate_history_id(&draft.attempt_id, "CLEANUP_ATTEMPT_ID_INVALID")?;
+        validate_history_id(
+            &draft.parent_revision_id,
+            "TRANSCRIPT_PARENT_REVISION_ID_INVALID",
+        )?;
+        validate_processing_identity(
+            &draft.engine,
+            Some(&draft.model_id),
+            Some(&draft.model_sha256),
+        )?;
+        if !is_sha256_hex(&draft.prompt_template_sha256) {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_PROMPT_HASH_INVALID",
+                "cleanup prompt template fingerprint was invalid",
+            ));
+        }
+        let _mutation_guard = self.manifest_mutation_guard();
+        let dir = self.recording_dir(&draft.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        if manifest.current_transcript_revision_id.as_deref()
+            != Some(draft.parent_revision_id.as_str())
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_CLEANUP_STALE",
+                "the evidentiary transcript changed before cleanup could be saved",
+            ));
+        }
+        if manifest.state == RecordingState::NeedsRecovery {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NEEDS_RECOVERY",
+                "recording must be recovered before cleaned text can be saved",
+            ));
+        }
+        if manifest.transcript_revisions.len() >= MAX_TRANSCRIPT_REVISIONS {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_LIMIT_REACHED",
+                "transcript revision history reached its local safety limit",
+            ));
+        }
+        if manifest.processing_receipts.len() >= MAX_PROCESSING_RECEIPTS {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_LIMIT_REACHED",
+                "processing receipt history reached its local safety limit",
+            ));
+        }
+        let parent = manifest
+            .transcript_revisions
+            .iter()
+            .find(|revision| revision.revision_id == draft.parent_revision_id)
+            .cloned()
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_PARENT_REVISION_INVALID",
+                    "cleanup input revision was not found",
+                )
+            })?;
+        if effective_revision_kind(&parent) == TranscriptRevisionKind::AiCleaned {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_PARENT_REVISION_INVALID",
+                "cleanup input must be an evidentiary transcript revision",
+            ));
+        }
+        let chunk_indices = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| {
+                chunk.kind == DurableChunkKind::TranscriptSegment
+                    && chunk.transcription_attempt_id.as_deref() == Some(draft.attempt_id.as_str())
+            })
+            .map(|chunk| chunk.index)
+            .collect::<Vec<_>>();
+        if chunk_indices.is_empty() || chunk_indices.len() != parent.chunk_indices.len() {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_CLEANUP_SEGMENT_COUNT_INVALID",
+                "cleanup must preserve exactly one output for every source segment",
+            ));
+        }
+        validate_revision_chunk_indices(&manifest, &chunk_indices)?;
+        validate_revision_attempt_membership(&manifest, &chunk_indices)?;
+        let parent_indices = parent.chunk_indices.iter().copied().collect::<HashSet<_>>();
+        let cleaned_indices = chunk_indices.iter().copied().collect::<HashSet<_>>();
+        let parent_segments =
+            self.transcript_segments_for_indices(&manifest, &dir, Some(&parent_indices), true)?;
+        let cleaned_segments =
+            self.transcript_segments_for_indices(&manifest, &dir, Some(&cleaned_indices), true)?;
+        if parent_segments.len() != cleaned_segments.len()
+            || parent_segments
+                .iter()
+                .zip(&cleaned_segments)
+                .any(|(source, cleaned)| !cleanup_segment_metadata_matches(source, cleaned))
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_CLEANUP_MAPPING_INVALID",
+                "cleanup changed a source segment identity, timestamp, channel, or speaker",
+            ));
+        }
+        let source_text = transcript_text_from_segments(&parent_segments);
+        let cleaned_text = transcript_text_from_segments(&cleaned_segments);
+        let comparison = TranscriptComparisonMetadata {
+            raw_text_sha256: hex_digest(&Sha256::digest(source_text.as_bytes())),
+            normalized_text_sha256: hex_digest(&Sha256::digest(cleaned_text.as_bytes())),
+            raw_text_bytes: u64::try_from(source_text.len()).unwrap_or(u64::MAX),
+            normalized_text_bytes: u64::try_from(cleaned_text.len()).unwrap_or(u64::MAX),
+            raw_segment_count: u64::try_from(parent_segments.len()).unwrap_or(u64::MAX),
+            normalized_segment_count: u64::try_from(cleaned_segments.len()).unwrap_or(u64::MAX),
+            changed: source_text != cleaned_text,
+        };
+        validate_transcript_comparison_metadata(&comparison)?;
+        let finished_at_ms = now_ms();
+        let version = u32::try_from(manifest.transcript_revisions.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let revision_id = format!("tr-{version:06}-{finished_at_ms}");
+        let attempt = u32::try_from(manifest.processing_receipts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let receipt_id = format!("pr-{attempt:06}-{finished_at_ms}");
+        let input_revision_kind = effective_revision_kind(&parent).label().to_string();
+        manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
+        manifest.transcript_revisions.push(TranscriptRevision {
+            revision_id: revision_id.clone(),
+            version,
+            source: "ai-cleanup".to_string(),
+            kind: TranscriptRevisionKind::AiCleaned,
+            parent_revision_id: Some(draft.parent_revision_id.clone()),
+            chunk_indices,
+            engine: draft.engine.clone(),
+            model_id: Some(draft.model_id.clone()),
+            model_sha256: Some(draft.model_sha256.clone()),
+            raw_text_chunk_indices: None,
+            comparison: comparison.clone(),
+            created_at_ms: finished_at_ms,
+        });
+        manifest.current_cleaned_revision_id = Some(revision_id.clone());
+        manifest.processing_receipts.push(ProcessingReceipt {
+            receipt_id: receipt_id.clone(),
+            attempt,
+            operation: "transcript-cleanup".to_string(),
+            stage: Some("cleanup".to_string()),
+            outcome: ProcessingOutcome::Succeeded,
+            engine: draft.engine,
+            model_id: Some(draft.model_id),
+            model_sha256: Some(draft.model_sha256),
+            revision_id: Some(revision_id.clone()),
+            input_revision_id: Some(draft.parent_revision_id),
+            input_revision_kind: Some(input_revision_kind),
+            prompt_template_sha256: Some(draft.prompt_template_sha256),
+            validation_result: Some("passed".to_string()),
+            fallback_applied: false,
+            error_code: None,
+            error_summary: None,
+            comparison: Some(comparison),
+            started_at_ms: draft.started_at_ms.min(finished_at_ms),
+            finished_at_ms,
+            elapsed_ms: draft.elapsed_ms,
+        });
+        manifest.updated_at_ms = finished_at_ms;
+        validate_manifest_structure(&manifest, &dir)?;
+        write_manifest(&dir, &manifest)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "revisionId": revision_id,
+            "parentRevisionId": parent.revision_id,
+            "version": version,
+            "receiptId": receipt_id,
+            "source": "ai-cleanup",
+            "kind": "ai-cleaned",
+            "current": false,
+            "currentCleaned": true,
+            "segmentCount": cleaned_segments.len(),
+            "validationResult": "passed",
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    pub(crate) fn record_cleanup_failure(
+        &self,
+        draft: CleanupFailureDraft,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&draft.recording_id)?;
+        validate_history_id(
+            &draft.parent_revision_id,
+            "TRANSCRIPT_PARENT_REVISION_ID_INVALID",
+        )?;
+        validate_processing_identity(
+            &draft.engine,
+            draft.model_id.as_deref(),
+            draft.model_sha256.as_deref(),
+        )?;
+        validate_stable_code(&draft.error_code, "PROCESSING_RECEIPT_ERROR_CODE_INVALID")?;
+        if !is_sha256_hex(&draft.prompt_template_sha256) {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_PROMPT_HASH_INVALID",
+                "cleanup prompt template fingerprint was invalid",
+            ));
+        }
+        let _mutation_guard = self.manifest_mutation_guard();
+        let dir = self.recording_dir(&draft.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        let parent = manifest
+            .transcript_revisions
+            .iter()
+            .find(|revision| revision.revision_id == draft.parent_revision_id)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_PARENT_REVISION_INVALID",
+                    "cleanup failure input revision was not found",
+                )
+            })?;
+        if manifest.processing_receipts.len() >= MAX_PROCESSING_RECEIPTS {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_LIMIT_REACHED",
+                "processing receipt history reached its local safety limit",
+            ));
+        }
+        let input_revision_kind = effective_revision_kind(parent).label().to_string();
+        let finished_at_ms = now_ms();
+        let attempt = u32::try_from(manifest.processing_receipts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let receipt_id = format!("pr-{attempt:06}-{finished_at_ms}");
+        manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
+        manifest.processing_receipts.push(ProcessingReceipt {
+            receipt_id: receipt_id.clone(),
+            attempt,
+            operation: "transcript-cleanup".to_string(),
+            stage: Some("cleanup".to_string()),
+            outcome: if draft.cancelled {
+                ProcessingOutcome::Cancelled
+            } else {
+                ProcessingOutcome::Failed
+            },
+            engine: draft.engine,
+            model_id: draft.model_id,
+            model_sha256: draft.model_sha256,
+            revision_id: None,
+            input_revision_id: Some(draft.parent_revision_id),
+            input_revision_kind: Some(input_revision_kind),
+            prompt_template_sha256: Some(draft.prompt_template_sha256),
+            validation_result: Some("failed".to_string()),
+            fallback_applied: false,
+            error_code: Some(draft.error_code),
+            error_summary: Some("local transcript cleanup did not complete".to_string()),
+            comparison: None,
+            started_at_ms: draft.started_at_ms.min(finished_at_ms),
+            finished_at_ms,
+            elapsed_ms: draft.elapsed_ms,
+        });
+        manifest.updated_at_ms = finished_at_ms;
+        validate_manifest_structure(&manifest, &dir)?;
+        write_manifest(&dir, &manifest)?;
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "receiptId": receipt_id,
+            "outcome": if draft.cancelled { "cancelled" } else { "failed" },
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    pub(crate) fn record_recap_receipt(
+        &self,
+        draft: RecapReceiptDraft,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&draft.recording_id)?;
+        validate_history_id(
+            &draft.input_revision_id,
+            "PROCESSING_RECEIPT_INPUT_REVISION_INVALID",
+        )?;
+        validate_processing_identity(
+            &draft.engine,
+            draft.model_id.as_deref(),
+            draft.model_sha256.as_deref(),
+        )?;
+        if !is_sha256_hex(&draft.prompt_template_sha256) {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_PROMPT_HASH_INVALID",
+                "recap prompt template fingerprint was invalid",
+            ));
+        }
+        if !matches!(
+            draft.validation_result.as_str(),
+            "passed" | "not-applicable"
+        ) {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_VALIDATION_INVALID",
+                "recap validation result was not recognized",
+            ));
+        }
+        let dir = self.recording_dir(&draft.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        let input_revision = manifest
+            .transcript_revisions
+            .iter()
+            .find(|revision| revision.revision_id == draft.input_revision_id)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "PROCESSING_RECEIPT_INPUT_REVISION_INVALID",
+                    "recap input revision was not found",
+                )
+            })?;
+        if manifest.processing_receipts.len() >= MAX_PROCESSING_RECEIPTS {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_LIMIT_REACHED",
+                "processing receipt history reached its local safety limit",
+            ));
+        }
+        let input_revision_kind = effective_revision_kind(input_revision).label().to_string();
+        let finished_at_ms = now_ms();
+        let attempt = u32::try_from(manifest.processing_receipts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let receipt_id = format!("pr-{attempt:06}-{finished_at_ms}");
+        manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
+        manifest.processing_receipts.push(ProcessingReceipt {
+            receipt_id: receipt_id.clone(),
+            attempt,
+            operation: "local-ai-recap".to_string(),
+            stage: Some("recap".to_string()),
+            outcome: ProcessingOutcome::Succeeded,
+            engine: draft.engine,
+            model_id: draft.model_id,
+            model_sha256: draft.model_sha256,
+            revision_id: None,
+            input_revision_id: Some(draft.input_revision_id),
+            input_revision_kind: Some(input_revision_kind),
+            prompt_template_sha256: Some(draft.prompt_template_sha256),
+            validation_result: Some(draft.validation_result),
+            fallback_applied: draft.fallback_applied,
+            error_code: None,
+            error_summary: None,
+            comparison: None,
+            started_at_ms: draft.started_at_ms.min(finished_at_ms),
+            finished_at_ms,
+            elapsed_ms: draft.elapsed_ms,
+        });
+        validate_manifest_structure(&manifest, &dir)?;
+        write_manifest(&dir, &manifest)?;
+        Ok(json!({
+            "recordingId": draft.recording_id,
+            "receiptId": receipt_id,
+            "operation": "local-ai-recap",
+            "inputRevisionId": manifest.processing_receipts.last().and_then(|receipt| receipt.input_revision_id.as_deref()),
+            "fallbackApplied": draft.fallback_applied,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    fn complete_transcript_attempt_with_kind(
+        &self,
+        draft: TranscriptionSuccessDraft,
+        commit_kind: TranscriptCommitKind,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&draft.recording_id)?;
+        validate_processing_identity(
+            &draft.engine,
+            draft.model_id.as_deref(),
+            draft.model_sha256.as_deref(),
+        )?;
+        validate_transcript_comparison(&draft.comparison)?;
+        validate_raw_transcript_text(&draft.raw_text, &draft.comparison)?;
+        if let Some(attempt_id) = draft.attempt_id.as_deref() {
+            validate_history_id(attempt_id, "TRANSCRIPTION_ATTEMPT_ID_INVALID")?;
+            if !draft.chunk_indices.is_empty() {
+                return Err(RecordingStoreError::new(
+                    "TRANSCRIPTION_ATTEMPT_CHUNKS_INVALID",
+                    "a local transcription attempt cannot accept caller-selected chunks",
+                ));
+            }
+        }
+        if draft.chunk_indices.len() > MAX_REVISION_CHUNK_INDICES {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_TOO_LARGE",
+                "transcript revision contains too many segment references",
+            ));
+        }
+        let _mutation_guard = self.manifest_mutation_guard();
+        let dir = self.recording_dir(&draft.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        if let TranscriptCommitKind::ProtectedTermReview {
+            expected_current_revision_id,
+        } = &commit_kind
+        {
+            if manifest.current_transcript_revision_id.as_deref()
+                != Some(expected_current_revision_id.as_str())
+            {
+                return Err(RecordingStoreError::new(
+                    "PROTECTED_TERM_REVIEW_STALE",
+                    "the current transcript changed after protected terms were reviewed",
+                ));
+            }
+        }
+        if manifest.state == RecordingState::NeedsRecovery {
+            return Err(RecordingStoreError::new(
+                "RECORDING_NEEDS_RECOVERY",
+                "recording must be recovered before transcript history can be updated",
+            ));
+        }
+        if manifest.transcript_revisions.len() >= MAX_TRANSCRIPT_REVISIONS {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_LIMIT_REACHED",
+                "transcript revision history reached its local safety limit",
+            ));
+        }
+        if manifest.processing_receipts.len() >= MAX_PROCESSING_RECEIPTS {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_LIMIT_REACHED",
+                "processing receipt history reached its local safety limit",
+            ));
+        }
+        let chunk_indices = match draft.attempt_id.as_deref() {
+            Some(attempt_id) => manifest
+                .chunks
+                .iter()
+                .filter(|chunk| {
+                    chunk.kind == DurableChunkKind::TranscriptSegment
+                        && chunk.transcription_attempt_id.as_deref() == Some(attempt_id)
+                })
+                .map(|chunk| chunk.index)
+                .collect::<Vec<_>>(),
+            None => draft.chunk_indices,
+        };
+        let already_committed = committed_transcript_chunk_indices(&manifest);
+        if draft.attempt_id.is_some()
+            && chunk_indices
+                .iter()
+                .any(|index| already_committed.contains(index))
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPTION_ATTEMPT_ALREADY_COMMITTED",
+                "local transcription attempt chunks already belong to immutable history",
+            ));
+        }
+        validate_revision_chunk_indices(&manifest, &chunk_indices)?;
+        validate_revision_attempt_membership(&manifest, &chunk_indices)?;
+        let normalized_indices = chunk_indices.iter().copied().collect::<HashSet<_>>();
+        let normalized_segments =
+            self.transcript_segments_for_indices(&manifest, &dir, Some(&normalized_indices), true)?;
+        if normalized_segments.len() as u64 != draft.comparison.normalized_segment_count {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_COMPARISON_CONTENT_INVALID",
+                "normalized transcript segment count did not match immutable comparison metadata",
+            ));
+        }
+        let normalized_text = transcript_text_from_segments(&normalized_segments);
+        validate_normalized_transcript_text(&normalized_text, &draft.comparison)?;
+        let finished_at_ms = now_ms();
+        if draft.attempt_id.is_some() && manifest.transcript_revisions.is_empty() {
+            self.promote_legacy_transcript_revision(&mut manifest, &dir, finished_at_ms)?;
+        }
+        let (source, operation, kind, parent_revision_id, input_revision_kind, stage) =
+            match &commit_kind {
+                TranscriptCommitKind::ProtectedTermReview {
+                    expected_current_revision_id,
+                } => {
+                    let input_kind = manifest
+                        .transcript_revisions
+                        .iter()
+                        .find(|revision| revision.revision_id == *expected_current_revision_id)
+                        .map(effective_revision_kind)
+                        .ok_or_else(|| {
+                            RecordingStoreError::new(
+                                "TRANSCRIPT_PARENT_REVISION_INVALID",
+                                "protected-term review input revision was not found",
+                            )
+                        })?;
+                    (
+                        "review",
+                        "protected-term-review",
+                        TranscriptRevisionKind::Normalized,
+                        Some(expected_current_revision_id.clone()),
+                        Some(input_kind.label().to_string()),
+                        "normalization",
+                    )
+                }
+                TranscriptCommitKind::Transcription if manifest.transcript_revisions.is_empty() => {
+                    (
+                        "initial",
+                        "transcription",
+                        TranscriptRevisionKind::RawAsr,
+                        None,
+                        None,
+                        "transcription",
+                    )
+                }
+                TranscriptCommitKind::Transcription => (
+                    "reprocess",
+                    "transcription",
+                    TranscriptRevisionKind::RawAsr,
+                    None,
+                    None,
+                    "transcription",
+                ),
+            };
+        let version = u32::try_from(manifest.transcript_revisions.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let revision_id = format!("tr-{version:06}-{finished_at_ms}");
+        let receipt_attempt = u32::try_from(manifest.processing_receipts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let receipt_id = format!("pr-{receipt_attempt:06}-{finished_at_ms}");
+        let comparison = comparison_metadata(draft.comparison);
+        manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
+        let (raw_text_chunk_indices, raw_chunk_paths) = self
+            .append_encrypted_raw_transcript_chunks(
+                &draft.recording_id,
+                &mut manifest,
+                &dir,
+                &draft.raw_text,
+                finished_at_ms,
+            )?;
+        manifest.transcript_revisions.push(TranscriptRevision {
+            revision_id: revision_id.clone(),
+            version,
+            source: source.to_string(),
+            kind,
+            parent_revision_id: parent_revision_id.clone(),
+            chunk_indices,
+            engine: draft.engine.clone(),
+            model_id: draft.model_id.clone(),
+            model_sha256: draft.model_sha256.clone(),
+            raw_text_chunk_indices: Some(raw_text_chunk_indices),
+            comparison: comparison.clone(),
+            created_at_ms: finished_at_ms,
+        });
+        manifest.current_transcript_revision_id = Some(revision_id.clone());
+        manifest.processing_receipts.push(ProcessingReceipt {
+            receipt_id: receipt_id.clone(),
+            attempt: receipt_attempt,
+            operation: operation.to_string(),
+            stage: Some(stage.to_string()),
+            outcome: ProcessingOutcome::Succeeded,
+            engine: draft.engine,
+            model_id: draft.model_id,
+            model_sha256: draft.model_sha256,
+            revision_id: Some(revision_id.clone()),
+            input_revision_id: parent_revision_id,
+            input_revision_kind,
+            prompt_template_sha256: None,
+            validation_result: Some("passed".to_string()),
+            fallback_applied: false,
+            error_code: None,
+            error_summary: None,
+            comparison: Some(comparison),
+            started_at_ms: draft.started_at_ms.min(finished_at_ms),
+            finished_at_ms,
+            elapsed_ms: draft.elapsed_ms,
+        });
+        manifest.updated_at_ms = finished_at_ms;
+        let commit = {
+            #[cfg(test)]
+            if self.fail_transcription_commit {
+                Err(RecordingStoreError::new(
+                    "TRANSCRIPTION_HISTORY_COMMIT_FAILED",
+                    "injected transcription history commit failure",
+                ))
+            } else {
+                write_manifest(&dir, &manifest)
+            }
+            #[cfg(not(test))]
+            {
+                write_manifest(&dir, &manifest)
+            }
+        };
+        if let Err(error) = commit {
+            for path in raw_chunk_paths {
+                let _ = fs::remove_file(path);
+            }
+            return Err(error);
+        }
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "revisionId": revision_id,
+            "version": version,
+            "receiptId": receipt_id,
+            "source": source,
+            "kind": kind.label(),
+            "current": true,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
+        }))
+    }
+
+    fn promote_legacy_transcript_revision(
+        &self,
+        manifest: &mut RecordingManifest,
+        dir: &Path,
+        migrated_at_ms: u128,
+    ) -> Result<bool, RecordingStoreError> {
+        if !manifest.transcript_revisions.is_empty() {
+            return Ok(false);
+        }
+        let mut chunk_indices = current_transcript_chunk_indices(manifest)
+            .into_iter()
+            .collect::<Vec<_>>();
+        chunk_indices.sort_unstable();
+        if chunk_indices.is_empty() {
+            return Ok(false);
+        }
+        if chunk_indices.len() > MAX_REVISION_CHUNK_INDICES {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_TOO_LARGE",
+                "legacy transcript contains too many segment references to preserve safely",
+            ));
+        }
+        let selected_indices = chunk_indices.iter().copied().collect::<HashSet<_>>();
+        legacy_transcript_bytes_with_limit(
+            manifest,
+            &selected_indices,
+            MAX_RAW_TRANSCRIPT_BYTES as u64,
+        )?;
+        let segments =
+            self.transcript_segments_for_indices(manifest, dir, Some(&selected_indices), true)?;
+        let text = transcript_text_from_segments(&segments);
+        let text_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+        let text_sha256 = hex_digest(&Sha256::digest(text.as_bytes()));
+        let segment_count = u64::try_from(segments.len()).unwrap_or(u64::MAX);
+        let created_at_ms = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| selected_indices.contains(&chunk.index))
+            .map(|chunk| chunk.created_at_ms)
+            .max()
+            .unwrap_or(manifest.created_at_ms)
+            .min(migrated_at_ms);
+        let revision_id = format!("tr-000001-{created_at_ms}");
+        manifest.transcript_revisions.push(TranscriptRevision {
+            revision_id: revision_id.clone(),
+            version: 1,
+            source: "initial".to_string(),
+            kind: TranscriptRevisionKind::Legacy,
+            parent_revision_id: None,
+            chunk_indices,
+            engine: "legacy-manual".to_string(),
+            model_id: None,
+            model_sha256: None,
+            raw_text_chunk_indices: None,
+            comparison: TranscriptComparisonMetadata {
+                raw_text_sha256: text_sha256.clone(),
+                normalized_text_sha256: text_sha256,
+                raw_text_bytes: text_bytes,
+                normalized_text_bytes: text_bytes,
+                raw_segment_count: segment_count,
+                normalized_segment_count: segment_count,
+                changed: false,
+            },
+            created_at_ms,
+        });
+        manifest.current_transcript_revision_id = Some(revision_id);
+        Ok(true)
+    }
+
+    pub(crate) fn record_transcription_failure(
+        &self,
+        draft: TranscriptionFailureDraft,
+    ) -> Result<Value, RecordingStoreError> {
+        validate_id(&draft.recording_id)?;
+        validate_processing_identity(&draft.engine, draft.model_id.as_deref(), None)?;
+        validate_stable_code(&draft.error_code, "PROCESSING_RECEIPT_ERROR_CODE_INVALID")?;
+        let _mutation_guard = self.manifest_mutation_guard();
+        let dir = self.recording_dir(&draft.recording_id)?;
+        let mut manifest = read_manifest(&dir)?;
+        if manifest.processing_receipts.len() >= MAX_PROCESSING_RECEIPTS {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_LIMIT_REACHED",
+                "processing receipt history reached its local safety limit",
+            ));
+        }
+        let finished_at_ms = now_ms();
+        let attempt = u32::try_from(manifest.processing_receipts.len())
+            .unwrap_or(u32::MAX)
+            .saturating_add(1);
+        let receipt_id = format!("pr-{attempt:06}-{finished_at_ms}");
+        let outcome = if draft.cancelled {
+            ProcessingOutcome::Cancelled
+        } else {
+            ProcessingOutcome::Failed
+        };
+        manifest.processing_receipts.push(ProcessingReceipt {
+            receipt_id: receipt_id.clone(),
+            attempt,
+            operation: "transcription".to_string(),
+            stage: Some("transcription".to_string()),
+            outcome,
+            engine: draft.engine,
+            model_id: draft.model_id,
+            model_sha256: None,
+            revision_id: None,
+            input_revision_id: None,
+            input_revision_kind: None,
+            prompt_template_sha256: None,
+            validation_result: Some("failed".to_string()),
+            fallback_applied: false,
+            error_code: Some(draft.error_code),
+            error_summary: Some("local transcription did not complete".to_string()),
+            comparison: None,
+            started_at_ms: draft.started_at_ms.min(finished_at_ms),
+            finished_at_ms,
+            elapsed_ms: draft.elapsed_ms,
+        });
+        manifest.updated_at_ms = finished_at_ms;
+        write_manifest(&dir, &manifest)?;
+        Ok(json!({
+            "recordingId": manifest.recording_id,
+            "receiptId": receipt_id,
+            "outcome": if draft.cancelled { "cancelled" } else { "failed" },
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false
         }))
     }
 
@@ -1267,7 +3806,7 @@ impl RecordingStore {
     ) -> Result<(), RecordingStoreError> {
         if !matches!(
             event_type,
-            "transcription" | "local-ai-recap" | "local-ai-ask"
+            "transcription" | "local-ai-cleanup" | "local-ai-recap" | "local-ai-ask"
         ) {
             return Err(RecordingStoreError::new(
                 "PRIVACY_EVENT_TYPE_INVALID",
@@ -1421,10 +3960,14 @@ impl RecordingStore {
             .iter()
             .filter(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
             .collect::<Vec<_>>();
+        let committed_transcript_indices = committed_transcript_chunk_indices(&manifest);
         let transcript_segment_count = manifest
             .chunks
             .iter()
-            .filter(|chunk| chunk.kind == DurableChunkKind::TranscriptSegment)
+            .filter(|chunk| {
+                chunk.kind == DurableChunkKind::TranscriptSegment
+                    && !is_uncommitted_attempt_chunk(chunk, &committed_transcript_indices)
+            })
             .count();
         let notes_saved = manifest
             .chunks
@@ -1480,6 +4023,13 @@ impl RecordingStore {
                 "notesSavedLocally": notes_saved
             },
             "processing": processing,
+            "trustHistory": {
+                "currentRevisionId": manifest.current_transcript_revision_id,
+                "revisionCount": manifest.transcript_revisions.len(),
+                "processingReceiptCount": manifest.processing_receipts.len(),
+                "processingReceipts": manifest.processing_receipts,
+                "immutableRevisions": true
+            },
             "exports": exports,
             "retention": {
                 "policy": "manual-delete-only",
@@ -1510,6 +4060,7 @@ impl RecordingStore {
             ));
         }
 
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(&params.recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         if manifest.state == RecordingState::NeedsRecovery {
@@ -1554,6 +4105,7 @@ impl RecordingStore {
             stored_bytes,
             encrypted,
             cipher,
+            content_sha256: None,
             speaker: None,
             confidence: None,
             sample_rate_hz: None,
@@ -1561,10 +4113,13 @@ impl RecordingStore {
             bits_per_sample: None,
             start_ms: None,
             duration_ms: None,
+            transcription_attempt_id: None,
             created_at_ms: now_ms(),
         });
         manifest.updated_at_ms = now_ms();
         write_manifest(&dir, &manifest)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        self.committed_trust_search_source_change();
         self.notes_response(&manifest, &dir)
     }
 
@@ -1605,53 +4160,809 @@ impl RecordingStore {
     }
 
     pub fn search(&self, params: SearchRecordingsParams) -> Result<Value, RecordingStoreError> {
-        let query = params.query.trim();
-        if query.is_empty() || query.len() > 200 {
+        let query = validated_search_query(&params.query)?;
+        #[cfg(feature = "sqlcipher-vault")]
+        {
+            let source_generation = {
+                let _source_guard = self.manifest_mutation_lock.try_lock().map_err(|_| {
+                    RecordingStoreError::new(
+                        "RECORDING_SEARCH_INDEX_BUILDING",
+                        "encrypted local search is catching up with a meeting update; retry shortly",
+                    )
+                })?;
+                if let Some(failure) = self
+                    .trust_search_backfill_failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone()
+                {
+                    return Err(failure.as_error());
+                }
+                let source_generation = self.trust_search_source_generation.load(Ordering::Acquire);
+                if source_generation != self.trust_search_index_generation.load(Ordering::Acquire) {
+                    self.schedule_trust_search_backfill();
+                    return Err(RecordingStoreError::new(
+                        "RECORDING_SEARCH_INDEX_BUILDING",
+                        "encrypted local search is being prepared; retry shortly",
+                    ));
+                }
+                source_generation
+            };
+            match self.search_sqlcipher_fts(query) {
+                Ok(result) => {
+                    let _source_guard = self.manifest_mutation_lock.try_lock().map_err(|_| {
+                        RecordingStoreError::new(
+                            "RECORDING_SEARCH_INDEX_BUILDING",
+                            "encrypted local search changed during the query; retry shortly",
+                        )
+                    })?;
+                    if self.trust_search_source_generation.load(Ordering::Acquire)
+                        != source_generation
+                        || self.trust_search_index_generation.load(Ordering::Acquire)
+                            != source_generation
+                    {
+                        self.schedule_trust_search_backfill();
+                        return Err(RecordingStoreError::new(
+                            "RECORDING_SEARCH_INDEX_BUILDING",
+                            "encrypted local search changed during the query; retry shortly",
+                        ));
+                    }
+                    Ok(result)
+                }
+                Err(error) if error.code == "TRUST_SEARCH_INDEX_NOT_READY" => {
+                    self.schedule_trust_search_backfill();
+                    if let Some(failure) = self
+                        .trust_search_backfill_failure
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone()
+                    {
+                        return Err(failure.as_error());
+                    }
+                    Err(RecordingStoreError::new(
+                        "RECORDING_SEARCH_INDEX_BUILDING",
+                        "encrypted local search is being prepared; retry shortly",
+                    ))
+                }
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(feature = "sqlcipher-vault"))]
+        {
+            let (rows, quarantined_count, truncated) = self.searchable_text_rows()?;
+            Ok(self.search_bounded_fallback(
+                query,
+                &rows,
+                quarantined_count,
+                truncated,
+                "bounded-scan",
+            ))
+        }
+    }
+
+    /// Searches durable encrypted source chunks without creating directories,
+    /// keys, quarantine receipts, or an index. This is deliberately separate
+    /// from the desktop SQLCipher FTS path because an automation process cannot
+    /// safely establish that another process's in-memory index generation is
+    /// current or rebuild that index while remaining read-only.
+    pub fn search_read_only(
+        &self,
+        params: SearchRecordingsParams,
+    ) -> Result<Value, RecordingStoreError> {
+        let query = validated_search_query(&params.query)?;
+        let (rows, quarantined_count, truncated) = self.searchable_text_rows_bounded(
+            MAX_AUTOMATION_SEARCHABLE_RECORDINGS,
+            MAX_AUTOMATION_SEARCHABLE_CHUNK_DESCRIPTORS,
+            MAX_AUTOMATION_SEARCHABLE_MANIFEST_BYTES_TOTAL,
+            MAX_AUTOMATION_SEARCHABLE_ROWS,
+            MAX_AUTOMATION_SEARCHABLE_BYTES,
+            true,
+        )?;
+        let response = self.search_bounded_fallback(
+            query,
+            &rows,
+            quarantined_count,
+            truncated,
+            "bounded-read-only-source-scan",
+        );
+        bounded_automation_response(
+            response,
+            MAX_AUTOMATION_SEARCH_RESPONSE_BYTES,
+            "AUTOMATION_SEARCH_RESPONSE_TOO_LARGE",
+        )
+    }
+
+    fn searchable_text_rows(
+        &self,
+    ) -> Result<(Vec<SearchableTextRow>, u64, bool), RecordingStoreError> {
+        #[cfg(feature = "sqlcipher-vault")]
+        {
+            self.searchable_text_rows_bounded(
+                MAX_SEARCHABLE_RECORDINGS,
+                MAX_SEARCHABLE_CHUNK_DESCRIPTORS,
+                MAX_SEARCHABLE_MANIFEST_BYTES_TOTAL,
+                MAX_SEARCHABLE_ROWS,
+                MAX_SEARCHABLE_BYTES,
+                false,
+            )
+        }
+        #[cfg(not(feature = "sqlcipher-vault"))]
+        {
+            self.searchable_text_rows_bounded(
+                MAX_FALLBACK_SEARCHABLE_RECORDINGS,
+                4_096,
+                4 * 1024 * 1024,
+                MAX_FALLBACK_SEARCHABLE_ROWS,
+                MAX_FALLBACK_SEARCHABLE_BYTES,
+                false,
+            )
+        }
+    }
+
+    fn searchable_text_rows_bounded(
+        &self,
+        recording_limit: usize,
+        chunk_descriptor_limit: usize,
+        manifest_bytes_limit: u64,
+        max_rows: usize,
+        max_bytes: u64,
+        read_only: bool,
+    ) -> Result<(Vec<SearchableTextRow>, u64, bool), RecordingStoreError> {
+        let (collection, manifest_truncated, read_only_quarantined_count) = if read_only {
+            let (collection, truncated, quarantined_count) = self
+                .collect_search_manifests_read_only_bounded(
+                    recording_limit,
+                    chunk_descriptor_limit,
+                    manifest_bytes_limit,
+                )?;
+            (collection, truncated, Some(quarantined_count))
+        } else {
+            let (collection, truncated) = self.collect_search_manifests_bounded(
+                recording_limit,
+                chunk_descriptor_limit,
+                manifest_bytes_limit,
+            )?;
+            (collection, truncated, None)
+        };
+        let mut quarantined_count =
+            read_only_quarantined_count.unwrap_or(collection.quarantined.len() as u64);
+        let mut rows = Vec::new();
+        let mut searchable_bytes = 0_u64;
+        let mut truncated = manifest_truncated;
+        let mut stop = false;
+        for (manifest, dir) in collection.items {
+            let response_label = manifest
+                .label
+                .as_deref()
+                .map(|label| truncate_utf8(label, MAX_AUTOMATION_LABEL_RESPONSE_BYTES));
+            if read_only {
+                if let Some(label) = response_label.as_deref().filter(|label| !label.is_empty()) {
+                    if rows.len() >= max_rows
+                        || label.len() as u64 > max_bytes.saturating_sub(searchable_bytes)
+                    {
+                        truncated = true;
+                        break;
+                    }
+                    searchable_bytes = searchable_bytes.saturating_add(label.len() as u64);
+                    rows.push(SearchableTextRow {
+                        recording_id: manifest.recording_id.clone(),
+                        label: response_label.clone(),
+                        state: recording_state_label(&manifest.state),
+                        chunk_index: 0,
+                        channel: "metadata".to_string(),
+                        row_kind: "meetingLabel",
+                        text: label.to_string(),
+                    });
+                }
+            }
+            let selected_indices = current_transcript_chunk_indices(&manifest);
+            let cleaned_indices = manifest
+                .current_cleaned_revision_id
+                .as_deref()
+                .and_then(|revision_id| {
+                    manifest
+                        .transcript_revisions
+                        .iter()
+                        .find(|revision| revision.revision_id == revision_id)
+                })
+                .filter(|revision| {
+                    revision.parent_revision_id.as_deref()
+                        == manifest.current_transcript_revision_id.as_deref()
+                })
+                .map(|revision| {
+                    revision
+                        .chunk_indices
+                        .iter()
+                        .copied()
+                        .collect::<HashSet<_>>()
+                })
+                .unwrap_or_default();
+            let latest_notes_index = manifest
+                .chunks
+                .iter()
+                .filter(|chunk| chunk.kind == DurableChunkKind::NotesMarkdown)
+                .map(|chunk| chunk.index)
+                .max();
+            for chunk in manifest.chunks.iter().filter(|chunk| match chunk.kind {
+                DurableChunkKind::TranscriptSegment => {
+                    selected_indices.contains(&chunk.index)
+                        || cleaned_indices.contains(&chunk.index)
+                }
+                DurableChunkKind::TranscriptText => true,
+                DurableChunkKind::NotesMarkdown => latest_notes_index == Some(chunk.index),
+                DurableChunkKind::AudioPcm16le | DurableChunkKind::RawTranscriptText => false,
+            }) {
+                if rows.len() >= max_rows
+                    || chunk.bytes > max_bytes.saturating_sub(searchable_bytes)
+                {
+                    truncated = true;
+                    stop = true;
+                    break;
+                }
+                let bytes = match self
+                    .read_chunk_bytes_with_key_access(&manifest, chunk, &dir, !read_only)
+                {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        if !read_only {
+                            let _ = self.quarantine_summary(&manifest.recording_id, error.code);
+                        }
+                        quarantined_count = quarantined_count.saturating_add(1);
+                        break;
+                    }
+                };
+                if bytes.len() as u64 > max_bytes.saturating_sub(searchable_bytes) {
+                    truncated = true;
+                    stop = true;
+                    break;
+                }
+                let text = match String::from_utf8(bytes) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        if !read_only {
+                            let _ = self.quarantine_summary(
+                                &manifest.recording_id,
+                                "RECORDING_TEXT_ENCODING_INVALID",
+                            );
+                        }
+                        quarantined_count = quarantined_count.saturating_add(1);
+                        break;
+                    }
+                };
+                searchable_bytes = searchable_bytes.saturating_add(text.len() as u64);
+                let row_kind = match chunk.kind {
+                    DurableChunkKind::TranscriptSegment
+                        if cleaned_indices.contains(&chunk.index) =>
+                    {
+                        "cleanedTranscriptSegment"
+                    }
+                    DurableChunkKind::TranscriptSegment => "originalTranscriptSegment",
+                    DurableChunkKind::TranscriptText => "originalTranscriptText",
+                    _ => chunk_kind_label(&chunk.kind),
+                };
+                rows.push(SearchableTextRow {
+                    recording_id: manifest.recording_id.clone(),
+                    label: if read_only {
+                        response_label.clone()
+                    } else {
+                        manifest.label.clone()
+                    },
+                    state: recording_state_label(&manifest.state),
+                    chunk_index: chunk.index,
+                    channel: if read_only {
+                        truncate_utf8(&chunk.channel, MAX_AUTOMATION_CHANNEL_RESPONSE_BYTES)
+                    } else {
+                        chunk.channel.clone()
+                    },
+                    row_kind,
+                    text,
+                });
+            }
+            if stop {
+                break;
+            }
+        }
+        Ok((rows, quarantined_count, truncated))
+    }
+
+    fn search_bounded_fallback(
+        &self,
+        query: &str,
+        rows: &[SearchableTextRow],
+        quarantined_count: u64,
+        source_truncated: bool,
+        search_backend: &str,
+    ) -> Value {
+        let query_lower = query.to_lowercase();
+        let mut matches = Vec::new();
+        let mut truncated = source_truncated;
+        for row in rows {
+            let text_lower = row.text.to_lowercase();
+            let Some(offset) = text_lower.find(&query_lower) else {
+                continue;
+            };
+            if matches.len() >= MAX_SEARCH_MATCHES {
+                truncated = true;
+                break;
+            }
+            matches.push(json!({
+                "recordingId": row.recording_id,
+                "label": row.label,
+                "state": row.state,
+                "chunkIndex": row.chunk_index,
+                "channel": row.channel,
+                "rowKind": row.row_kind,
+                "snippet": snippet(&row.text, offset, query.len()),
+                "rawPathExposed": false
+            }));
+        }
+        json!({
+            "rootKind": self.root_kind,
+            "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false,
+            "query": query,
+            "matchCount": matches.len(),
+            "matchLimit": MAX_SEARCH_MATCHES,
+            "truncated": truncated,
+            "quarantinedCount": quarantined_count,
+            "searchBackend": search_backend,
+            "encryptedIndex": false,
+            "plaintextIndexPersisted": false,
+            "matches": matches
+        })
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn open_existing_trust_search_connection(&self) -> Result<Connection, RecordingStoreError> {
+        let search_root = self.root.join(TRUST_SEARCH_DIR);
+        let search_path = search_root.join(TRUST_SEARCH_FILE);
+        let root_metadata = fs::symlink_metadata(&search_root).map_err(|_| {
+            RecordingStoreError::new(
+                "TRUST_SEARCH_INDEX_NOT_READY",
+                "encrypted search index has not been built yet",
+            )
+        })?;
+        if root_metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&root_metadata)
+            || !root_metadata.is_dir()
+        {
             return Err(RecordingStoreError::new(
-                "RECORDING_SEARCH_QUERY_INVALID",
-                "search query must be between 1 and 200 bytes after trimming",
+                "TRUST_SEARCH_OPEN_FAILED",
+                "encrypted search storage was not an owned directory",
             ));
         }
-        let query_lower = query.to_ascii_lowercase();
-        let mut matches = Vec::new();
-        let collection = self.collect_recording_manifests()?;
-        let mut quarantined_count = collection.quarantined.len() as u64;
+        let file_metadata = fs::symlink_metadata(&search_path).map_err(|_| {
+            RecordingStoreError::new(
+                "TRUST_SEARCH_INDEX_NOT_READY",
+                "encrypted search index has not been built yet",
+            )
+        })?;
+        if file_metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&file_metadata)
+            || !file_metadata.is_file()
+        {
+            return Err(RecordingStoreError::new(
+                "TRUST_SEARCH_OPEN_FAILED",
+                "encrypted search index was not an owned file",
+            ));
+        }
+        let key = os_key_store::get_existing_key(&self.root)
+            .map_err(|error| RecordingStoreError::new(error.code, error.message))?;
+        let connection = Connection::open_with_flags(
+            search_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| RecordingStoreError::new("TRUST_SEARCH_OPEN_FAILED", error.to_string()))?;
+        Self::key_trust_search_connection(&connection, &key)?;
+        Ok(connection)
+    }
 
-        for (manifest, dir) in collection.items {
-            let chunks = match self.read_manifest_chunks(&manifest, &dir) {
-                Ok(chunks) => chunks,
-                Err(error) => {
-                    let _ = self.quarantine_summary(&manifest.recording_id, error.code);
-                    quarantined_count = quarantined_count.saturating_add(1);
-                    continue;
+    #[cfg(feature = "sqlcipher-vault")]
+    fn key_trust_search_connection(
+        connection: &Connection,
+        key: &os_key_store::OsKey,
+    ) -> Result<(), RecordingStoreError> {
+        connection
+            .pragma_update(None, "key", key.sqlcipher_passphrase())
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_KEY_FAILED", error.to_string())
+            })?;
+        let cipher_version = connection
+            .query_row("PRAGMA cipher_version", [], |row| row.get::<_, String>(0))
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_SQLCIPHER_UNAVAILABLE", error.to_string())
+            })?;
+        if cipher_version.trim().is_empty() {
+            return Err(RecordingStoreError::new(
+                "TRUST_SEARCH_SQLCIPHER_UNAVAILABLE",
+                "encrypted search requires SQLCipher",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn committed_trust_search_source_change(&self) {
+        self.mark_trust_search_source_change();
+        self.schedule_trust_search_backfill();
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn mark_trust_search_source_change(&self) {
+        self.trust_search_source_generation
+            .fetch_add(1, Ordering::AcqRel);
+        *self
+            .trust_search_backfill_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn schedule_trust_search_backfill(&self) {
+        if self
+            .trust_search_backfill_failure
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some()
+        {
+            return;
+        }
+        if self
+            .trust_search_backfill_running
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        let store = self.clone();
+        let spawned = std::thread::Builder::new()
+            .name("candor-trust-search-backfill".to_string())
+            .spawn(move || {
+                lower_trust_search_backfill_priority();
+                let changed_during_backfill = match store.rebuild_trust_search_index_once() {
+                    Ok(true) => {
+                        *store
+                            .trust_search_backfill_failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+                        false
+                    }
+                    Ok(false) => true,
+                    Err(error) => {
+                        *store
+                            .trust_search_backfill_failure
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            Some(TrustSearchBackfillFailure::from_error(&error));
+                        false
+                    }
+                };
+                store.finish_trust_search_backfill(changed_during_backfill);
+            });
+        if spawned.is_err() {
+            self.trust_search_backfill_running
+                .store(false, Ordering::Release);
+            *self
+                .trust_search_backfill_failure
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                Some(TrustSearchBackfillFailure {
+                    code: "TRUST_SEARCH_BACKFILL_FAILED",
+                    message: "encrypted local search could not start index preparation",
+                });
+        }
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn finish_trust_search_backfill(&self, retry_requested: bool) {
+        self.trust_search_backfill_running
+            .store(false, Ordering::Release);
+        if retry_requested
+            || self.trust_search_source_generation.load(Ordering::Acquire)
+                != self.trust_search_index_generation.load(Ordering::Acquire)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            self.schedule_trust_search_backfill();
+        }
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn rebuild_trust_search_index_once(&self) -> Result<bool, RecordingStoreError> {
+        let _search_guard = self
+            .trust_search_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let source_generation = self.trust_search_source_generation.load(Ordering::Acquire);
+        let (rows, quarantined_count, source_truncated) = self.searchable_text_rows()?;
+        let search_root = self.root.join(TRUST_SEARCH_DIR);
+        match fs::symlink_metadata(&search_root) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink()
+                    || metadata_is_reparse_point(&metadata)
+                    || !metadata.is_dir()
+                {
+                    return Err(RecordingStoreError::new(
+                        "TRUST_SEARCH_CREATE_FAILED",
+                        "encrypted search storage was not an owned directory",
+                    ));
                 }
-            };
-            for chunk in chunks {
-                let text = chunk
-                    .get("textUtf8")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let text_lower = text.to_ascii_lowercase();
-                if let Some(offset) = text_lower.find(&query_lower) {
-                    matches.push(json!({
-                        "recordingId": manifest.recording_id.as_str(),
-                        "label": manifest.label.as_deref(),
-                        "state": recording_state_label(&manifest.state),
-                        "chunkIndex": chunk.get("index").and_then(Value::as_u64).unwrap_or_default(),
-                        "channel": chunk.get("channel").and_then(Value::as_str).unwrap_or("unknown"),
-                        "snippet": snippet(text, offset, query.len()),
-                        "rawPathExposed": false
-                    }));
-                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&search_root).map_err(io_error("TRUST_SEARCH_CREATE_FAILED"))?;
+            }
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_CREATE_FAILED",
+                    error.to_string(),
+                ));
             }
         }
 
+        let next_path = search_root.join(format!("{TRUST_SEARCH_FILE}.next"));
+        let next_sidecar_paths = [
+            next_path.clone(),
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next-journal")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next-wal")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next-shm")),
+        ];
+        remove_owned_trust_search_files(&next_sidecar_paths)?;
+        let key = os_key_store::get_or_create_key(&self.root)
+            .map_err(|error| RecordingStoreError::new(error.code, error.message))?;
+        let mut connection = Connection::open_with_flags(
+            &next_path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|error| RecordingStoreError::new("TRUST_SEARCH_OPEN_FAILED", error.to_string()))?;
+        Self::key_trust_search_connection(&connection, &key)?;
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode = DELETE;
+                 PRAGMA temp_store = MEMORY;
+                 PRAGMA secure_delete = ON;
+                 CREATE TABLE candor_trust_meta (
+                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                     quarantined_count INTEGER NOT NULL,
+                     source_truncated INTEGER NOT NULL
+                 );
+                 CREATE VIRTUAL TABLE candor_trust_fts USING fts5(
+                     recording_id UNINDEXED,
+                     label UNINDEXED,
+                     state UNINDEXED,
+                     chunk_index UNINDEXED,
+                     channel UNINDEXED,
+                     row_kind UNINDEXED,
+                     text,
+                     tokenize = 'unicode61'
+                 );",
+            )
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_SCHEMA_FAILED", error.to_string())
+            })?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_SYNC_FAILED", error.to_string())
+            })?;
+        transaction
+            .execute(
+                "INSERT INTO candor_trust_meta (
+                    id, quarantined_count, source_truncated
+                 ) VALUES (1, ?1, ?2)",
+                params![
+                    i64::try_from(quarantined_count).unwrap_or(i64::MAX),
+                    i64::from(source_truncated)
+                ],
+            )
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_SYNC_FAILED", error.to_string())
+            })?;
+        {
+            let mut insert = transaction
+                .prepare(
+                    "INSERT INTO candor_trust_fts (
+                        recording_id, label, state, chunk_index, channel, row_kind, text
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                )
+                .map_err(|error| {
+                    RecordingStoreError::new("TRUST_SEARCH_SYNC_FAILED", error.to_string())
+                })?;
+            for row in &rows {
+                insert
+                    .execute(params![
+                        row.recording_id,
+                        row.label,
+                        row.state,
+                        i64::from(row.chunk_index),
+                        row.channel,
+                        row.row_kind,
+                        row.text
+                    ])
+                    .map_err(|error| {
+                        RecordingStoreError::new("TRUST_SEARCH_SYNC_FAILED", error.to_string())
+                    })?;
+            }
+        }
+        transaction.commit().map_err(|error| {
+            RecordingStoreError::new("TRUST_SEARCH_SYNC_FAILED", error.to_string())
+        })?;
+        connection
+            .pragma_update(None, "user_version", TRUST_SEARCH_SCHEMA_VERSION)
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_SCHEMA_FAILED", error.to_string())
+            })?;
+        drop(connection);
+
+        if self.trust_search_source_generation.load(Ordering::Acquire) != source_generation {
+            let _ = remove_owned_trust_search_files(&next_sidecar_paths);
+            return Ok(false);
+        }
+
+        let search_path = search_root.join(TRUST_SEARCH_FILE);
+        for path in [
+            search_path.clone(),
+            search_root.join(format!("{TRUST_SEARCH_FILE}-journal")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}-wal")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}-shm")),
+        ] {
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    let _ = remove_owned_trust_search_files(&next_sidecar_paths);
+                    return Err(RecordingStoreError::new(
+                        "TRUST_SEARCH_SYNC_FAILED",
+                        error.to_string(),
+                    ));
+                }
+            };
+            if metadata.file_type().is_symlink()
+                || metadata_is_reparse_point(&metadata)
+                || !metadata.is_file()
+            {
+                let _ = remove_owned_trust_search_files(&next_sidecar_paths);
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_SYNC_FAILED",
+                    "encrypted search index contained an unowned file",
+                ));
+            }
+            fs::remove_file(&path).map_err(io_error("TRUST_SEARCH_SYNC_FAILED"))?;
+        }
+        fs::rename(&next_path, &search_path).map_err(io_error("TRUST_SEARCH_SYNC_FAILED"))?;
+        self.trust_search_index_generation
+            .store(source_generation, Ordering::Release);
+        Ok(true)
+    }
+
+    #[cfg(feature = "sqlcipher-vault")]
+    fn search_sqlcipher_fts(&self, query: &str) -> Result<Value, RecordingStoreError> {
+        let _search_guard = self.trust_search_lock.try_lock().map_err(|_| {
+            RecordingStoreError::new(
+                "TRUST_SEARCH_INDEX_NOT_READY",
+                "encrypted search index maintenance is still running",
+            )
+        })?;
+        if self.trust_search_source_generation.load(Ordering::Acquire)
+            != self.trust_search_index_generation.load(Ordering::Acquire)
+        {
+            return Err(RecordingStoreError::new(
+                "TRUST_SEARCH_INDEX_NOT_READY",
+                "encrypted search index is waiting for local backfill",
+            ));
+        }
+        let connection = self.open_existing_trust_search_connection()?;
+        let schema_version = connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_INDEX_NOT_READY", error.to_string())
+            })?;
+        if schema_version != TRUST_SEARCH_SCHEMA_VERSION {
+            return Err(RecordingStoreError::new(
+                "TRUST_SEARCH_INDEX_NOT_READY",
+                "encrypted search index requires a local schema backfill",
+            ));
+        }
+        let (quarantined_count, source_truncated) = connection
+            .query_row(
+                "SELECT quarantined_count, source_truncated
+                 FROM candor_trust_meta WHERE id = 1",
+                [],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .map(|(quarantined, truncated)| {
+                (
+                    u64::try_from(quarantined).unwrap_or_default(),
+                    truncated != 0,
+                )
+            })
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_INDEX_NOT_READY", error.to_string())
+            })?;
+
+        let literal_query = fts_literal_query(query)?;
+        let mut statement = connection
+            .prepare(
+                "SELECT recording_id, label, state, chunk_index, channel, row_kind,
+                        substr(snippet(candor_trust_fts, 6, '', '', '...', 32), 1, 1000)
+                 FROM candor_trust_fts
+                 WHERE candor_trust_fts MATCH ?1
+                 ORDER BY rowid
+                 LIMIT ?2",
+            )
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_QUERY_FAILED", error.to_string())
+            })?;
+        let query_limit = i64::try_from(MAX_SEARCH_MATCHES.saturating_add(1)).unwrap_or(i64::MAX);
+        let result_rows = statement
+            .query_map(params![literal_query, query_limit], |row| {
+                Ok(SearchableTextRow {
+                    recording_id: row.get(0)?,
+                    label: row.get(1)?,
+                    state: match row.get::<_, String>(2)?.as_str() {
+                        "recording" => "recording",
+                        "needsRecovery" => "needsRecovery",
+                        "finished" => "finished",
+                        _ => "unknown",
+                    },
+                    chunk_index: u32::try_from(row.get::<_, i64>(3)?).unwrap_or_default(),
+                    channel: row.get(4)?,
+                    row_kind: match row.get::<_, String>(5)?.as_str() {
+                        "transcriptText" => "transcriptText",
+                        "transcriptSegment" => "transcriptSegment",
+                        "originalTranscriptText" => "originalTranscriptText",
+                        "originalTranscriptSegment" => "originalTranscriptSegment",
+                        "cleanedTranscriptSegment" => "cleanedTranscriptSegment",
+                        "notesMarkdown" => "notesMarkdown",
+                        _ => "unknown",
+                    },
+                    text: row.get(6)?,
+                })
+            })
+            .map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_QUERY_FAILED", error.to_string())
+            })?;
+        let mut matches = Vec::new();
+        let mut truncated = source_truncated;
+        let query_lower = query.to_lowercase();
+        for row in result_rows {
+            let row = row.map_err(|error| {
+                RecordingStoreError::new("TRUST_SEARCH_QUERY_FAILED", error.to_string())
+            })?;
+            if matches.len() >= MAX_SEARCH_MATCHES {
+                truncated = true;
+                break;
+            }
+            let offset = row
+                .text
+                .to_lowercase()
+                .find(&query_lower)
+                .unwrap_or_default();
+            matches.push(json!({
+                "recordingId": row.recording_id,
+                "label": row.label,
+                "state": row.state,
+                "chunkIndex": row.chunk_index,
+                "channel": row.channel,
+                "rowKind": row.row_kind,
+                "snippet": snippet(&row.text, offset, query.len()),
+                "rawPathExposed": false
+            }));
+        }
         Ok(json!({
             "rootKind": self.root_kind,
             "rawPathExposed": false,
+            "keyMaterialExposedToRenderer": false,
             "query": query,
             "matchCount": matches.len(),
+            "matchLimit": MAX_SEARCH_MATCHES,
+            "truncated": truncated,
             "quarantinedCount": quarantined_count,
+            "searchBackend": "sqlcipher-fts5",
+            "encryptedIndex": true,
+            "plaintextIndexPersisted": false,
+            "indexReady": true,
+            "indexRebuildScheduled": false,
             "matches": matches
         }))
     }
@@ -2075,34 +5386,44 @@ impl RecordingStore {
         }))
     }
 
-    pub(crate) fn pcm_track_for_transcription(
+    pub(crate) fn pcm_tracks_for_transcription(
         &self,
         recording_id: &str,
         channel: Option<&str>,
-    ) -> Result<PcmTrack, RecordingStoreError> {
+    ) -> Result<Vec<PcmTrack>, RecordingStoreError> {
         validate_id(recording_id)?;
         if let Some(channel) = channel {
             validate_channel(channel)?;
         }
         let dir = self.recording_dir(recording_id)?;
         let manifest = read_manifest(&dir)?;
-        let selected_channel = channel
-            .map(str::to_string)
-            .or_else(|| {
-                manifest
-                    .chunks
-                    .iter()
-                    .find(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
-                    .map(|chunk| chunk.channel.clone())
-            })
-            .ok_or_else(|| {
-                RecordingStoreError::new(
-                    "TRANSCRIPTION_AUDIO_UNAVAILABLE",
-                    "recording has no audio chunks to transcribe",
-                )
-            })?;
+        let selected_channels = transcription_source_channels(&manifest, channel);
+        if selected_channels.is_empty() {
+            let (code, message) =
+                if channel.is_some_and(|channel| channel != COMBINED_TRANSCRIPTION_CHANNEL) {
+                    (
+                        "TRANSCRIPTION_AUDIO_CHANNEL_NOT_FOUND",
+                        "recording has no audio for the selected transcription channel",
+                    )
+                } else {
+                    (
+                        "TRANSCRIPTION_AUDIO_UNAVAILABLE",
+                        "recording has no audio chunks to transcribe",
+                    )
+                };
+            return Err(RecordingStoreError::new(code, message));
+        }
+        if selected_channels.len() > MAX_COMBINED_TRANSCRIPTION_CHANNELS {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPTION_AUDIO_SOURCE_LIMIT",
+                "local transcription accepts at most eight aligned audio sources",
+            ));
+        }
 
-        self.render_pcm_track(&manifest, &dir, &selected_channel)
+        selected_channels
+            .iter()
+            .map(|selected_channel| self.render_pcm_track(&manifest, &dir, selected_channel))
+            .collect()
     }
 
     fn recordings_root(&self) -> PathBuf {
@@ -2144,6 +5465,183 @@ impl RecordingStore {
         encrypt_chunk(&key, recording_id, index, plaintext).map(Some)
     }
 
+    fn append_encrypted_raw_transcript_chunks(
+        &self,
+        recording_id: &str,
+        manifest: &mut RecordingManifest,
+        dir: &Path,
+        raw_text: &str,
+        created_at_ms: u128,
+    ) -> Result<(Vec<u32>, Vec<PathBuf>), RecordingStoreError> {
+        let key = os_key_store::get_or_create_key(&self.root)
+            .map_err(|error| {
+                let code = if error.code == "OS_KEY_STORAGE_UNAVAILABLE" {
+                    "RAW_TRANSCRIPT_ENCRYPTION_UNAVAILABLE"
+                } else {
+                    error.code
+                };
+                RecordingStoreError::new(code, error.message)
+            })?
+            .derive_key(RECORDING_CHUNK_KEY_LABEL);
+        let original_chunk_count = manifest.chunks.len();
+        let mut indices = Vec::new();
+        let mut paths = Vec::new();
+        let result = (|| {
+            for plaintext in raw_text.as_bytes().chunks(MAX_DURABLE_CHUNK_BYTES) {
+                let index = u32::try_from(manifest.chunks.len()).map_err(|_| {
+                    RecordingStoreError::new(
+                        "TRANSCRIPT_RAW_CHUNK_LIMIT_REACHED",
+                        "raw transcript storage exceeded the durable chunk index limit",
+                    )
+                })?;
+                let payload = encrypt_chunk(&key, recording_id, index, plaintext)?;
+                self.ensure_chunk_write_space(payload.len())?;
+                let file_name = raw_transcript_file_name(index);
+                let path = dir.join(&file_name);
+                write_durable_chunk_file(&path, &payload)?;
+                paths.push(path);
+                indices.push(index);
+                manifest.chunks.push(DurableChunk {
+                    index,
+                    kind: DurableChunkKind::RawTranscriptText,
+                    file_name,
+                    channel: "internal".to_string(),
+                    bytes: plaintext.len() as u64,
+                    stored_bytes: payload.len() as u64,
+                    encrypted: true,
+                    cipher: Some("chacha20poly1305".to_string()),
+                    content_sha256: Some(hex_digest(&Sha256::digest(plaintext))),
+                    speaker: None,
+                    confidence: None,
+                    sample_rate_hz: None,
+                    channel_count: None,
+                    bits_per_sample: None,
+                    start_ms: None,
+                    duration_ms: None,
+                    transcription_attempt_id: None,
+                    created_at_ms,
+                });
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            for path in &paths {
+                let _ = fs::remove_file(path);
+            }
+            manifest.chunks.truncate(original_chunk_count);
+            return Err(error);
+        }
+        Ok((indices, paths))
+    }
+
+    fn raw_transcript_preview(
+        &self,
+        manifest: &RecordingManifest,
+        dir: &Path,
+        revision: &TranscriptRevision,
+    ) -> Result<Option<(String, bool)>, RecordingStoreError> {
+        let Some(indices) = revision.raw_text_chunk_indices.as_ref() else {
+            return Ok(None);
+        };
+        if indices.is_empty() {
+            return Ok(Some((String::new(), false)));
+        }
+        let mut bytes = Vec::with_capacity(MAX_DURABLE_CHUNK_BYTES);
+        for index in indices {
+            let chunk = manifest.chunks.get(*index as usize).ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_RAW_CHUNKS_INVALID",
+                    "raw transcript revision referenced a missing durable chunk",
+                )
+            })?;
+            bytes.extend(self.read_chunk_bytes(manifest, chunk, dir)?);
+            let valid_prefix = std::str::from_utf8(&bytes)
+                .map(|_| bytes.len())
+                .unwrap_or_else(|error| error.valid_up_to());
+            if valid_prefix >= MAX_COMPARISON_TEXT_BYTES_PER_SIDE {
+                bytes.truncate(valid_prefix);
+                break;
+            }
+        }
+        let valid_prefix = std::str::from_utf8(&bytes)
+            .map(|_| bytes.len())
+            .unwrap_or_else(|error| error.valid_up_to());
+        bytes.truncate(valid_prefix);
+        let text = String::from_utf8(bytes).map_err(|_| {
+            RecordingStoreError::new(
+                "TRANSCRIPT_RAW_TEXT_INVALID",
+                "raw transcript content was not valid UTF-8",
+            )
+        })?;
+        let (text, truncated_by_limit) = bounded_comparison_text(&text);
+        let truncated =
+            truncated_by_limit || revision.comparison.raw_text_bytes > text.len() as u64;
+        Ok(Some((text, truncated)))
+    }
+
+    fn transcript_revision_segments_preview(
+        &self,
+        manifest: &RecordingManifest,
+        dir: &Path,
+        revision: &TranscriptRevision,
+    ) -> Result<Vec<Value>, RecordingStoreError> {
+        let mut segments = Vec::new();
+        let mut serialized_bytes = 2_usize;
+        for index in &revision.chunk_indices {
+            if segments.len() >= MAX_REVISION_DETAIL_SEGMENTS {
+                break;
+            }
+            let chunk = manifest.chunks.get(*index as usize).ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_REVISION_CHUNKS_INVALID",
+                    "transcript revision referenced a missing segment chunk",
+                )
+            })?;
+            let text =
+                String::from_utf8(self.read_chunk_bytes(manifest, chunk, dir)?).map_err(|_| {
+                    RecordingStoreError::new(
+                        "TRANSCRIPT_SEGMENT_TEXT_INVALID",
+                        "durable transcript segment was not valid UTF-8",
+                    )
+                })?;
+            let start_ms = chunk.start_ms.unwrap_or_default();
+            let duration_ms = chunk.duration_ms.unwrap_or_default();
+            let segment = json!({
+                "index": chunk.index,
+                "kind": chunk_kind_label(&chunk.kind),
+                "channel": chunk.channel.as_str(),
+                "speaker": chunk.speaker.as_deref(),
+                "text": text,
+                "startMs": start_ms,
+                "durationMs": duration_ms,
+                "endMs": start_ms.saturating_add(duration_ms),
+                "confidence": chunk.confidence,
+                "rawPathExposed": false
+            });
+            let segment_bytes = serde_json::to_vec(&segment)
+                .map_err(|error| {
+                    RecordingStoreError::new(
+                        "TRANSCRIPT_REVISION_SERIALIZE_FAILED",
+                        format!("failed to bound transcript revision segment: {error}"),
+                    )
+                })?
+                .len()
+                .saturating_add(1);
+            if serialized_bytes.saturating_add(segment_bytes) > MAX_REVISION_DETAIL_SEGMENT_BYTES {
+                break;
+            }
+            serialized_bytes = serialized_bytes.saturating_add(segment_bytes);
+            segments.push(segment);
+        }
+        segments.sort_by_key(|segment| {
+            (
+                segment.get("startMs").and_then(Value::as_u64).unwrap_or(0),
+                segment.get("index").and_then(Value::as_u64).unwrap_or(0),
+            )
+        });
+        Ok(segments)
+    }
+
     fn manifest_from_chunks(
         &self,
         recording_id: &str,
@@ -2151,7 +5649,7 @@ impl RecordingStore {
     ) -> Result<RecordingManifest, RecordingStoreError> {
         let now = now_ms();
         Ok(RecordingManifest {
-            schema_version: 2,
+            schema_version: CURRENT_MANIFEST_SCHEMA_VERSION,
             recording_id: recording_id.to_string(),
             label: None,
             state: RecordingState::NeedsRecovery,
@@ -2159,6 +5657,11 @@ impl RecordingStore {
             updated_at_ms: now,
             chunks: self.scan_chunks(recording_id, dir)?,
             privacy_events: Vec::new(),
+            transcript_revisions: Vec::new(),
+            current_transcript_revision_id: None,
+            current_cleaned_revision_id: None,
+            processing_receipts: Vec::new(),
+            processing_profile: None,
         })
     }
 
@@ -2181,12 +5684,28 @@ impl RecordingStore {
                 continue;
             }
             let encrypted = file_name.ends_with(ENCRYPTED_CHUNK_EXT);
+            let raw_transcript = file_name.contains(RAW_TRANSCRIPT_FILE_MARKER);
+            if raw_transcript && !encrypted {
+                return Err(RecordingStoreError::new(
+                    "TRANSCRIPT_RAW_ENCRYPTION_INVALID",
+                    "raw transcript recovery found an unencrypted internal chunk",
+                ));
+            }
             let index = chunk_index_from_name(&file_name).ok_or_else(|| {
                 RecordingStoreError::new(
                     "RECORDING_CHUNK_NAME_INVALID",
                     "recording chunk file name did not contain a valid index",
                 )
             })?;
+            let transcription_attempt_id = transcription_attempt_id_from_chunk_name(&file_name);
+            if file_name.contains(TRANSCRIPTION_ATTEMPT_FILE_MARKER)
+                && transcription_attempt_id.is_none()
+            {
+                return Err(RecordingStoreError::new(
+                    "TRANSCRIPTION_ATTEMPT_ID_INVALID",
+                    "transcription attempt chunk name was invalid",
+                ));
+            }
             let metadata = entry
                 .metadata()
                 .map_err(io_error("RECORDING_STORE_READ_FAILED"))?;
@@ -2201,13 +5720,20 @@ impl RecordingStore {
             };
             chunks.push(DurableChunk {
                 index,
-                kind: DurableChunkKind::TranscriptText,
+                kind: if raw_transcript {
+                    DurableChunkKind::RawTranscriptText
+                } else if transcription_attempt_id.is_some() {
+                    DurableChunkKind::TranscriptSegment
+                } else {
+                    DurableChunkKind::TranscriptText
+                },
                 file_name,
                 channel: "unknown".to_string(),
                 bytes,
                 stored_bytes,
                 encrypted,
                 cipher: encrypted.then(|| "chacha20poly1305".to_string()),
+                content_sha256: None,
                 speaker: None,
                 confidence: None,
                 sample_rate_hz: None,
@@ -2215,6 +5741,7 @@ impl RecordingStore {
                 bits_per_sample: None,
                 start_ms: None,
                 duration_ms: None,
+                transcription_attempt_id,
                 created_at_ms: now_ms(),
             });
         }
@@ -2337,6 +5864,95 @@ impl RecordingStore {
         Ok(RecordingManifestCollection { items, quarantined })
     }
 
+    fn collect_search_manifests_bounded(
+        &self,
+        recording_limit: usize,
+        chunk_descriptor_limit: usize,
+        manifest_bytes_limit: u64,
+    ) -> Result<(RecordingManifestCollection, bool), RecordingStoreError> {
+        let recordings_root = self.recordings_root();
+        fs::create_dir_all(&recordings_root).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
+        let mut items = Vec::new();
+        let mut quarantined = Vec::new();
+        let mut considered = 0_usize;
+        let mut retained_chunk_descriptors = 0_usize;
+        let mut retained_manifest_bytes = 0_u64;
+        let mut truncated = false;
+        let mut entries = fs::read_dir(&recordings_root)
+            .map_err(io_error("RECORDING_STORE_READ_FAILED"))?
+            .filter_map(Result::ok)
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            if !entry.path().is_dir() {
+                continue;
+            }
+            let id = entry.file_name().to_string_lossy().to_string();
+            if validate_id(&id).is_err() {
+                continue;
+            }
+            if considered >= recording_limit {
+                truncated = true;
+                break;
+            }
+            considered = considered.saturating_add(1);
+            match read_manifest(&entry.path()) {
+                Ok(manifest) => {
+                    let manifest_bytes = serde_json::to_vec(&manifest)
+                        .map_err(|error| {
+                            RecordingStoreError::new(
+                                "RECORDING_MANIFEST_SERIALIZE_FAILED",
+                                error.to_string(),
+                            )
+                        })?
+                        .len() as u64;
+                    if manifest.chunks.len()
+                        > chunk_descriptor_limit.saturating_sub(retained_chunk_descriptors)
+                        || manifest_bytes
+                            > manifest_bytes_limit.saturating_sub(retained_manifest_bytes)
+                    {
+                        truncated = true;
+                        continue;
+                    }
+                    retained_chunk_descriptors =
+                        retained_chunk_descriptors.saturating_add(manifest.chunks.len());
+                    retained_manifest_bytes =
+                        retained_manifest_bytes.saturating_add(manifest_bytes);
+                    items.push((manifest, entry.path()));
+                }
+                Err(error) => quarantined.push(self.quarantine_summary(&id, error.code)),
+            }
+        }
+        Ok((
+            RecordingManifestCollection { items, quarantined },
+            truncated,
+        ))
+    }
+
+    fn collect_search_manifests_read_only_bounded(
+        &self,
+        recording_limit: usize,
+        chunk_descriptor_limit: usize,
+        manifest_bytes_limit: u64,
+    ) -> Result<(RecordingManifestCollection, bool, u64), RecordingStoreError> {
+        let bounded = self.collect_recording_manifests_read_only_bounded(
+            recording_limit,
+            MAX_AUTOMATION_SEARCH_DIRECTORY_ENTRIES,
+            chunk_descriptor_limit,
+            manifest_bytes_limit,
+            recording_limit.min(MAX_AUTOMATION_QUARANTINE_DETAILS),
+        )?;
+        let _bounded_scan_metrics = (
+            bounded.inspected_directory_entries,
+            bounded.manifest_bytes_read,
+        );
+        Ok((
+            bounded.collection,
+            bounded.source_truncated,
+            bounded.quarantined_count,
+        ))
+    }
+
     fn all_recording_manifests(
         &self,
     ) -> Result<Vec<(RecordingManifest, PathBuf)>, RecordingStoreError> {
@@ -2359,6 +5975,7 @@ impl RecordingStore {
         event: PrivacyEvent,
     ) -> Result<(), RecordingStoreError> {
         validate_id(recording_id)?;
+        let _mutation_guard = self.manifest_mutation_guard();
         let dir = self.recording_dir(recording_id)?;
         let mut manifest = read_manifest(&dir)?;
         manifest.schema_version = manifest.schema_version.max(CURRENT_MANIFEST_SCHEMA_VERSION);
@@ -2373,7 +5990,13 @@ impl RecordingStore {
         dir: &Path,
     ) -> Result<Vec<Value>, RecordingStoreError> {
         let mut chunks = Vec::new();
+        let committed_transcript_indices = committed_transcript_chunk_indices(manifest);
         for chunk in &manifest.chunks {
+            if chunk.kind == DurableChunkKind::RawTranscriptText
+                || is_uncommitted_attempt_chunk(chunk, &committed_transcript_indices)
+            {
+                continue;
+            }
             let mut value = json!({
                 "index": chunk.index,
                 "kind": chunk_kind_label(&chunk.kind),
@@ -2464,12 +6087,40 @@ impl RecordingStore {
         manifest: &RecordingManifest,
         dir: &Path,
     ) -> Result<Vec<Value>, RecordingStoreError> {
+        self.transcript_segments_with_key_access(manifest, dir, true)
+    }
+
+    fn transcript_segments_with_key_access(
+        &self,
+        manifest: &RecordingManifest,
+        dir: &Path,
+        create_key_if_missing: bool,
+    ) -> Result<Vec<Value>, RecordingStoreError> {
+        let selected_indices = current_transcript_chunk_indices(manifest);
+        self.transcript_segments_for_indices(
+            manifest,
+            dir,
+            Some(&selected_indices),
+            create_key_if_missing,
+        )
+    }
+
+    fn transcript_segments_for_indices(
+        &self,
+        manifest: &RecordingManifest,
+        dir: &Path,
+        selected_indices: Option<&HashSet<u32>>,
+        create_key_if_missing: bool,
+    ) -> Result<Vec<Value>, RecordingStoreError> {
         let mut segments = Vec::new();
         for chunk in &manifest.chunks {
-            if chunk.kind != DurableChunkKind::TranscriptSegment {
+            if chunk.kind != DurableChunkKind::TranscriptSegment
+                || selected_indices.is_some_and(|indices| !indices.contains(&chunk.index))
+            {
                 continue;
             }
-            let bytes = self.read_chunk_bytes(manifest, chunk, dir)?;
+            let bytes =
+                self.read_chunk_bytes_with_key_access(manifest, chunk, dir, create_key_if_missing)?;
             let text = String::from_utf8(bytes).map_err(|_| {
                 RecordingStoreError::new(
                     "TRANSCRIPT_SEGMENT_TEXT_INVALID",
@@ -2506,15 +6157,56 @@ impl RecordingStore {
         chunk: &DurableChunk,
         dir: &Path,
     ) -> Result<Vec<u8>, RecordingStoreError> {
+        self.read_chunk_bytes_with_key_access(manifest, chunk, dir, true)
+    }
+
+    fn read_chunk_bytes_with_key_access(
+        &self,
+        manifest: &RecordingManifest,
+        chunk: &DurableChunk,
+        dir: &Path,
+        create_key_if_missing: bool,
+    ) -> Result<Vec<u8>, RecordingStoreError> {
         let path = dir.join(&chunk.file_name);
-        if chunk.encrypted {
-            let key = os_key_store::get_or_create_key(&self.root)
-                .map_err(|err| RecordingStoreError::new(err.code, err.message))?
-                .derive_key(RECORDING_CHUNK_KEY_LABEL);
-            decrypt_chunk_bytes(&key, &manifest.recording_id, chunk.index, &path)
+        let (plaintext, stored_bytes) = if chunk.encrypted {
+            let key = if create_key_if_missing {
+                os_key_store::get_or_create_key(&self.root)
+            } else {
+                os_key_store::get_existing_key(&self.root)
+            }
+            .map_err(|err| RecordingStoreError::new(err.code, err.message))?
+            .derive_key(RECORDING_CHUNK_KEY_LABEL);
+            decrypt_chunk_bytes(&key, &manifest.recording_id, chunk.index, &path)?
         } else {
-            fs::read(path).map_err(io_error("RECORDING_CHUNK_READ_FAILED"))
+            let bytes = read_owned_regular_file_bounded(
+                &path,
+                MAX_DURABLE_CHUNK_BYTES as u64,
+                "RECORDING_CHUNK_READ_FAILED",
+                "RECORDING_CHUNK_TOO_LARGE",
+                "durable chunk must be an owned regular file",
+                "durable chunk exceeded its fixed byte limit",
+            )?;
+            let stored_bytes = bytes.len() as u64;
+            (bytes, stored_bytes)
+        };
+        if (chunk.stored_bytes != 0 && chunk.stored_bytes != stored_bytes)
+            || chunk.bytes != plaintext.len() as u64
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_CHUNK_SIZE_MISMATCH",
+                "durable chunk bytes did not match committed metadata",
+            ));
         }
+        if let Some(expected) = chunk.content_sha256.as_deref() {
+            let actual = hex_digest(&Sha256::digest(&plaintext));
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err(RecordingStoreError::new(
+                    "RECORDING_CHUNK_INTEGRITY_FAILED",
+                    "durable chunk content did not match its committed integrity hash",
+                ));
+            }
+        }
+        Ok(plaintext)
     }
 
     fn render_wav_track(
@@ -2656,6 +6348,111 @@ fn page_bounds(offset: u64, limit: u64) -> Result<(usize, usize), RecordingStore
     Ok((offset, limit))
 }
 
+fn recording_page_value(
+    collection: RecordingManifestCollection,
+    offset: usize,
+    limit: usize,
+    root_kind: &'static str,
+) -> Value {
+    let mut recordings = collection
+        .items
+        .into_iter()
+        .map(|(manifest, _dir)| recording_summary(&manifest, root_kind))
+        .collect::<Vec<_>>();
+    recordings.sort_by_key(|value| {
+        std::cmp::Reverse(
+            value
+                .get("updatedAtMs")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
+        )
+    });
+    let total_count = recordings.len();
+    let page = recordings
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .collect::<Vec<_>>();
+    json!({
+        "rootKind": root_kind,
+        "rawPathExposed": false,
+        "offset": offset,
+        "limit": limit,
+        "totalCount": total_count,
+        "hasMore": offset.saturating_add(page.len()) < total_count,
+        "recordings": page,
+        "quarantinedCount": collection.quarantined.len(),
+        "quarantinedRecordings": collection.quarantined
+    })
+}
+
+fn automation_recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> Value {
+    let committed_transcript_indices = committed_transcript_chunk_indices(manifest);
+    let mut storage_chunk_count = 0_usize;
+    let mut accounted_chunk_count = 0_usize;
+    let mut encrypted_at_rest = true;
+    let mut transcript_segment_count = 0_usize;
+    let mut audio_chunk_count = 0_usize;
+    let mut notes_chunk_count = 0_usize;
+    let mut audio_duration_ms = 0_u64;
+    let mut stored_bytes = 0_u64;
+
+    for chunk in &manifest.chunks {
+        if is_uncommitted_attempt_chunk(chunk, &committed_transcript_indices) {
+            continue;
+        }
+        storage_chunk_count = storage_chunk_count.saturating_add(1);
+        encrypted_at_rest &= chunk.encrypted;
+        stored_bytes = stored_bytes.saturating_add(if chunk.stored_bytes == 0 {
+            chunk.bytes
+        } else {
+            chunk.stored_bytes
+        });
+        if chunk.kind == DurableChunkKind::RawTranscriptText {
+            continue;
+        }
+        accounted_chunk_count = accounted_chunk_count.saturating_add(1);
+        match chunk.kind {
+            DurableChunkKind::TranscriptSegment => {
+                transcript_segment_count = transcript_segment_count.saturating_add(1);
+            }
+            DurableChunkKind::AudioPcm16le => {
+                audio_chunk_count = audio_chunk_count.saturating_add(1);
+                audio_duration_ms = audio_duration_ms.max(
+                    chunk
+                        .start_ms
+                        .unwrap_or_default()
+                        .saturating_add(chunk.duration_ms.unwrap_or_default()),
+                );
+            }
+            DurableChunkKind::NotesMarkdown => {
+                notes_chunk_count = notes_chunk_count.saturating_add(1);
+            }
+            DurableChunkKind::TranscriptText | DurableChunkKind::RawTranscriptText => {}
+        }
+    }
+
+    json!({
+        "recordingId": manifest.recording_id.as_str(),
+        "label": manifest.label.as_deref().map(|label| {
+            truncate_utf8(label, MAX_AUTOMATION_LABEL_RESPONSE_BYTES)
+        }),
+        "state": recording_state_label(&manifest.state),
+        "rootKind": root_kind,
+        "rawPathExposed": false,
+        "keyMaterialExposedToRenderer": false,
+        "encryptedAtRest": storage_chunk_count > 0 && encrypted_at_rest,
+        "chunkCount": accounted_chunk_count,
+        "transcriptSegmentCount": transcript_segment_count,
+        "audioChunkCount": audio_chunk_count,
+        "notesChunkCount": notes_chunk_count,
+        "audioDurationMs": audio_duration_ms,
+        "storedBytes": stored_bytes,
+        "createdAtMs": manifest.created_at_ms,
+        "updatedAtMs": manifest.updated_at_ms
+    })
+}
+
 fn export_render_error(message: String) -> RecordingStoreError {
     RecordingStoreError::new("EXPORT_RENDER_FAILED", message)
 }
@@ -2676,15 +6473,100 @@ fn chunk_kind_label(kind: &DurableChunkKind) -> &'static str {
     match kind {
         DurableChunkKind::TranscriptText => "transcriptText",
         DurableChunkKind::TranscriptSegment => "transcriptSegment",
+        DurableChunkKind::RawTranscriptText => "rawTranscriptText",
         DurableChunkKind::AudioPcm16le => "audioPcm16le",
         DurableChunkKind::NotesMarkdown => "notesMarkdown",
     }
 }
 
-fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> Value {
-    let total_bytes: u64 = manifest.chunks.iter().map(|chunk| chunk.bytes).sum();
-    let stored_bytes: u64 = manifest
+fn public_transcript_revision(revision: &TranscriptRevision) -> Value {
+    let kind = effective_revision_kind(revision);
+    json!({
+        "revisionId": revision.revision_id,
+        "version": revision.version,
+        "source": revision.source,
+        "kind": kind.label(),
+        "parentRevisionId": revision.parent_revision_id,
+        "engine": revision.engine,
+        "modelId": revision.model_id,
+        "modelSha256": revision.model_sha256,
+        "comparison": revision.comparison,
+        "rawComparisonAvailable": revision.raw_text_chunk_indices.is_some(),
+        "createdAtMs": revision.created_at_ms
+    })
+}
+
+fn effective_revision_kind(revision: &TranscriptRevision) -> TranscriptRevisionKind {
+    if revision.kind != TranscriptRevisionKind::Legacy {
+        return revision.kind;
+    }
+    match revision.source.as_str() {
+        "review" => TranscriptRevisionKind::Normalized,
+        "initial" | "reprocess" | "import" => TranscriptRevisionKind::RawAsr,
+        _ => TranscriptRevisionKind::Legacy,
+    }
+}
+
+fn committed_transcript_chunk_indices(manifest: &RecordingManifest) -> HashSet<u32> {
+    manifest
+        .transcript_revisions
+        .iter()
+        .flat_map(|revision| revision.chunk_indices.iter().copied())
+        .collect()
+}
+
+fn current_transcript_chunk_indices(manifest: &RecordingManifest) -> HashSet<u32> {
+    if let Some(revision) =
+        manifest
+            .current_transcript_revision_id
+            .as_deref()
+            .and_then(|revision_id| {
+                manifest
+                    .transcript_revisions
+                    .iter()
+                    .find(|revision| revision.revision_id == revision_id)
+            })
+    {
+        return revision.chunk_indices.iter().copied().collect();
+    }
+
+    // Legacy/manual transcript segments were committed before attempt
+    // membership existed. Core-owned attempt segments must remain invisible
+    // until a successful immutable revision references them.
+    manifest
         .chunks
+        .iter()
+        .filter(|chunk| {
+            chunk.kind == DurableChunkKind::TranscriptSegment
+                && chunk.transcription_attempt_id.is_none()
+        })
+        .map(|chunk| chunk.index)
+        .collect()
+}
+
+fn is_uncommitted_attempt_chunk(
+    chunk: &DurableChunk,
+    committed_transcript_indices: &HashSet<u32>,
+) -> bool {
+    chunk.kind == DurableChunkKind::TranscriptSegment
+        && chunk.transcription_attempt_id.is_some()
+        && !committed_transcript_indices.contains(&chunk.index)
+}
+
+fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> Value {
+    let committed_transcript_indices = committed_transcript_chunk_indices(manifest);
+    let storage_chunks = manifest
+        .chunks
+        .iter()
+        .filter(|chunk| !is_uncommitted_attempt_chunk(chunk, &committed_transcript_indices))
+        .collect::<Vec<_>>();
+    let accounted_chunks = storage_chunks
+        .iter()
+        .copied()
+        .filter(|chunk| chunk.kind != DurableChunkKind::RawTranscriptText)
+        .collect::<Vec<_>>();
+    let total_bytes: u64 = storage_chunks.iter().map(|chunk| chunk.bytes).sum();
+    let stored_bytes: u64 = storage_chunks
         .iter()
         .map(|chunk| {
             if chunk.stored_bytes == 0 {
@@ -2694,30 +6576,25 @@ fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> V
             }
         })
         .sum();
-    let encrypted_chunks = manifest
-        .chunks
+    let encrypted_chunks = accounted_chunks
         .iter()
         .filter(|chunk| chunk.encrypted)
         .count();
     let encrypted_at_rest =
-        !manifest.chunks.is_empty() && encrypted_chunks == manifest.chunks.len();
-    let text_chunk_count = manifest
-        .chunks
+        !storage_chunks.is_empty() && storage_chunks.iter().all(|chunk| chunk.encrypted);
+    let text_chunk_count = accounted_chunks
         .iter()
         .filter(|chunk| chunk.kind == DurableChunkKind::TranscriptText)
         .count();
-    let transcript_segment_count = manifest
-        .chunks
+    let transcript_segment_count = accounted_chunks
         .iter()
         .filter(|chunk| chunk.kind == DurableChunkKind::TranscriptSegment)
         .count();
-    let audio_chunk_count = manifest
-        .chunks
+    let audio_chunk_count = accounted_chunks
         .iter()
         .filter(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
         .count();
-    let note_chunks = manifest
-        .chunks
+    let note_chunks = accounted_chunks
         .iter()
         .filter(|chunk| chunk.kind == DurableChunkKind::NotesMarkdown)
         .collect::<Vec<_>>();
@@ -2737,8 +6614,7 @@ fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> V
         .max_by_key(|chunk| chunk.index)
         .map(|chunk| chunk.created_at_ms)
         .unwrap_or_default();
-    let audio_duration_ms = manifest
-        .chunks
+    let audio_duration_ms = accounted_chunks
         .iter()
         .filter(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
         .filter_map(|chunk| match (chunk.start_ms, chunk.duration_ms) {
@@ -2747,6 +6623,23 @@ fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> V
         })
         .max()
         .unwrap_or_default();
+    let processing_profile = manifest.processing_profile.as_ref().map(|profile| json!({
+        "schemaVersion": profile.schema_version,
+        "profileId": profile.profile_id,
+        "profileVersion": profile.profile_version,
+        "modelId": profile.model_id,
+        "speechModelId": profile.speech_model_id,
+        "cleanupModelId": profile.cleanup_model_id,
+        "summaryModelId": profile.summary_model_id,
+        "language": profile.language,
+        "transcriptionLanguage": profile.transcription_language,
+        "dictionaryIds": profile.dictionary_ids,
+        "replacementRuleSetId": profile.replacement_rule_set.as_ref().map(|rule_set| rule_set.id.as_str()),
+        "replacementRuleSetVersion": profile.replacement_rule_set.as_ref().map(|rule_set| rule_set.version),
+        "recapTemplateBound": profile.recap_template.is_some(),
+        "liveTranscription": profile.live_transcription,
+        "immutableAtCaptureStart": true
+    }));
     json!({
         "recordingId": manifest.recording_id.as_str(),
         "label": manifest.label.as_deref(),
@@ -2755,9 +6648,13 @@ fn recording_summary(manifest: &RecordingManifest, root_kind: &'static str) -> V
         "rawPathExposed": false,
         "encryptedAtRest": encrypted_at_rest,
         "encryptedChunkCount": encrypted_chunks,
-        "chunkCount": manifest.chunks.len(),
+        "chunkCount": accounted_chunks.len(),
         "textChunkCount": text_chunk_count,
         "transcriptSegmentCount": transcript_segment_count,
+        "transcriptRevisionCount": manifest.transcript_revisions.len(),
+        "currentTranscriptRevisionId": manifest.current_transcript_revision_id.as_deref(),
+        "processingReceiptCount": manifest.processing_receipts.len(),
+        "processingProfile": processing_profile,
         "audioChunkCount": audio_chunk_count,
         "notesChunkCount": notes_chunk_count,
         "notesBytes": notes_bytes,
@@ -2944,6 +6841,19 @@ fn decode_audio_base64(value: &str) -> Result<Vec<u8>, RecordingStoreError> {
 }
 
 fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
+    let mut remaining_bytes = MAX_MANIFEST_BYTES.saturating_mul(3);
+    read_manifest_with_budget(dir, &mut remaining_bytes)
+}
+
+fn read_manifest_with_budget(
+    dir: &Path,
+    remaining_bytes: &mut u64,
+) -> Result<RecordingManifest, RecordingStoreError> {
+    ensure_owned_directory(
+        dir,
+        "RECORDING_MANIFEST_READ_FAILED",
+        "recording directory must be an owned directory",
+    )?;
     let candidates = [
         dir.join(MANIFEST_FILE),
         dir.join("manifest.json.bak"),
@@ -2951,10 +6861,49 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
     ];
     let mut last_error = None;
     for path in candidates {
-        if !path.exists() {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                last_error = Some(RecordingStoreError::new(
+                    "RECORDING_MANIFEST_READ_FAILED",
+                    error.to_string(),
+                ));
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+            || !metadata.is_file()
+        {
+            last_error = Some(RecordingStoreError::new(
+                "RECORDING_MANIFEST_READ_FAILED",
+                "recording manifest must be an owned regular file",
+            ));
             continue;
         }
-        match fs::read(&path) {
+        if metadata.len() > MAX_MANIFEST_BYTES {
+            last_error = Some(RecordingStoreError::new(
+                "RECORDING_MANIFEST_TOO_LARGE",
+                "recording manifest exceeded its local safety limit",
+            ));
+            continue;
+        }
+        if metadata.len() > *remaining_bytes {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_BUDGET_EXCEEDED",
+                "recording manifest scan exhausted its aggregate byte limit",
+            ));
+        }
+        *remaining_bytes = remaining_bytes.saturating_sub(metadata.len());
+        match read_owned_regular_file_bounded(
+            &path,
+            metadata.len(),
+            "RECORDING_MANIFEST_READ_FAILED",
+            "RECORDING_MANIFEST_TOO_LARGE",
+            "recording manifest must be an owned regular file",
+            "recording manifest exceeded its local safety limit",
+        ) {
             Ok(bytes) => match parse_and_validate_manifest(&bytes, dir) {
                 Ok(manifest) => return Ok(manifest),
                 Err(error)
@@ -2971,10 +6920,7 @@ fn read_manifest(dir: &Path) -> Result<RecordingManifest, RecordingStoreError> {
                 }
             },
             Err(err) => {
-                last_error = Some(RecordingStoreError::new(
-                    "RECORDING_MANIFEST_READ_FAILED",
-                    err.to_string(),
-                ));
+                last_error = Some(err);
             }
         }
     }
@@ -3034,6 +6980,11 @@ fn validate_manifest_structure(
     manifest: &RecordingManifest,
     dir: &Path,
 ) -> Result<(), RecordingStoreError> {
+    ensure_owned_directory(
+        dir,
+        "RECORDING_MANIFEST_READ_FAILED",
+        "recording directory must be an owned directory",
+    )?;
     let directory_id = dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -3047,6 +6998,19 @@ fn validate_manifest_structure(
         return Err(RecordingStoreError::new(
             "RECORDING_MANIFEST_ID_MISMATCH",
             "recording manifest identifier did not match its directory",
+        ));
+    }
+
+    if let Some(profile) = &manifest.processing_profile {
+        profile
+            .validate()
+            .map_err(|error| RecordingStoreError::new(error.code, error.message))?;
+    }
+
+    if manifest.chunks.len() > MAX_REVISION_CHUNK_INDICES {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_CHUNK_LIMIT_INVALID",
+            "recording manifest exceeded the durable chunk descriptor safety limit",
         ));
     }
 
@@ -3067,10 +7031,368 @@ fn validate_manifest_structure(
                 "recording manifest chunk name was not a local file name",
             ));
         }
-        if !dir.join(file_name).is_file() {
+        if chunk.bytes > MAX_DURABLE_CHUNK_BYTES as u64
+            || chunk.stored_bytes
+                > if chunk.encrypted {
+                    MAX_ENCRYPTED_DURABLE_CHUNK_BYTES
+                } else {
+                    MAX_DURABLE_CHUNK_BYTES as u64
+                }
+        {
             return Err(RecordingStoreError::new(
-                "RECORDING_MANIFEST_CHUNK_MISSING",
-                "recording manifest referenced a missing chunk",
+                "RECORDING_MANIFEST_CHUNK_SIZE_INVALID",
+                "recording manifest chunk metadata exceeded its fixed byte limit",
+            ));
+        }
+        let file_attempt_id = transcription_attempt_id_from_chunk_name(&chunk.file_name);
+        let file_is_raw_transcript = chunk.file_name.contains(RAW_TRANSCRIPT_FILE_MARKER);
+        let chunk_is_raw_transcript = chunk.kind == DurableChunkKind::RawTranscriptText;
+        if file_is_raw_transcript != chunk_is_raw_transcript
+            || (chunk_is_raw_transcript
+                && (!chunk.encrypted
+                    || chunk.cipher.as_deref() != Some("chacha20poly1305")
+                    || manifest.schema_version < 4))
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_RAW_CHUNK_INVALID",
+                "raw transcript chunk metadata did not match its encrypted internal file",
+            ));
+        }
+        if (chunk.file_name.contains(TRANSCRIPTION_ATTEMPT_FILE_MARKER)
+            && file_attempt_id.is_none())
+            || file_attempt_id.as_deref() != chunk.transcription_attempt_id.as_deref()
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPTION_ATTEMPT_CHUNK_INVALID",
+                "transcription attempt membership did not match its durable chunk name",
+            ));
+        }
+        let chunk_path = dir.join(file_name);
+        let chunk_metadata = fs::symlink_metadata(&chunk_path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                RecordingStoreError::new(
+                    "RECORDING_MANIFEST_CHUNK_MISSING",
+                    "recording manifest referenced a missing chunk",
+                )
+            } else {
+                RecordingStoreError::new("RECORDING_MANIFEST_CHUNK_READ_FAILED", error.to_string())
+            }
+        })?;
+        if chunk_metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&chunk_metadata)
+            || !chunk_metadata.is_file()
+        {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_NOT_OWNED",
+                "recording manifest referenced a chunk that was not an owned regular file",
+            ));
+        }
+        let maximum_stored_bytes = if chunk.encrypted {
+            MAX_ENCRYPTED_DURABLE_CHUNK_BYTES
+        } else {
+            MAX_DURABLE_CHUNK_BYTES as u64
+        };
+        if chunk_metadata.len() > maximum_stored_bytes {
+            return Err(RecordingStoreError::new(
+                "RECORDING_MANIFEST_CHUNK_SIZE_INVALID",
+                "recording manifest chunk file exceeded its fixed byte limit",
+            ));
+        }
+        if let Some(attempt_id) = chunk.transcription_attempt_id.as_deref() {
+            validate_history_id(attempt_id, "TRANSCRIPTION_ATTEMPT_ID_INVALID")?;
+            if chunk.kind != DurableChunkKind::TranscriptSegment {
+                return Err(RecordingStoreError::new(
+                    "TRANSCRIPTION_ATTEMPT_CHUNK_INVALID",
+                    "only structured transcript segments can belong to a transcription attempt",
+                ));
+            }
+        }
+    }
+    if manifest.transcript_revisions.len() > MAX_TRANSCRIPT_REVISIONS {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_REVISION_LIMIT_INVALID",
+            "recording manifest exceeded the transcript revision safety limit",
+        ));
+    }
+    let mut revision_ids = HashSet::new();
+    let mut owned_raw_chunk_indices = HashSet::new();
+    for (offset, revision) in manifest.transcript_revisions.iter().enumerate() {
+        if revision.version != (offset as u32).saturating_add(1)
+            || !revision_ids.insert(revision.revision_id.as_str())
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_SEQUENCE_INVALID",
+                "transcript revisions must have unique sequential identities",
+            ));
+        }
+        validate_history_id(&revision.revision_id, "TRANSCRIPT_REVISION_ID_INVALID")?;
+        if !matches!(
+            revision.source.as_str(),
+            "initial" | "reprocess" | "import" | "review" | "ai-cleanup"
+        ) {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_SOURCE_INVALID",
+                "transcript revision source was not recognized",
+            ));
+        }
+        if manifest.schema_version < 5 && revision.kind != TranscriptRevisionKind::Legacy {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_KIND_SCHEMA_INVALID",
+                "legacy manifest schema cannot contain typed transcript revisions",
+            ));
+        }
+        let effective_kind = effective_revision_kind(revision);
+        if (effective_kind == TranscriptRevisionKind::AiCleaned)
+            != (revision.source == "ai-cleanup")
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_KIND_INVALID",
+                "AI-cleaned transcript kind and source were inconsistent",
+            ));
+        }
+        if let Some(parent_revision_id) = revision.parent_revision_id.as_deref() {
+            validate_history_id(parent_revision_id, "TRANSCRIPT_PARENT_REVISION_ID_INVALID")?;
+            if parent_revision_id == revision.revision_id
+                || !revision_ids.contains(parent_revision_id)
+            {
+                return Err(RecordingStoreError::new(
+                    "TRANSCRIPT_PARENT_REVISION_INVALID",
+                    "transcript parent must reference an earlier immutable revision",
+                ));
+            }
+        } else if effective_kind == TranscriptRevisionKind::AiCleaned {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_PARENT_REVISION_INVALID",
+                "AI-cleaned transcript omitted its immutable input revision",
+            ));
+        }
+        validate_processing_identity(
+            &revision.engine,
+            revision.model_id.as_deref(),
+            revision.model_sha256.as_deref(),
+        )?;
+        validate_transcript_comparison_metadata(&revision.comparison)?;
+        validate_revision_chunk_indices(manifest, &revision.chunk_indices)?;
+        validate_revision_attempt_membership(manifest, &revision.chunk_indices)?;
+        if manifest.schema_version < 4 && revision.raw_text_chunk_indices.is_some() {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_RAW_SCHEMA_INVALID",
+                "legacy manifest schema cannot reference raw transcript chunks",
+            ));
+        }
+        if let Some(indices) = revision.raw_text_chunk_indices.as_deref() {
+            validate_raw_revision_chunk_indices(
+                manifest,
+                indices,
+                &revision.comparison,
+                &mut owned_raw_chunk_indices,
+            )?;
+        }
+    }
+    if manifest.state != RecordingState::NeedsRecovery
+        && manifest.chunks.iter().any(|chunk| {
+            chunk.kind == DurableChunkKind::RawTranscriptText
+                && !owned_raw_chunk_indices.contains(&chunk.index)
+        })
+    {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_RAW_CHUNK_ORPHANED",
+            "recording manifest contained an unowned raw transcript chunk",
+        ));
+    }
+    if manifest
+        .current_transcript_revision_id
+        .as_deref()
+        .is_some_and(|revision_id| !revision_ids.contains(revision_id))
+    {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_CURRENT_REVISION_INVALID",
+            "current transcript revision did not reference immutable history",
+        ));
+    }
+    if manifest
+        .current_transcript_revision_id
+        .as_deref()
+        .is_some_and(|revision_id| {
+            manifest
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision_id == revision_id)
+                .is_some_and(|revision| {
+                    effective_revision_kind(revision) == TranscriptRevisionKind::AiCleaned
+                })
+        })
+    {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_CURRENT_REVISION_KIND_INVALID",
+            "AI-cleaned text cannot be the selected evidentiary transcript",
+        ));
+    }
+    if let Some(cleaned_revision_id) = manifest.current_cleaned_revision_id.as_deref() {
+        let cleaned = manifest
+            .transcript_revisions
+            .iter()
+            .find(|revision| revision.revision_id == cleaned_revision_id)
+            .ok_or_else(|| {
+                RecordingStoreError::new(
+                    "TRANSCRIPT_CURRENT_CLEANED_REVISION_INVALID",
+                    "selected cleaned transcript did not reference immutable history",
+                )
+            })?;
+        if effective_revision_kind(cleaned) != TranscriptRevisionKind::AiCleaned {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_CURRENT_CLEANED_REVISION_INVALID",
+                "selected cleaned transcript did not reference AI-cleaned text",
+            ));
+        }
+    }
+    if manifest.processing_receipts.len() > MAX_PROCESSING_RECEIPTS {
+        return Err(RecordingStoreError::new(
+            "PROCESSING_RECEIPT_LIMIT_INVALID",
+            "recording manifest exceeded the processing receipt safety limit",
+        ));
+    }
+    let mut receipt_ids = HashSet::new();
+    for (offset, receipt) in manifest.processing_receipts.iter().enumerate() {
+        if receipt.attempt != (offset as u32).saturating_add(1)
+            || !receipt_ids.insert(receipt.receipt_id.as_str())
+        {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_SEQUENCE_INVALID",
+                "processing receipts must have unique sequential identities",
+            ));
+        }
+        validate_history_id(&receipt.receipt_id, "PROCESSING_RECEIPT_ID_INVALID")?;
+        if !matches!(
+            receipt.operation.as_str(),
+            "transcription" | "protected-term-review" | "transcript-cleanup" | "local-ai-recap"
+        ) {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_OPERATION_INVALID",
+                "processing receipt operation was not recognized",
+            ));
+        }
+        if let Some(stage) = receipt.stage.as_deref() {
+            if !matches!(
+                stage,
+                "transcription" | "normalization" | "cleanup" | "recap"
+            ) {
+                return Err(RecordingStoreError::new(
+                    "PROCESSING_RECEIPT_STAGE_INVALID",
+                    "processing receipt stage was not recognized",
+                ));
+            }
+        }
+        if let Some(input_revision_id) = receipt.input_revision_id.as_deref() {
+            validate_history_id(
+                input_revision_id,
+                "PROCESSING_RECEIPT_INPUT_REVISION_INVALID",
+            )?;
+            let input_revision = manifest
+                .transcript_revisions
+                .iter()
+                .find(|revision| revision.revision_id == input_revision_id)
+                .ok_or_else(|| {
+                    RecordingStoreError::new(
+                        "PROCESSING_RECEIPT_INPUT_REVISION_INVALID",
+                        "processing receipt input revision was not found",
+                    )
+                })?;
+            if receipt.input_revision_kind.as_deref()
+                != Some(effective_revision_kind(input_revision).label())
+            {
+                return Err(RecordingStoreError::new(
+                    "PROCESSING_RECEIPT_INPUT_KIND_INVALID",
+                    "processing receipt input revision kind did not match immutable history",
+                ));
+            }
+        } else if receipt.input_revision_kind.is_some() {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_INPUT_KIND_INVALID",
+                "processing receipt input kind omitted its revision identity",
+            ));
+        }
+        if receipt
+            .prompt_template_sha256
+            .as_deref()
+            .is_some_and(|hash| !is_sha256_hex(hash))
+        {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_PROMPT_HASH_INVALID",
+                "processing receipt prompt template fingerprint was invalid",
+            ));
+        }
+        if receipt
+            .validation_result
+            .as_deref()
+            .is_some_and(|result| !matches!(result, "passed" | "failed" | "not-applicable"))
+        {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_VALIDATION_INVALID",
+                "processing receipt validation result was not recognized",
+            ));
+        }
+        validate_processing_identity(
+            &receipt.engine,
+            receipt.model_id.as_deref(),
+            receipt.model_sha256.as_deref(),
+        )?;
+        if receipt.finished_at_ms < receipt.started_at_ms {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_TIMING_INVALID",
+                "processing receipt timing was invalid",
+            ));
+        }
+        match receipt.outcome {
+            ProcessingOutcome::Succeeded => {
+                let recap_receipt = receipt.operation == "local-ai-recap";
+                let transcript_revision_valid = receipt
+                    .revision_id
+                    .as_deref()
+                    .is_some_and(|revision_id| revision_ids.contains(revision_id));
+                let recap_lineage_valid = receipt.revision_id.is_none()
+                    && receipt.comparison.is_none()
+                    && receipt.input_revision_id.is_some()
+                    && receipt.prompt_template_sha256.is_some();
+                if (recap_receipt && !recap_lineage_valid)
+                    || (!recap_receipt
+                        && (!transcript_revision_valid || receipt.comparison.is_none()))
+                    || receipt.error_code.is_some()
+                    || receipt.error_summary.is_some()
+                {
+                    return Err(RecordingStoreError::new(
+                        "PROCESSING_RECEIPT_OUTCOME_INVALID",
+                        "successful processing receipt metadata was inconsistent",
+                    ));
+                }
+            }
+            ProcessingOutcome::Failed | ProcessingOutcome::Cancelled => {
+                if receipt.revision_id.is_some()
+                    || receipt.error_code.is_none()
+                    || receipt.comparison.is_some()
+                {
+                    return Err(RecordingStoreError::new(
+                        "PROCESSING_RECEIPT_OUTCOME_INVALID",
+                        "failed processing receipt metadata was inconsistent",
+                    ));
+                }
+                validate_stable_code(
+                    receipt.error_code.as_deref().unwrap_or_default(),
+                    "PROCESSING_RECEIPT_ERROR_CODE_INVALID",
+                )?;
+            }
+        }
+        if let Some(comparison) = receipt.comparison.as_ref() {
+            validate_transcript_comparison_metadata(comparison)?;
+        }
+        if receipt
+            .error_summary
+            .as_deref()
+            .is_some_and(|summary| summary.is_empty() || summary.len() > 500)
+        {
+            return Err(RecordingStoreError::new(
+                "PROCESSING_RECEIPT_ERROR_SUMMARY_INVALID",
+                "processing receipt error summary was invalid",
             ));
         }
     }
@@ -3102,6 +7424,58 @@ fn write_durable_chunk_file(path: &Path, payload: &[u8]) -> Result<(), Recording
     Ok(())
 }
 
+#[cfg(feature = "sqlcipher-vault")]
+fn remove_owned_trust_search_files(paths: &[PathBuf]) -> Result<(), RecordingStoreError> {
+    for path in paths {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(RecordingStoreError::new(
+                    "TRUST_SEARCH_SYNC_FAILED",
+                    error.to_string(),
+                ));
+            }
+        };
+        if metadata.file_type().is_symlink()
+            || metadata_is_reparse_point(&metadata)
+            || !metadata.is_file()
+        {
+            return Err(RecordingStoreError::new(
+                "TRUST_SEARCH_SYNC_FAILED",
+                "temporary encrypted search index contained an unowned file",
+            ));
+        }
+        fs::remove_file(path).map_err(io_error("TRUST_SEARCH_SYNC_FAILED"))?;
+    }
+    Ok(())
+}
+
+fn legacy_transcript_bytes_with_limit(
+    manifest: &RecordingManifest,
+    selected_indices: &HashSet<u32>,
+    maximum_bytes: u64,
+) -> Result<u64, RecordingStoreError> {
+    let mut segment_count = 0_u64;
+    let mut total_bytes = 0_u64;
+    for chunk in manifest.chunks.iter().filter(|chunk| {
+        chunk.kind == DurableChunkKind::TranscriptSegment && selected_indices.contains(&chunk.index)
+    }) {
+        if segment_count > 0 {
+            total_bytes = total_bytes.saturating_add(1);
+        }
+        total_bytes = total_bytes.saturating_add(chunk.bytes);
+        segment_count = segment_count.saturating_add(1);
+        if total_bytes > maximum_bytes {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_LEGACY_MIGRATION_TOO_LARGE",
+                "legacy transcript exceeded the bounded immutable-history migration limit",
+            ));
+        }
+    }
+    Ok(total_bytes)
+}
+
 fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), RecordingStoreError> {
     fs::create_dir_all(dir).map_err(io_error("RECORDING_STORE_CREATE_FAILED"))?;
     let tmp_path = dir.join("manifest.json.tmp");
@@ -3113,6 +7487,12 @@ fn write_manifest(dir: &Path, manifest: &RecordingManifest) -> Result<(), Record
             format!("failed to serialize recording manifest: {err}"),
         )
     })?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err(RecordingStoreError::new(
+            "RECORDING_MANIFEST_TOO_LARGE",
+            "recording manifest exceeded its local safety limit",
+        ));
+    }
     {
         let mut file =
             File::create(&tmp_path).map_err(io_error("RECORDING_MANIFEST_WRITE_FAILED"))?;
@@ -3188,7 +7568,7 @@ fn decrypt_chunk_len(
     index: u32,
     path: &Path,
 ) -> Result<u64, RecordingStoreError> {
-    Ok(decrypt_chunk_bytes(key, recording_id, index, path)?.len() as u64)
+    Ok(decrypt_chunk_bytes(key, recording_id, index, path)?.0.len() as u64)
 }
 
 fn decrypt_chunk_bytes(
@@ -3196,8 +7576,16 @@ fn decrypt_chunk_bytes(
     recording_id: &str,
     index: u32,
     path: &Path,
-) -> Result<Vec<u8>, RecordingStoreError> {
-    let envelope = fs::read(path).map_err(io_error("RECORDING_CHUNK_READ_FAILED"))?;
+) -> Result<(Vec<u8>, u64), RecordingStoreError> {
+    let envelope = read_owned_regular_file_bounded(
+        path,
+        MAX_ENCRYPTED_DURABLE_CHUNK_BYTES,
+        "RECORDING_CHUNK_READ_FAILED",
+        "RECORDING_CHUNK_TOO_LARGE",
+        "encrypted durable chunk must be an owned regular file",
+        "encrypted durable chunk exceeded its fixed byte limit",
+    )?;
+    let stored_bytes = envelope.len() as u64;
     if envelope.len() <= ENCRYPTED_CHUNK_MAGIC.len() + 12
         || !envelope.starts_with(ENCRYPTED_CHUNK_MAGIC)
     {
@@ -3229,20 +7617,56 @@ fn decrypt_chunk_bytes(
                 "failed to decrypt durable recording chunk during recovery",
             )
         })?;
-    Ok(plaintext)
+    Ok((plaintext, stored_bytes))
 }
 
 fn chunk_aad(recording_id: &str, index: u32) -> String {
     format!("candor-v3-recording-chunk:{recording_id}:{index}")
 }
 
-fn chunk_index_from_name(file_name: &str) -> Option<u32> {
+fn transcript_segment_file_name(index: u32, encrypted: bool, attempt_id: Option<&str>) -> String {
+    let extension = if encrypted {
+        ENCRYPTED_CHUNK_EXT
+    } else {
+        PLAINTEXT_CHUNK_EXT
+    };
+    match attempt_id {
+        Some(attempt_id) => {
+            format!("chunk-{index:06}{TRANSCRIPTION_ATTEMPT_FILE_MARKER}{attempt_id}{extension}")
+        }
+        None => format!("chunk-{index:06}{extension}"),
+    }
+}
+
+fn raw_transcript_file_name(index: u32) -> String {
+    format!("chunk-{index:06}{RAW_TRANSCRIPT_FILE_MARKER}{ENCRYPTED_CHUNK_EXT}")
+}
+
+fn chunk_file_stem(file_name: &str) -> Option<&str> {
     file_name
-        .trim_start_matches("chunk-")
-        .trim_end_matches(PLAINTEXT_CHUNK_EXT)
-        .trim_end_matches(ENCRYPTED_CHUNK_EXT)
+        .strip_suffix(PLAINTEXT_CHUNK_EXT)
+        .or_else(|| file_name.strip_suffix(ENCRYPTED_CHUNK_EXT))
+}
+
+fn chunk_index_from_name(file_name: &str) -> Option<u32> {
+    let stem = chunk_file_stem(file_name)?.strip_prefix("chunk-")?;
+    stem.split_once(TRANSCRIPTION_ATTEMPT_FILE_MARKER)
+        .map(|(index, _attempt_id)| index)
+        .or_else(|| {
+            stem.split_once(RAW_TRANSCRIPT_FILE_MARKER)
+                .map(|(index, _)| index)
+        })
+        .unwrap_or(stem)
         .parse::<u32>()
         .ok()
+}
+
+fn transcription_attempt_id_from_chunk_name(file_name: &str) -> Option<String> {
+    let stem = chunk_file_stem(file_name)?;
+    let (_prefix, attempt_id) = stem.split_once(TRANSCRIPTION_ATTEMPT_FILE_MARKER)?;
+    validate_history_id(attempt_id, "TRANSCRIPTION_ATTEMPT_ID_INVALID")
+        .ok()
+        .map(|()| attempt_id.to_string())
 }
 
 fn validate_id(value: &str) -> Result<(), RecordingStoreError> {
@@ -3263,6 +7687,408 @@ fn validate_id(value: &str) -> Result<(), RecordingStoreError> {
 
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_history_id(value: &str, code: &'static str) -> Result<(), RecordingStoreError> {
+    let valid = !value.is_empty()
+        && value.len() <= 96
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err(RecordingStoreError::new(
+            code,
+            "history identifier must be bounded ASCII alphanumeric, dash, or underscore",
+        ))
+    }
+}
+
+fn validate_stable_code(value: &str, code: &'static str) -> Result<(), RecordingStoreError> {
+    let valid = !value.is_empty()
+        && value.len() <= 100
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
+    if valid {
+        Ok(())
+    } else {
+        Err(RecordingStoreError::new(
+            code,
+            "processing error code must be bounded uppercase ASCII",
+        ))
+    }
+}
+
+fn validate_processing_identity(
+    engine: &str,
+    model_id: Option<&str>,
+    model_sha256: Option<&str>,
+) -> Result<(), RecordingStoreError> {
+    if engine.is_empty()
+        || engine.len() > 80
+        || !engine
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(RecordingStoreError::new(
+            "PROCESSING_ENGINE_INVALID",
+            "processing engine identifier was invalid",
+        ));
+    }
+    if model_id.is_some_and(|value| {
+        value.is_empty()
+            || value.len() > 200
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    }) {
+        return Err(RecordingStoreError::new(
+            "PROCESSING_MODEL_ID_INVALID",
+            "processing model identifier was invalid",
+        ));
+    }
+    if model_sha256.is_some_and(|value| !is_sha256_hex(value)) {
+        return Err(RecordingStoreError::new(
+            "PROCESSING_MODEL_HASH_INVALID",
+            "processing model hash was invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_revision_chunk_indices(
+    manifest: &RecordingManifest,
+    chunk_indices: &[u32],
+) -> Result<(), RecordingStoreError> {
+    if chunk_indices.len() > MAX_REVISION_CHUNK_INDICES {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_REVISION_TOO_LARGE",
+            "transcript revision contains too many segment references",
+        ));
+    }
+    let mut previous = None;
+    for index in chunk_indices {
+        if previous.is_some_and(|prior| prior >= *index) {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_CHUNKS_INVALID",
+                "transcript revision chunk references must be unique and increasing",
+            ));
+        }
+        let valid = manifest.chunks.get(*index as usize).is_some_and(|chunk| {
+            chunk.index == *index && chunk.kind == DurableChunkKind::TranscriptSegment
+        });
+        if !valid {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_REVISION_CHUNKS_INVALID",
+                "transcript revision referenced a non-transcript chunk",
+            ));
+        }
+        previous = Some(*index);
+    }
+    Ok(())
+}
+
+fn validate_revision_attempt_membership(
+    manifest: &RecordingManifest,
+    chunk_indices: &[u32],
+) -> Result<(), RecordingStoreError> {
+    let mut membership: Option<Option<&str>> = None;
+    for index in chunk_indices {
+        let attempt_id = manifest
+            .chunks
+            .iter()
+            .find(|chunk| chunk.index == *index)
+            .and_then(|chunk| chunk.transcription_attempt_id.as_deref());
+        match membership {
+            Some(existing) if existing != attempt_id => {
+                return Err(RecordingStoreError::new(
+                    "TRANSCRIPT_REVISION_ATTEMPT_INVALID",
+                    "a transcript revision cannot combine chunks from different attempts",
+                ));
+            }
+            None => membership = Some(attempt_id),
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_raw_revision_chunk_indices(
+    manifest: &RecordingManifest,
+    chunk_indices: &[u32],
+    comparison: &TranscriptComparisonMetadata,
+    owned_indices: &mut HashSet<u32>,
+) -> Result<(), RecordingStoreError> {
+    if chunk_indices.len() > MAX_REVISION_CHUNK_INDICES {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_RAW_CHUNKS_INVALID",
+            "raw transcript revision contains too many durable chunk references",
+        ));
+    }
+    let mut previous = None;
+    let mut total_bytes = 0_u64;
+    for index in chunk_indices {
+        if previous.is_some_and(|prior| prior >= *index) || !owned_indices.insert(*index) {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_RAW_CHUNKS_INVALID",
+                "raw transcript chunk references must be unique, increasing, and owned by one revision",
+            ));
+        }
+        let chunk = manifest.chunks.get(*index as usize).ok_or_else(|| {
+            RecordingStoreError::new(
+                "TRANSCRIPT_RAW_CHUNKS_INVALID",
+                "raw transcript revision referenced a missing durable chunk",
+            )
+        })?;
+        if chunk.index != *index
+            || chunk.kind != DurableChunkKind::RawTranscriptText
+            || !chunk.encrypted
+            || chunk
+                .content_sha256
+                .as_deref()
+                .is_none_or(|hash| !is_sha256_hex(hash))
+        {
+            return Err(RecordingStoreError::new(
+                "TRANSCRIPT_RAW_CHUNKS_INVALID",
+                "raw transcript revision referenced an invalid encrypted chunk",
+            ));
+        }
+        total_bytes = total_bytes.checked_add(chunk.bytes).ok_or_else(|| {
+            RecordingStoreError::new(
+                "TRANSCRIPT_RAW_TOO_LARGE",
+                "raw transcript byte count overflowed its local safety limit",
+            )
+        })?;
+        previous = Some(*index);
+    }
+    if total_bytes != comparison.raw_text_bytes || total_bytes > MAX_RAW_TRANSCRIPT_BYTES as u64 {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_RAW_CHUNKS_INVALID",
+            "raw transcript chunk bytes did not match immutable comparison metadata",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_transcript_comparison(
+    comparison: &TranscriptComparisonDraft,
+) -> Result<(), RecordingStoreError> {
+    let metadata = TranscriptComparisonMetadata {
+        raw_text_sha256: comparison.raw_text_sha256.clone(),
+        normalized_text_sha256: comparison.normalized_text_sha256.clone(),
+        raw_text_bytes: comparison.raw_text_bytes,
+        normalized_text_bytes: comparison.normalized_text_bytes,
+        raw_segment_count: comparison.raw_segment_count,
+        normalized_segment_count: comparison.normalized_segment_count,
+        changed: comparison.changed,
+    };
+    validate_transcript_comparison_metadata(&metadata)
+}
+
+fn validate_raw_transcript_text(
+    raw_text: &str,
+    comparison: &TranscriptComparisonDraft,
+) -> Result<(), RecordingStoreError> {
+    validate_transcript_content(
+        raw_text.as_bytes(),
+        comparison.raw_text_bytes,
+        &comparison.raw_text_sha256,
+        "raw",
+    )
+}
+
+fn validate_normalized_transcript_text(
+    normalized_text: &str,
+    comparison: &TranscriptComparisonDraft,
+) -> Result<(), RecordingStoreError> {
+    validate_transcript_content(
+        normalized_text.as_bytes(),
+        comparison.normalized_text_bytes,
+        &comparison.normalized_text_sha256,
+        "normalized",
+    )
+}
+
+fn validate_transcript_content(
+    text: &[u8],
+    expected_bytes: u64,
+    expected_sha256: &str,
+    representation: &'static str,
+) -> Result<(), RecordingStoreError> {
+    if text.len() > MAX_RAW_TRANSCRIPT_BYTES {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_RAW_TOO_LARGE",
+            "transcript comparison content exceeded its local storage safety limit",
+        ));
+    }
+    let actual_bytes = u64::try_from(text.len()).unwrap_or(u64::MAX);
+    let actual_sha256 = hex_digest(&Sha256::digest(text));
+    if actual_bytes != expected_bytes || !actual_sha256.eq_ignore_ascii_case(expected_sha256) {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_COMPARISON_CONTENT_INVALID",
+            format!("{representation} transcript content did not match its immutable comparison metadata"),
+        ));
+    }
+    Ok(())
+}
+
+fn transcript_text_from_segments(segments: &[Value]) -> String {
+    segments
+        .iter()
+        .filter_map(|segment| segment.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn cleanup_segment_metadata_matches(source: &Value, cleaned: &Value) -> bool {
+    ["channel", "speaker", "startMs", "durationMs", "endMs"]
+        .iter()
+        .all(|field| source.get(*field) == cleaned.get(*field))
+}
+
+fn bounded_comparison_text(text: &str) -> (String, bool) {
+    if text.len() <= MAX_COMPARISON_TEXT_BYTES_PER_SIDE {
+        return (text.to_string(), false);
+    }
+    let mut end = MAX_COMPARISON_TEXT_BYTES_PER_SIDE;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (text[..end].to_string(), true)
+}
+
+fn validate_transcript_comparison_metadata(
+    comparison: &TranscriptComparisonMetadata,
+) -> Result<(), RecordingStoreError> {
+    if !is_sha256_hex(&comparison.raw_text_sha256)
+        || !is_sha256_hex(&comparison.normalized_text_sha256)
+    {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_COMPARISON_HASH_INVALID",
+            "transcript comparison hashes were invalid",
+        ));
+    }
+    let hashes_differ = !comparison
+        .raw_text_sha256
+        .eq_ignore_ascii_case(&comparison.normalized_text_sha256);
+    let metadata_differs = comparison.raw_text_bytes != comparison.normalized_text_bytes
+        || comparison.raw_segment_count != comparison.normalized_segment_count;
+    if comparison.changed != (hashes_differ || metadata_differs) {
+        return Err(RecordingStoreError::new(
+            "TRANSCRIPT_COMPARISON_STATE_INVALID",
+            "transcript comparison change state was inconsistent",
+        ));
+    }
+    Ok(())
+}
+
+fn comparison_metadata(draft: TranscriptComparisonDraft) -> TranscriptComparisonMetadata {
+    TranscriptComparisonMetadata {
+        raw_text_sha256: draft.raw_text_sha256.to_ascii_lowercase(),
+        normalized_text_sha256: draft.normalized_text_sha256.to_ascii_lowercase(),
+        raw_text_bytes: draft.raw_text_bytes,
+        normalized_text_bytes: draft.normalized_text_bytes,
+        raw_segment_count: draft.raw_segment_count,
+        normalized_segment_count: draft.normalized_segment_count,
+        changed: draft.changed,
+    }
+}
+
+pub(crate) fn transcript_text_sha256(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    let digest = hasher.finalize();
+    hex_digest(&digest)
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
+}
+
+fn source_audio_manifest_digest(channel: &str, chunks: &[&DurableChunk]) -> Option<String> {
+    if chunks.is_empty()
+        || chunks.iter().any(|chunk| {
+            chunk
+                .content_sha256
+                .as_deref()
+                .is_none_or(|hash| !is_sha256_hex(hash))
+        })
+    {
+        return None;
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"candor-original-audio-manifest-v2");
+    hasher.update((channel.len() as u64).to_le_bytes());
+    hasher.update(channel.as_bytes());
+    for chunk in chunks {
+        hasher.update((chunk.channel.len() as u64).to_le_bytes());
+        hasher.update(chunk.channel.as_bytes());
+        hasher.update(chunk.index.to_le_bytes());
+        hasher.update(chunk.start_ms.unwrap_or_default().to_le_bytes());
+        hasher.update(chunk.duration_ms.unwrap_or_default().to_le_bytes());
+        hasher.update(chunk.bytes.to_le_bytes());
+        hasher.update(chunk.sample_rate_hz.unwrap_or_default().to_le_bytes());
+        hasher.update(chunk.channel_count.unwrap_or_default().to_le_bytes());
+        hasher.update(chunk.bits_per_sample.unwrap_or_default().to_le_bytes());
+        hasher.update(
+            chunk
+                .content_sha256
+                .as_deref()
+                .expect("content hash presence checked above")
+                .as_bytes(),
+        );
+    }
+    Some(hex_digest(&hasher.finalize()))
+}
+
+fn transcription_source_channels(
+    manifest: &RecordingManifest,
+    requested_channel: Option<&str>,
+) -> Vec<String> {
+    if let Some(channel) =
+        requested_channel.filter(|channel| *channel != COMBINED_TRANSCRIPTION_CHANNEL)
+    {
+        let channel_exists = manifest
+            .chunks
+            .iter()
+            .any(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le && chunk.channel == channel);
+        return if channel_exists {
+            vec![channel.to_string()]
+        } else {
+            Vec::new()
+        };
+    }
+
+    let mut seen = HashSet::new();
+    let mut channels = manifest
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
+        .filter(|chunk| seen.insert(chunk.channel.clone()))
+        .map(|chunk| chunk.channel.clone())
+        .collect::<Vec<_>>();
+    channels.sort_by(|left, right| {
+        transcription_channel_rank(left)
+            .cmp(&transcription_channel_rank(right))
+            .then_with(|| left.cmp(right))
+    });
+    channels
+}
+
+fn transcription_channel_rank(channel: &str) -> u8 {
+    match channel {
+        "mic" => 0,
+        "system" => 1,
+        _ => 2,
+    }
 }
 
 fn validate_channel(value: &str) -> Result<(), RecordingStoreError> {
@@ -3404,6 +8230,103 @@ fn snippet(text: &str, byte_offset: usize, query_len: usize) -> String {
     value
 }
 
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
+}
+
+fn read_only_quarantine_summary(recording_id: &str, reason_code: &'static str) -> Value {
+    json!({
+        "recordingId": recording_id,
+        "reasonCode": reason_code,
+        "receiptPersisted": false,
+        "contentModified": false,
+        "rawPathExposed": false
+    })
+}
+
+fn read_only_list_sort_time_ns(directory: &Path, directory_metadata: &fs::Metadata) -> u128 {
+    for file_name in [MANIFEST_FILE, "manifest.json.bak", "manifest.json.tmp"] {
+        if let Ok(metadata) = fs::symlink_metadata(directory.join(file_name)) {
+            return metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_nanos())
+                .unwrap_or_default();
+        }
+    }
+    directory_metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
+}
+
+fn bounded_automation_response(
+    response: Value,
+    maximum_bytes: usize,
+    error_code: &'static str,
+) -> Result<Value, RecordingStoreError> {
+    let serialized_bytes = serde_json::to_vec(&response).map_err(|_| {
+        RecordingStoreError::new(
+            error_code,
+            "read-only automation response could not be serialized safely",
+        )
+    })?;
+    if serialized_bytes.len() > maximum_bytes {
+        return Err(RecordingStoreError::new(
+            error_code,
+            "read-only automation response exceeded its fixed byte limit",
+        ));
+    }
+    Ok(response)
+}
+
+fn validated_search_query(query: &str) -> Result<&str, RecordingStoreError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() || trimmed.len() > 200 {
+        return Err(RecordingStoreError::new(
+            "RECORDING_SEARCH_QUERY_INVALID",
+            "search query must be between 1 and 200 bytes after trimming",
+        ));
+    }
+    let _ = fts_literal_query(trimmed)?;
+    Ok(trimmed)
+}
+
+fn fts_literal_query(query: &str) -> Result<String, RecordingStoreError> {
+    let trimmed = query.trim();
+    if trimmed.is_empty()
+        || trimmed.len() > 200
+        || trimmed.chars().any(|character| {
+            character == '\0' || (character.is_control() && !character.is_whitespace())
+        })
+    {
+        return Err(RecordingStoreError::new(
+            "RECORDING_SEARCH_QUERY_INVALID",
+            "search query contained unsupported control characters",
+        ));
+    }
+    let mut literal = String::with_capacity(trimmed.len().saturating_add(2));
+    literal.push('"');
+    for character in trimmed.chars() {
+        if character == '"' {
+            literal.push('"');
+        }
+        literal.push(character);
+    }
+    literal.push('"');
+    Ok(literal)
+}
+
 fn new_recording_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3453,6 +8376,137 @@ fn io_error(code: &'static str) -> impl Fn(std::io::Error) -> RecordingStoreErro
     move |err| RecordingStoreError::new(code, err.to_string())
 }
 
+fn ensure_owned_directory(
+    path: &Path,
+    error_code: &'static str,
+    invalid_message: &'static str,
+) -> Result<(), RecordingStoreError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| RecordingStoreError::new(error_code, error.to_string()))?;
+    if metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&metadata)
+        || !metadata.is_dir()
+    {
+        return Err(RecordingStoreError::new(error_code, invalid_message));
+    }
+    Ok(())
+}
+
+fn read_owned_regular_file_bounded(
+    path: &Path,
+    maximum_bytes: u64,
+    read_error_code: &'static str,
+    too_large_error_code: &'static str,
+    invalid_message: &'static str,
+    too_large_message: &'static str,
+) -> Result<Vec<u8>, RecordingStoreError> {
+    let path_metadata = fs::symlink_metadata(path)
+        .map_err(|error| RecordingStoreError::new(read_error_code, error.to_string()))?;
+    if path_metadata.file_type().is_symlink()
+        || metadata_is_reparse_point(&path_metadata)
+        || !path_metadata.is_file()
+    {
+        return Err(RecordingStoreError::new(read_error_code, invalid_message));
+    }
+    if path_metadata.len() > maximum_bytes {
+        return Err(RecordingStoreError::new(
+            too_large_error_code,
+            too_large_message,
+        ));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    options.custom_flags(0x0020_0000);
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    options.custom_flags(0x0002_0000);
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    options.custom_flags(0x0000_0100);
+    let mut file = options
+        .open(path)
+        .map_err(|error| RecordingStoreError::new(read_error_code, error.to_string()))?;
+    let opened_metadata = file
+        .metadata()
+        .map_err(|error| RecordingStoreError::new(read_error_code, error.to_string()))?;
+    if metadata_is_reparse_point(&opened_metadata) || !opened_metadata.is_file() {
+        return Err(RecordingStoreError::new(read_error_code, invalid_message));
+    }
+    if opened_metadata.len() > maximum_bytes {
+        return Err(RecordingStoreError::new(
+            too_large_error_code,
+            too_large_message,
+        ));
+    }
+    let expected_len = opened_metadata.len();
+    let capacity = usize::try_from(expected_len)
+        .map_err(|_| RecordingStoreError::new(too_large_error_code, too_large_message))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    Read::by_ref(&mut file)
+        .take(expected_len)
+        .read_to_end(&mut bytes)
+        .map_err(|error| RecordingStoreError::new(read_error_code, error.to_string()))?;
+    let final_metadata = file
+        .metadata()
+        .map_err(|error| RecordingStoreError::new(read_error_code, error.to_string()))?;
+    if bytes.len() as u64 != expected_len
+        || final_metadata.len() != expected_len
+        || metadata_is_reparse_point(&final_metadata)
+        || !final_metadata.is_file()
+    {
+        return Err(RecordingStoreError::new(
+            read_error_code,
+            "owned file changed while it was being read",
+        ));
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+fn metadata_is_reparse_point(metadata: &fs::Metadata) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn metadata_is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(all(feature = "sqlcipher-vault", windows))]
+fn windows_transient_search_remove_error(error: &std::io::Error) -> bool {
+    // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION, and
+    // ERROR_DIR_NOT_EMPTY. The last value occurs when a background SQLite
+    // builder creates a sidecar between remove_dir_all enumeration and final
+    // directory removal.
+    matches!(error.raw_os_error(), Some(32 | 33 | 145))
+}
+
+#[cfg(all(feature = "sqlcipher-vault", not(windows)))]
+fn windows_transient_search_remove_error(_error: &std::io::Error) -> bool {
+    false
+}
+
+#[cfg(feature = "sqlcipher-vault")]
+fn lower_trust_search_backfill_priority() {
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL,
+        };
+        // FTS backfill can decrypt substantial local history. Keep it below
+        // capture and foreground work; priority adjustment failure is non-fatal.
+        let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3467,6 +8521,2789 @@ mod tests {
             .as_str()
             .expect("recording id")
             .to_string()
+    }
+
+    fn comparison(raw: &str, normalized: &str, segment_count: u64) -> TranscriptComparisonDraft {
+        TranscriptComparisonDraft {
+            raw_text_sha256: transcript_text_sha256(raw),
+            normalized_text_sha256: transcript_text_sha256(normalized),
+            raw_text_bytes: raw.len() as u64,
+            normalized_text_bytes: normalized.len() as u64,
+            raw_segment_count: segment_count,
+            normalized_segment_count: segment_count,
+            changed: raw != normalized,
+        }
+    }
+
+    fn write_segment(store: &RecordingStore, recording_id: &str, text: &str) -> u32 {
+        store
+            .write_transcript_segment(WriteTranscriptSegmentParams {
+                recording_id: recording_id.to_string(),
+                channel: "mic".to_string(),
+                speaker: Some("Me".to_string()),
+                text: text.to_string(),
+                start_ms: 0,
+                duration_ms: Some(500),
+                end_ms: None,
+                confidence: Some(0.9),
+            })
+            .expect("write transcript segment");
+        *store
+            .transcript_chunk_indices(recording_id)
+            .expect("transcript indices")
+            .last()
+            .expect("new transcript index")
+    }
+
+    fn write_attempt_segment(
+        store: &RecordingStore,
+        recording_id: &str,
+        attempt_id: &str,
+        text: &str,
+    ) {
+        store
+            .write_transcription_attempt_segment(
+                attempt_id,
+                WriteTranscriptSegmentParams {
+                    recording_id: recording_id.to_string(),
+                    channel: "mic".to_string(),
+                    speaker: Some("Me".to_string()),
+                    text: text.to_string(),
+                    start_ms: 0,
+                    duration_ms: Some(500),
+                    end_ms: None,
+                    confidence: Some(0.9),
+                },
+            )
+            .expect("write attempt transcript segment");
+    }
+
+    fn write_orphan_raw_transcript_file(
+        store: &RecordingStore,
+        recording_id: &str,
+        text: &str,
+    ) -> PathBuf {
+        let dir = store.recording_dir(recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest");
+        let index = manifest.chunks.len() as u32;
+        let key = os_key_store::get_or_create_key(&store.root)
+            .expect("test storage key")
+            .derive_key(RECORDING_CHUNK_KEY_LABEL);
+        let payload = encrypt_chunk(&key, recording_id, index, text.as_bytes())
+            .expect("encrypt orphan raw transcript");
+        let path = dir.join(raw_transcript_file_name(index));
+        write_durable_chunk_file(&path, &payload).expect("write orphan raw transcript");
+        path
+    }
+
+    fn complete_attempt(
+        store: &RecordingStore,
+        recording_id: &str,
+        attempt_id: &str,
+        text: &str,
+    ) -> Result<Value, RecordingStoreError> {
+        store.complete_transcription_attempt(TranscriptionSuccessDraft {
+            recording_id: recording_id.to_string(),
+            attempt_id: Some(attempt_id.to_string()),
+            chunk_indices: Vec::new(),
+            engine: "whisper-rs".to_string(),
+            model_id: Some("ggml-base.en.bin".to_string()),
+            model_sha256: Some("a".repeat(64)),
+            started_at_ms: now_ms(),
+            elapsed_ms: 25,
+            comparison: comparison(text, text, 1),
+            raw_text: text.to_string(),
+        })
+    }
+
+    #[test]
+    fn read_only_listing_does_not_create_an_empty_store() {
+        let store = temp_store();
+        let root = store.root.clone();
+
+        let listed = store
+            .list_page_read_only(RecordingPageParams {
+                offset: 0,
+                limit: 25,
+            })
+            .expect("read-only list");
+
+        assert_eq!(listed["totalCount"], 0);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn read_only_manifest_collection_stops_at_directory_and_manifest_byte_limits() {
+        let store = temp_store();
+        for label in ["one", "two", "three"] {
+            store
+                .start(StartRecordingParams {
+                    label: Some(label.to_string()),
+                })
+                .expect("start bounded collection recording");
+        }
+
+        let directory_bounded = store
+            .collect_recording_manifests_read_only_bounded(10, 1, 10, u64::MAX, 10)
+            .expect("collect with a one-entry directory limit");
+        assert_eq!(directory_bounded.inspected_directory_entries, 1);
+        assert!(directory_bounded.source_truncated);
+        assert!(directory_bounded.collection.items.len() <= 1);
+
+        let manifest_bounded = store
+            .collect_recording_manifests_read_only_bounded(10, 10, 10, 1, 10)
+            .expect("collect with a one-byte manifest limit");
+        assert!(manifest_bounded.source_truncated);
+        assert_eq!(manifest_bounded.manifest_bytes_read, 0);
+        assert!(manifest_bounded.collection.items.is_empty());
+    }
+
+    #[test]
+    fn read_only_list_reports_partial_counts_without_oversized_pages() {
+        let store = temp_store();
+        store
+            .start(StartRecordingParams {
+                label: Some("x".repeat(1_024)),
+            })
+            .expect("start list-bound recording");
+
+        let page = store
+            .list_page_read_only(RecordingPageParams {
+                offset: 0,
+                limit: 1,
+            })
+            .expect("bounded read-only list");
+        assert!(page["recordings"][0]["label"]
+            .as_str()
+            .is_some_and(|label| label.len() <= MAX_AUTOMATION_LABEL_RESPONSE_BYTES));
+        assert!(
+            serde_json::to_vec(&page)
+                .expect("serialize list page")
+                .len()
+                <= MAX_AUTOMATION_LIST_RESPONSE_BYTES
+        );
+
+        let error = store
+            .list_page_read_only(RecordingPageParams {
+                offset: 0,
+                limit: (MAX_AUTOMATION_LIST_PAGE_RECORDINGS + 1) as u64,
+            })
+            .expect_err("oversized automation list page must fail");
+        assert_eq!(error.code, "RECORDING_PAGE_LIMIT_INVALID");
+    }
+
+    #[test]
+    fn read_only_list_does_not_parse_or_validate_an_out_of_page_candidate() {
+        let store = temp_store();
+        let invalid_started = store
+            .start(StartRecordingParams {
+                label: Some("older invalid candidate".to_string()),
+            })
+            .expect("start invalid list candidate");
+        let invalid_id = recording_id(&invalid_started);
+        let invalid_chunk_index = write_segment(&store, &invalid_id, "out of page text");
+        let invalid_dir = store.recording_dir(&invalid_id).expect("invalid dir");
+        let invalid_manifest = read_manifest(&invalid_dir).expect("invalid fixture manifest");
+        let invalid_chunk_path = invalid_dir.join(
+            &invalid_manifest
+                .chunks
+                .get(invalid_chunk_index as usize)
+                .expect("invalid fixture chunk")
+                .file_name,
+        );
+        let valid_started = store
+            .start(StartRecordingParams {
+                label: Some("newest valid candidate".to_string()),
+            })
+            .expect("start valid list candidate");
+        let valid_id = recording_id(&valid_started);
+        write_segment(&store, &valid_id, "valid list marker");
+        let _ = wait_for_search(&store, "valid list marker");
+        let valid_dir = store.recording_dir(&valid_id).expect("valid dir");
+        let valid_manifest_bytes = fs::metadata(valid_dir.join(MANIFEST_FILE))
+            .expect("valid manifest metadata")
+            .len();
+        fs::remove_file(&invalid_chunk_path).expect("remove fixture chunk");
+        fs::create_dir(&invalid_chunk_path).expect("replace fixture chunk with directory");
+        let backup_path = invalid_dir.join("manifest.json.bak");
+        if backup_path.exists() {
+            fs::remove_file(&backup_path).expect("remove fallback fixture manifest");
+        }
+        let invalid_manifest_before =
+            fs::read(invalid_dir.join(MANIFEST_FILE)).expect("invalid manifest before");
+
+        let first_page = store
+            .list_page_read_only(RecordingPageParams {
+                offset: 0,
+                limit: 1,
+            })
+            .expect("first bounded list page");
+        assert_eq!(first_page["recordings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(first_page["recordings"][0]["recordingId"], valid_id);
+        assert_eq!(first_page["pageCandidateCount"], 1);
+        assert_eq!(first_page["manifestBytesRead"], valid_manifest_bytes);
+        assert_eq!(first_page["quarantinedCount"], 0);
+        assert_eq!(first_page["hasMore"], true);
+        assert_eq!(first_page["totalCountExact"], false);
+        assert_eq!(
+            fs::read(invalid_dir.join(MANIFEST_FILE)).expect("invalid manifest after first page"),
+            invalid_manifest_before
+        );
+
+        let second_page = store
+            .list_page_read_only(RecordingPageParams {
+                offset: 1,
+                limit: 1,
+            })
+            .expect("invalid selected page is reported without mutation");
+        assert!(second_page["recordings"]
+            .as_array()
+            .is_some_and(Vec::is_empty));
+        assert_eq!(second_page["quarantinedCount"], 1);
+        assert_eq!(second_page["hasMore"], false);
+        assert!(!store.root.join(QUARANTINE_RECEIPTS_DIR).exists());
+        assert_eq!(
+            fs::read(invalid_dir.join(MANIFEST_FILE)).expect("invalid manifest after second page"),
+            invalid_manifest_before
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_only_transcript_does_not_recreate_a_missing_key() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("read-only key proof".to_string()),
+            })
+            .expect("start");
+        let recording_id = recording_id(&started);
+        write_segment(&store, &recording_id, "local transcript");
+        let _ = wait_for_search(&store, "local transcript");
+        let key_path = store.root.join("keys").join("vault-key.dpapi");
+        fs::remove_file(&key_path).expect("remove test key");
+
+        let error = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id,
+                offset: 0,
+                limit: 25,
+            })
+            .expect_err("missing key must fail closed");
+
+        assert_eq!(error.code, "OS_KEY_NOT_FOUND");
+        assert!(!key_path.exists());
+    }
+
+    #[test]
+    fn read_only_transcript_paginates_before_decrypting_segment_content() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start paged transcript recording");
+        let recording_id = recording_id(&started);
+        write_segment(&store, &recording_id, "first segment");
+        write_segment(&store, &recording_id, "second segment");
+        let corrupt_index = write_segment(&store, &recording_id, "third segment");
+        let _ = wait_for_search(&store, "third segment");
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest before corruption");
+        let corrupt_chunk = manifest
+            .chunks
+            .get(corrupt_index as usize)
+            .expect("third chunk");
+        let corrupt_path = dir.join(&corrupt_chunk.file_name);
+        let mut corrupt_bytes = fs::read(&corrupt_path).expect("read third chunk");
+        let last = corrupt_bytes.last_mut().expect("encrypted payload byte");
+        *last ^= 0x5a;
+        fs::write(&corrupt_path, corrupt_bytes).expect("corrupt third chunk in place");
+
+        let first_page = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id: recording_id.clone(),
+                offset: 0,
+                limit: 1,
+            })
+            .expect("first page must not decrypt later chunks");
+        assert_eq!(first_page["segments"][0]["text"], "first segment");
+
+        let error = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id,
+                offset: 2,
+                limit: 1,
+            })
+            .expect_err("corrupted selected page must fail closed");
+        assert_eq!(error.code, "RECORDING_CHUNK_DECRYPT_FAILED");
+        assert!(!store.root.join(QUARANTINE_RECEIPTS_DIR).exists());
+    }
+
+    #[test]
+    fn read_only_transcript_bounds_segment_and_response_bytes() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start long transcript recording");
+        let recording_id = recording_id(&started);
+        write_segment(&store, &recording_id, &"z".repeat(8_192));
+
+        let page = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id: recording_id.clone(),
+                offset: 0,
+                limit: 1,
+            })
+            .expect("bounded transcript page");
+        assert_eq!(page["segments"][0]["textTruncated"], true);
+        assert_eq!(
+            page["segments"][0]["text"]
+                .as_str()
+                .expect("bounded text")
+                .len(),
+            MAX_AUTOMATION_TRANSCRIPT_SEGMENT_RESPONSE_BYTES
+        );
+        assert!(
+            serde_json::to_vec(&page)
+                .expect("serialize transcript page")
+                .len()
+                <= MAX_AUTOMATION_TRANSCRIPT_RESPONSE_BYTES
+        );
+
+        let error = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id,
+                offset: 0,
+                limit: (MAX_AUTOMATION_TRANSCRIPT_PAGE_SEGMENTS + 1) as u64,
+            })
+            .expect_err("oversized transcript page must fail");
+        assert_eq!(error.code, "RECORDING_PAGE_LIMIT_INVALID");
+    }
+
+    #[test]
+    fn read_only_automation_rejects_non_regular_chunks_without_mutation() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start owned-chunk recording");
+        let recording_id = recording_id(&started);
+        let chunk_index = write_segment(&store, &recording_id, "owned source text");
+        let _ = wait_for_search(&store, "owned source text");
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest");
+        let manifest_before = fs::read(dir.join(MANIFEST_FILE)).expect("manifest before");
+        let chunk_path = dir.join(
+            &manifest
+                .chunks
+                .get(chunk_index as usize)
+                .expect("transcript chunk")
+                .file_name,
+        );
+        fs::remove_file(&chunk_path).expect("remove owned chunk for adversarial fixture");
+        fs::create_dir(&chunk_path).expect("replace chunk with directory");
+
+        let transcript_error = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id: recording_id.clone(),
+                offset: 0,
+                limit: 1,
+            })
+            .expect_err("directory chunk must be rejected");
+        assert_eq!(transcript_error.code, "RECORDING_MANIFEST_CHUNK_NOT_OWNED");
+        let search = store
+            .search_read_only(SearchRecordingsParams {
+                query: "owned".to_string(),
+            })
+            .expect("read-only search skips invalid source");
+        assert_eq!(search["matchCount"], 0);
+        assert_eq!(
+            fs::read(dir.join(MANIFEST_FILE)).expect("manifest after"),
+            manifest_before
+        );
+        assert!(!store.root.join(QUARANTINE_RECEIPTS_DIR).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_only_automation_rejects_symlinked_chunks_without_mutation() {
+        use std::os::windows::fs::symlink_file;
+
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start symlink fixture recording");
+        let recording_id = recording_id(&started);
+        let chunk_index = write_segment(&store, &recording_id, "linked source text");
+        let _ = wait_for_search(&store, "linked source text");
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest");
+        let manifest_before = fs::read(dir.join(MANIFEST_FILE)).expect("manifest before");
+        let chunk_path = dir.join(
+            &manifest
+                .chunks
+                .get(chunk_index as usize)
+                .expect("transcript chunk")
+                .file_name,
+        );
+        let outside_path = store.root.join("outside-owned-chunk.cchunk");
+        fs::copy(&chunk_path, &outside_path).expect("copy outside target");
+        fs::remove_file(&chunk_path).expect("remove owned chunk");
+        if symlink_file(&outside_path, &chunk_path).is_err() {
+            return;
+        }
+
+        let error = store
+            .transcript_page_read_only(TranscriptPageParams {
+                recording_id,
+                offset: 0,
+                limit: 1,
+            })
+            .expect_err("symlinked chunk must be rejected");
+        assert_eq!(error.code, "RECORDING_MANIFEST_CHUNK_NOT_OWNED");
+        assert_eq!(
+            fs::read(dir.join(MANIFEST_FILE)).expect("manifest after"),
+            manifest_before
+        );
+        assert!(!store.root.join(QUARANTINE_RECEIPTS_DIR).exists());
+    }
+
+    fn complete_revision(
+        store: &RecordingStore,
+        recording_id: &str,
+        chunk_indices: Vec<u32>,
+        _source: &str,
+        raw: &str,
+        normalized: &str,
+    ) -> Value {
+        store
+            .complete_transcription_attempt(TranscriptionSuccessDraft {
+                recording_id: recording_id.to_string(),
+                attempt_id: None,
+                chunk_indices,
+                engine: "whisper-rs".to_string(),
+                model_id: Some("ggml-base.en.bin".to_string()),
+                model_sha256: Some("a".repeat(64)),
+                started_at_ms: now_ms(),
+                elapsed_ms: 25,
+                comparison: comparison(raw, normalized, 1),
+                raw_text: raw.to_string(),
+            })
+            .expect("complete transcript revision")
+    }
+
+    #[test]
+    fn cloned_workers_serialize_audio_and_notes_manifest_transactions() {
+        const WRITE_COUNT: usize = 24;
+
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("concurrent chunk mutation proof".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+
+        // Hold the same shared guard used by every clone until both workers
+        // are ready. Releasing it queues genuine concurrent mutations without
+        // relying on scheduler timing to construct the race.
+        let held_guard = store.manifest_mutation_guard();
+        let ready = Arc::new(std::sync::Barrier::new(3));
+
+        let audio_store = store.clone();
+        let audio_recording_id = recording_id.clone();
+        let audio_ready = Arc::clone(&ready);
+        let audio_worker = std::thread::spawn(move || {
+            audio_ready.wait();
+            (0..WRITE_COUNT)
+                .map(|sequence| {
+                    let mut pcm = vec![0_u8; 320];
+                    pcm[0] = sequence as u8;
+                    audio_store
+                        .write_audio_chunk(WriteAudioChunkParams {
+                            recording_id: audio_recording_id.clone(),
+                            channel: "mic".to_string(),
+                            data_base64: BASE64_STANDARD.encode(pcm),
+                            sample_rate_hz: 16_000,
+                            channel_count: 1,
+                            bits_per_sample: 16,
+                            start_ms: None,
+                        })
+                        .map(|_| ())
+                })
+                .collect::<Vec<_>>()
+        });
+
+        let notes_store = store.clone();
+        let notes_recording_id = recording_id.clone();
+        let notes_ready = Arc::clone(&ready);
+        let notes_worker = std::thread::spawn(move || {
+            notes_ready.wait();
+            (0..WRITE_COUNT)
+                .map(|sequence| {
+                    notes_store
+                        .save_notes(SaveNotesParams {
+                            recording_id: notes_recording_id.clone(),
+                            markdown: format!("concurrent-note-{sequence:02}"),
+                        })
+                        .map(|_| ())
+                })
+                .collect::<Vec<_>>()
+        });
+
+        ready.wait();
+        drop(held_guard);
+
+        for result in audio_worker.join().expect("join audio worker") {
+            result.expect("concurrent audio write");
+        }
+        for result in notes_worker.join().expect("join notes worker") {
+            result.expect("concurrent notes write");
+        }
+
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("recording directory");
+        let manifest = read_manifest(&dir).expect("read final manifest");
+        assert_eq!(manifest.chunks.len(), WRITE_COUNT * 2);
+        for (expected_index, chunk) in manifest.chunks.iter().enumerate() {
+            assert_eq!(chunk.index, expected_index as u32);
+            assert!(dir.join(&chunk.file_name).is_file());
+        }
+
+        let audio_chunks = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == DurableChunkKind::AudioPcm16le)
+            .collect::<Vec<_>>();
+        let notes_chunks = manifest
+            .chunks
+            .iter()
+            .filter(|chunk| chunk.kind == DurableChunkKind::NotesMarkdown)
+            .collect::<Vec<_>>();
+        assert_eq!(audio_chunks.len(), WRITE_COUNT);
+        assert_eq!(notes_chunks.len(), WRITE_COUNT);
+
+        let audio_sequences = audio_chunks
+            .iter()
+            .map(|chunk| {
+                store
+                    .read_chunk_bytes(&manifest, chunk, &dir)
+                    .expect("read audio payload")[0]
+            })
+            .collect::<HashSet<_>>();
+        let note_values = notes_chunks
+            .iter()
+            .map(|chunk| {
+                String::from_utf8(
+                    store
+                        .read_chunk_bytes(&manifest, chunk, &dir)
+                        .expect("read notes payload"),
+                )
+                .expect("notes utf8")
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(audio_sequences.len(), WRITE_COUNT);
+        assert_eq!(note_values.len(), WRITE_COUNT);
+    }
+
+    #[test]
+    fn cloned_workers_preserve_revision_selection_completion_and_processing_facts() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("concurrent trust history proof".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+
+        let first_attempt = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("first attempt");
+        write_attempt_segment(&store, &recording_id, &first_attempt, "first revision");
+        let first_revision =
+            complete_attempt(&store, &recording_id, &first_attempt, "first revision")
+                .expect("complete first revision")["revisionId"]
+                .as_str()
+                .expect("first revision id")
+                .to_string();
+
+        let second_attempt = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("second attempt");
+        write_attempt_segment(&store, &recording_id, &second_attempt, "second revision");
+        complete_attempt(&store, &recording_id, &second_attempt, "second revision")
+            .expect("complete second revision");
+
+        let third_attempt = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("third attempt");
+        write_attempt_segment(&store, &recording_id, &third_attempt, "third revision");
+
+        let held_guard = store.manifest_mutation_guard();
+        let ready = Arc::new(std::sync::Barrier::new(4));
+
+        let selection_store = store.clone();
+        let selection_recording_id = recording_id.clone();
+        let selection_revision_id = first_revision.clone();
+        let selection_ready = Arc::clone(&ready);
+        let selection_worker = std::thread::spawn(move || {
+            selection_ready.wait();
+            selection_store.select_transcript_revision(TranscriptRevisionParams {
+                recording_id: selection_recording_id,
+                revision_id: selection_revision_id,
+            })
+        });
+
+        let completion_store = store.clone();
+        let completion_recording_id = recording_id.clone();
+        let completion_attempt_id = third_attempt.clone();
+        let completion_ready = Arc::clone(&ready);
+        let completion_worker = std::thread::spawn(move || {
+            completion_ready.wait();
+            complete_attempt(
+                &completion_store,
+                &completion_recording_id,
+                &completion_attempt_id,
+                "third revision",
+            )
+        });
+
+        let processing_store = store.clone();
+        let processing_recording_id = recording_id.clone();
+        let processing_ready = Arc::clone(&ready);
+        let processing_worker = std::thread::spawn(move || {
+            processing_ready.wait();
+            processing_store.record_processing_fact(
+                &processing_recording_id,
+                "local-ai-recap",
+                "heuristic",
+                None,
+                None,
+            )
+        });
+
+        ready.wait();
+        drop(held_guard);
+
+        selection_worker
+            .join()
+            .expect("join selection worker")
+            .expect("select revision");
+        let completed_revision = completion_worker
+            .join()
+            .expect("join completion worker")
+            .expect("complete concurrent revision")["revisionId"]
+            .as_str()
+            .expect("completed revision id")
+            .to_string();
+        processing_worker
+            .join()
+            .expect("join processing worker")
+            .expect("record processing fact");
+
+        let manifest = read_manifest(
+            &store
+                .recording_dir(&recording_id)
+                .expect("recording directory"),
+        )
+        .expect("read final manifest");
+        assert_eq!(manifest.transcript_revisions.len(), 3);
+        assert!(manifest
+            .transcript_revisions
+            .iter()
+            .any(|revision| revision.revision_id == completed_revision));
+        assert_eq!(manifest.processing_receipts.len(), 3);
+        assert!(manifest
+            .privacy_events
+            .iter()
+            .any(|event| event.event_type == "local-ai-recap"));
+        assert!(matches!(
+            manifest.current_transcript_revision_id.as_deref(),
+            Some(current) if current == first_revision || current == completed_revision
+        ));
+    }
+
+    #[test]
+    fn transcript_reruns_select_one_current_revision_and_preserve_older_revision() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Revision history".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let first_index = write_segment(&store, &recording_id, "first transcript");
+        let first = complete_revision(
+            &store,
+            &recording_id,
+            vec![first_index],
+            "initial",
+            "first transcript",
+            "first transcript",
+        );
+        let first_revision_id = first["revisionId"].as_str().expect("first id").to_string();
+        let first_before = store
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id: first_revision_id.clone(),
+            })
+            .expect("read first revision");
+
+        let second_index = write_segment(&store, &recording_id, "second transcript");
+        let second = complete_revision(
+            &store,
+            &recording_id,
+            vec![second_index],
+            "reprocess",
+            " second transcript ",
+            "second transcript",
+        );
+        let current = store
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read current transcript");
+        assert_eq!(current["revisionCount"], 2);
+        assert_eq!(current["currentRevisionId"], second["revisionId"]);
+        assert_eq!(current["segmentCount"], 1);
+        assert_eq!(current["segments"][0]["text"], "second transcript");
+
+        let first_after = store
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id: first_revision_id.clone(),
+            })
+            .expect("read immutable first revision again");
+        assert_eq!(first_before["revision"], first_after["revision"]);
+        assert_eq!(first_after["segments"][0]["text"], "first transcript");
+
+        let selected = store
+            .select_transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id: first_revision_id,
+            })
+            .expect("select older revision");
+        assert_eq!(selected["olderRevisionsRetained"], 1);
+        let restored = store
+            .transcript(RecordingIdParams { recording_id })
+            .expect("read selected older transcript");
+        assert_eq!(restored["segmentCount"], 1);
+        assert_eq!(restored["segments"][0]["text"], "first transcript");
+    }
+
+    #[test]
+    fn schema_five_exposes_typed_asr_revision_and_stage_receipt() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Typed history".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "typed raw transcript");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "typed raw transcript",
+            "typed raw transcript",
+        );
+
+        let history = store
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("typed trust history");
+        assert_eq!(history["revisions"][0]["kind"], "raw-asr");
+        assert_eq!(history["revisions"][0]["parentRevisionId"], Value::Null);
+        assert_eq!(history["currentRevisionId"], committed["revisionId"]);
+        assert_eq!(history["currentCleanedRevisionId"], Value::Null);
+        assert_eq!(history["processingReceipts"][0]["stage"], "transcription");
+        assert_eq!(
+            history["processingReceipts"][0]["validationResult"],
+            "passed"
+        );
+        assert_eq!(history["processingReceipts"][0]["fallbackApplied"], false);
+
+        let manifest = read_manifest(
+            &store
+                .recording_dir(&recording_id)
+                .expect("recording directory"),
+        )
+        .expect("schema five manifest");
+        assert_eq!(manifest.schema_version, 5);
+    }
+
+    #[test]
+    fn cleaned_revision_uses_separate_pointer_and_cannot_replace_evidence() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Separate cleaned pointer".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "immutable source");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "immutable source",
+            "immutable source",
+        );
+        let raw_revision_id = committed["revisionId"]
+            .as_str()
+            .expect("raw revision id")
+            .to_string();
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("recording directory");
+        let mut manifest = read_manifest(&dir).expect("manifest");
+        let raw = manifest.transcript_revisions[0].clone();
+        let cleaned_revision_id = format!("tr-000002-{}", now_ms());
+        manifest.transcript_revisions.push(TranscriptRevision {
+            revision_id: cleaned_revision_id.clone(),
+            version: 2,
+            source: "ai-cleanup".to_string(),
+            kind: TranscriptRevisionKind::AiCleaned,
+            parent_revision_id: Some(raw_revision_id.clone()),
+            chunk_indices: raw.chunk_indices,
+            engine: "local-llm".to_string(),
+            model_id: Some("fixture-local-model".to_string()),
+            model_sha256: Some("b".repeat(64)),
+            raw_text_chunk_indices: None,
+            comparison: raw.comparison,
+            created_at_ms: now_ms(),
+        });
+        manifest.current_cleaned_revision_id = Some(cleaned_revision_id.clone());
+        write_manifest(&dir, &manifest).expect("write valid cleaned revision");
+
+        let history = store
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("history with cleaned revision");
+        assert_eq!(history["currentRevisionId"], raw_revision_id);
+        assert_eq!(history["currentCleanedRevisionId"], cleaned_revision_id);
+        assert_eq!(history["revisions"][1]["kind"], "ai-cleaned");
+        assert_eq!(
+            history["revisions"][1]["parentRevisionId"],
+            history["revisions"][0]["revisionId"]
+        );
+
+        let error = store
+            .select_transcript_revision(TranscriptRevisionParams {
+                recording_id,
+                revision_id: cleaned_revision_id,
+            })
+            .expect_err("cleaned text must not replace evidence");
+        assert_eq!(error.code, "TRANSCRIPT_CLEANED_REVISION_SELECTION_INVALID");
+    }
+
+    #[test]
+    fn cleaned_revision_rejects_missing_parent() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "source");
+        complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "source",
+            "source",
+        );
+        let dir = store
+            .recording_dir(&recording_id)
+            .expect("recording directory");
+        let mut manifest = read_manifest(&dir).expect("manifest");
+        let raw = manifest.transcript_revisions[0].clone();
+        manifest.transcript_revisions.push(TranscriptRevision {
+            revision_id: format!("tr-000002-{}", now_ms()),
+            version: 2,
+            source: "ai-cleanup".to_string(),
+            kind: TranscriptRevisionKind::AiCleaned,
+            parent_revision_id: Some("tr-missing-parent".to_string()),
+            chunk_indices: raw.chunk_indices,
+            engine: "local-llm".to_string(),
+            model_id: Some("fixture-local-model".to_string()),
+            model_sha256: Some("c".repeat(64)),
+            raw_text_chunk_indices: None,
+            comparison: raw.comparison,
+            created_at_ms: now_ms(),
+        });
+
+        write_manifest(&dir, &manifest).expect("write adversarial manifest fixture");
+        let error = read_manifest(&dir).expect_err("missing parent must fail closed on reopen");
+        assert_eq!(error.code, "TRANSCRIPT_PARENT_REVISION_INVALID");
+    }
+
+    #[test]
+    fn cleanup_commit_preserves_evidence_and_records_validated_lineage() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Cleanup handoff".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "um this is the source");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "um this is the source",
+            "um this is the source",
+        );
+        let parent_revision_id = committed["revisionId"]
+            .as_str()
+            .expect("parent revision")
+            .to_string();
+        let attempt_id = store
+            .begin_cleanup_attempt(&recording_id)
+            .expect("begin cleanup attempt");
+        store
+            .write_cleanup_attempt_segment(
+                &attempt_id,
+                WriteTranscriptSegmentParams {
+                    recording_id: recording_id.clone(),
+                    channel: "mic".to_string(),
+                    speaker: Some("Me".to_string()),
+                    text: "This is the source.".to_string(),
+                    start_ms: 0,
+                    duration_ms: Some(500),
+                    end_ms: None,
+                    confidence: Some(0.9),
+                },
+            )
+            .expect("write cleaned segment");
+        let cleaned = store
+            .complete_cleanup_attempt(CleanupSuccessDraft {
+                recording_id: recording_id.clone(),
+                attempt_id,
+                parent_revision_id: parent_revision_id.clone(),
+                engine: "llama-cpp-local".to_string(),
+                model_id: "qwen3-4b-official-q4-k-m".to_string(),
+                model_sha256: "b".repeat(64),
+                prompt_template_sha256: "c".repeat(64),
+                started_at_ms: now_ms(),
+                elapsed_ms: 20,
+            })
+            .expect("commit cleaned revision");
+
+        let history = store
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read cleanup history");
+        assert_eq!(history["currentRevisionId"], parent_revision_id);
+        assert_eq!(history["currentCleanedRevisionId"], cleaned["revisionId"]);
+        assert_eq!(history["revisions"][1]["kind"], "ai-cleaned");
+        assert_eq!(
+            history["processingReceipts"][1]["inputRevisionId"],
+            history["revisions"][0]["revisionId"]
+        );
+        assert_eq!(history["processingReceipts"][1]["stage"], "cleanup");
+        assert_eq!(
+            history["processingReceipts"][1]["validationResult"],
+            "passed"
+        );
+
+        let ai_input = store
+            .transcript_for_local_ai(recording_id)
+            .expect("read AI handoff transcript");
+        assert_eq!(ai_input["inputRevisionKind"], "ai-cleaned");
+        assert_eq!(ai_input["cleanupFallbackApplied"], false);
+        assert_eq!(ai_input["segments"][0]["text"], "This is the source.");
+    }
+
+    #[test]
+    fn recap_receipt_preserves_summary_lineage_without_creating_a_transcript_revision() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Summary lineage".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "the original source");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "the original source",
+            "the original source",
+        );
+        let input_revision_id = committed["revisionId"]
+            .as_str()
+            .expect("input revision")
+            .to_string();
+
+        store
+            .record_recap_receipt(RecapReceiptDraft {
+                recording_id: recording_id.clone(),
+                input_revision_id: input_revision_id.clone(),
+                engine: "llama-cpp-local".to_string(),
+                model_id: Some("qwen3-4b-official-q4-k-m".to_string()),
+                model_sha256: Some("d".repeat(64)),
+                prompt_template_sha256: "e".repeat(64),
+                validation_result: "passed".to_string(),
+                fallback_applied: true,
+                started_at_ms: now_ms(),
+                elapsed_ms: 12,
+            })
+            .expect("record recap receipt");
+
+        let history = store
+            .trust_history(RecordingIdParams { recording_id })
+            .expect("read recap history");
+        assert_eq!(history["revisionCount"], 1);
+        assert_eq!(history["receiptCount"], 2);
+        assert_eq!(
+            history["processingReceipts"][1]["operation"],
+            "local-ai-recap"
+        );
+        assert_eq!(history["processingReceipts"][1]["stage"], "recap");
+        assert_eq!(history["processingReceipts"][1]["revisionId"], Value::Null);
+        assert_eq!(
+            history["processingReceipts"][1]["inputRevisionId"],
+            input_revision_id
+        );
+        assert_eq!(history["processingReceipts"][1]["fallbackApplied"], true);
+    }
+
+    #[test]
+    fn search_labels_original_and_cleaned_transcript_matches_separately() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "um handoffterm source");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "um handoffterm source",
+            "um handoffterm source",
+        );
+        let attempt_id = store
+            .begin_cleanup_attempt(&recording_id)
+            .expect("begin cleanup");
+        store
+            .write_cleanup_attempt_segment(
+                &attempt_id,
+                WriteTranscriptSegmentParams {
+                    recording_id: recording_id.clone(),
+                    channel: "mic".to_string(),
+                    speaker: Some("Me".to_string()),
+                    text: "Handoffterm polishedonlyterm source.".to_string(),
+                    start_ms: 0,
+                    duration_ms: Some(500),
+                    end_ms: None,
+                    confidence: Some(0.9),
+                },
+            )
+            .expect("write cleaned transcript");
+        store
+            .complete_cleanup_attempt(CleanupSuccessDraft {
+                recording_id: recording_id.clone(),
+                attempt_id,
+                parent_revision_id: committed["revisionId"]
+                    .as_str()
+                    .expect("parent revision")
+                    .to_string(),
+                engine: "llama-cpp-local".to_string(),
+                model_id: "qwen3-4b-official-q4_k_m".to_string(),
+                model_sha256: "a".repeat(64),
+                prompt_template_sha256: "b".repeat(64),
+                started_at_ms: now_ms(),
+                elapsed_ms: 5,
+            })
+            .expect("commit cleaned transcript");
+
+        let search = wait_for_search(&store, "handoffterm");
+        assert_eq!(search["matchCount"], 2);
+        let kinds = search["matches"]
+            .as_array()
+            .expect("search matches")
+            .iter()
+            .filter_map(|value| value["rowKind"].as_str())
+            .collect::<HashSet<_>>();
+        assert!(kinds.contains("originalTranscriptSegment"));
+        assert!(kinds.contains("cleanedTranscriptSegment"));
+
+        let replacement_index = write_segment(&store, &recording_id, "replacement source");
+        complete_revision(
+            &store,
+            &recording_id,
+            vec![replacement_index],
+            "manual reprocess",
+            "replacement source",
+            "replacement source",
+        );
+        let stale_cleaned_search = wait_for_search(&store, "polishedonlyterm");
+        assert_eq!(stale_cleaned_search["matchCount"], 0);
+    }
+
+    #[test]
+    fn cleanup_commit_rejects_changed_segment_metadata() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "source");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "source",
+            "source",
+        );
+        let parent_revision_id = committed["revisionId"]
+            .as_str()
+            .expect("parent revision")
+            .to_string();
+        let attempt_id = store
+            .begin_cleanup_attempt(&recording_id)
+            .expect("begin cleanup attempt");
+        store
+            .write_cleanup_attempt_segment(
+                &attempt_id,
+                WriteTranscriptSegmentParams {
+                    recording_id: recording_id.clone(),
+                    channel: "mic".to_string(),
+                    speaker: Some("Me".to_string()),
+                    text: "Source.".to_string(),
+                    start_ms: 100,
+                    duration_ms: Some(500),
+                    end_ms: None,
+                    confidence: Some(0.9),
+                },
+            )
+            .expect("write mismatched segment");
+        let error = store
+            .complete_cleanup_attempt(CleanupSuccessDraft {
+                recording_id,
+                attempt_id,
+                parent_revision_id,
+                engine: "llama-cpp-local".to_string(),
+                model_id: "qwen3-4b-official-q4-k-m".to_string(),
+                model_sha256: "b".repeat(64),
+                prompt_template_sha256: "c".repeat(64),
+                started_at_ms: now_ms(),
+                elapsed_ms: 20,
+            })
+            .expect_err("timestamp drift must fail");
+        assert_eq!(error.code, "TRANSCRIPT_CLEANUP_MAPPING_INVALID");
+    }
+
+    #[test]
+    fn first_native_reprocess_promotes_legacy_manual_transcript_before_replacing_it() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Legacy reprocess".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        write_segment(&store, &recording_id, "legacy transcript remains available");
+        write_segment(
+            &store,
+            &recording_id,
+            "legacy second segment remains available",
+        );
+        write_segment(
+            &store,
+            &recording_id,
+            "legacy third segment remains available",
+        );
+        let legacy_manifest = read_manifest(
+            &store
+                .recording_dir(&recording_id)
+                .expect("legacy recording directory"),
+        )
+        .expect("read legacy manifest");
+        let legacy_indices = current_transcript_chunk_indices(&legacy_manifest);
+        let bounded_error =
+            legacy_transcript_bytes_with_limit(&legacy_manifest, &legacy_indices, 8)
+                .expect_err("oversized legacy migration must fail before content reads");
+        assert_eq!(bounded_error.code, "TRANSCRIPT_LEGACY_MIGRATION_TOO_LARGE");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish legacy recording");
+        let attempt_id = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin reprocess attempt");
+        write_attempt_segment(&store, &recording_id, &attempt_id, "replacement transcript");
+        let completed =
+            complete_attempt(&store, &recording_id, &attempt_id, "replacement transcript")
+                .expect("complete reprocess attempt");
+
+        let restarted = RecordingStore::with_root(store.root.clone());
+        let history = restarted
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read Trust History");
+        assert_eq!(history["revisionCount"], 2);
+        assert_eq!(history["revisions"][0]["source"], "initial");
+        assert_eq!(history["revisions"][0]["engine"], "legacy-manual");
+        assert_eq!(history["revisions"][0]["rawComparisonAvailable"], false);
+        assert_eq!(history["revisions"][1]["source"], "reprocess");
+        assert_eq!(history["currentRevisionId"], completed["revisionId"]);
+
+        let legacy_revision_id = history["revisions"][0]["revisionId"]
+            .as_str()
+            .expect("legacy revision id")
+            .to_string();
+        let legacy = restarted
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id: legacy_revision_id.clone(),
+            })
+            .expect("read preserved legacy revision");
+        assert_eq!(legacy["segmentCount"], 3);
+        assert_eq!(
+            legacy["segments"][0]["text"],
+            "legacy transcript remains available"
+        );
+        assert_eq!(
+            legacy["segments"][1]["text"],
+            "legacy second segment remains available"
+        );
+        assert_eq!(
+            legacy["segments"][2]["text"],
+            "legacy third segment remains available"
+        );
+        assert_eq!(legacy["comparisonView"]["reason"], "legacy-revision");
+        restarted
+            .select_transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id: legacy_revision_id,
+            })
+            .expect("select preserved legacy revision");
+        let selected = restarted
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read selected legacy transcript");
+        assert_eq!(selected["segmentCount"], 3);
+        let exported = restarted
+            .export_markdown(ExportRecordingParams {
+                recording_id,
+                format: "markdown".to_string(),
+                channel: None,
+                report: None,
+                options: ExportDocumentOptions::default(),
+            })
+            .expect("export selected legacy transcript");
+        assert!(exported["markdown"]
+            .as_str()
+            .expect("export markdown")
+            .contains("legacy third segment remains available"));
+    }
+
+    #[test]
+    fn raw_transcript_is_encrypted_private_and_available_only_as_a_bounded_revision_view() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "normalized safe phrase");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "raw-private-original phrase",
+            "normalized safe phrase",
+        );
+        let revision_id = committed["revisionId"]
+            .as_str()
+            .expect("revision id")
+            .to_string();
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest");
+        let raw_index = manifest.transcript_revisions[0]
+            .raw_text_chunk_indices
+            .as_ref()
+            .and_then(|indices| indices.first())
+            .copied()
+            .expect("raw chunk index");
+        let raw_chunk = &manifest.chunks[raw_index as usize];
+        assert_eq!(raw_chunk.kind, DurableChunkKind::RawTranscriptText);
+        assert!(raw_chunk.encrypted);
+        assert!(raw_chunk.file_name.contains(RAW_TRANSCRIPT_FILE_MARKER));
+        let ciphertext = fs::read(dir.join(&raw_chunk.file_name)).expect("raw ciphertext");
+        assert!(!String::from_utf8_lossy(&ciphertext).contains("raw-private-original"));
+
+        let history = store
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("history");
+        let history_json = serde_json::to_string(&history).expect("history json");
+        assert_eq!(history["revisions"][0]["rawComparisonAvailable"], true);
+        assert!(!history_json.contains("rawTextChunkIndices"));
+        assert!(!history_json.contains("raw-private-original"));
+
+        let detail = store
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id,
+            })
+            .expect("revision detail");
+        assert_eq!(detail["comparisonView"]["available"], true);
+        assert_eq!(
+            detail["comparisonView"]["rawText"],
+            "raw-private-original phrase"
+        );
+        assert_eq!(
+            detail["comparisonView"]["normalizedText"],
+            "normalized safe phrase"
+        );
+        assert_eq!(detail["comparisonView"]["encryptedAtRest"], true);
+        let detail_json = serde_json::to_string(&detail).expect("detail json");
+        assert!(!detail_json.contains("rawTextChunkIndices"));
+        assert!(!detail_json.contains(RAW_TRANSCRIPT_FILE_MARKER));
+
+        let general = store
+            .read(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("general recording read");
+        let general_json = serde_json::to_string(&general).expect("general json");
+        assert!(!general_json.contains("raw-private-original"));
+        assert!(!general_json.contains("rawTranscriptText"));
+        assert!(!general_json.contains(RAW_TRANSCRIPT_FILE_MARKER));
+        assert_eq!(general["chunkCount"], 1);
+        assert!(
+            general["summary"]["totalBytes"]
+                .as_u64()
+                .unwrap_or_default()
+                >= ("normalized safe phrase".len() + "raw-private-original phrase".len()) as u64
+        );
+        assert_eq!(
+            store
+                .read_audio_chunk(AudioChunkParams {
+                    recording_id,
+                    index: raw_index,
+                })
+                .expect_err("raw chunk must not be an audio read")
+                .code,
+            "RECORDING_AUDIO_CHUNK_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    fn revision_comparison_preview_is_utf8_safe_and_transport_bounded() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let normalized = "é".repeat(40_000);
+        let raw = format!(" {normalized} ");
+        let index = write_segment(&store, &recording_id, &normalized);
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            &raw,
+            &normalized,
+        );
+        let detail = store
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id,
+                revision_id: committed["revisionId"]
+                    .as_str()
+                    .expect("revision id")
+                    .to_string(),
+            })
+            .expect("bounded detail");
+        for field in ["rawText", "normalizedText"] {
+            let text = detail["comparisonView"][field]
+                .as_str()
+                .expect("bounded comparison text");
+            assert!(text.len() <= MAX_COMPARISON_TEXT_BYTES_PER_SIDE);
+            assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+        }
+        assert_eq!(detail["comparisonView"]["rawTextTruncated"], true);
+        assert_eq!(detail["comparisonView"]["normalizedTextTruncated"], true);
+        assert!(serde_json::to_vec(&detail).expect("serialize detail").len() < 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn revision_detail_stops_before_the_501st_segment_chunk() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let mut indices = Vec::new();
+        for _ in 0..501 {
+            indices.push(write_segment(&store, &recording_id, "x"));
+        }
+        let normalized = vec!["x"; 501].join("\n");
+        let mut metadata = comparison(&normalized, &normalized, 501);
+        metadata.raw_segment_count = 501;
+        metadata.normalized_segment_count = 501;
+        let committed = store
+            .complete_transcription_attempt(TranscriptionSuccessDraft {
+                recording_id: recording_id.clone(),
+                attempt_id: None,
+                chunk_indices: indices.clone(),
+                engine: "whisper-rs".to_string(),
+                model_id: Some("ggml-base.en.bin".to_string()),
+                model_sha256: Some("a".repeat(64)),
+                started_at_ms: now_ms(),
+                elapsed_ms: 25,
+                comparison: metadata,
+                raw_text: normalized,
+            })
+            .expect("complete many-segment revision");
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest");
+        let unread_index = indices[500];
+        let unread_path = dir.join(&manifest.chunks[unread_index as usize].file_name);
+        fs::write(&unread_path, [0xff_u8]).expect("corrupt out-of-page segment");
+
+        let detail = store
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id,
+                revision_id: committed["revisionId"]
+                    .as_str()
+                    .expect("revision id")
+                    .to_string(),
+            })
+            .expect("bounded revision detail must not read segment 501");
+        assert_eq!(detail["segmentCount"], 501);
+        assert_eq!(detail["returnedSegmentCount"], 500);
+        assert_eq!(detail["hasMore"], true);
+        assert_eq!(detail["segments"].as_array().map(Vec::len), Some(500));
+        assert!(
+            serde_json::to_vec(&detail)
+                .expect("serialize bounded detail")
+                .len()
+                < MAX_REVISION_DETAIL_SEGMENT_BYTES + 512 * 1024
+        );
+    }
+
+    #[test]
+    fn legacy_revision_without_raw_chunks_remains_readable_and_reports_unavailable() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "legacy normalized text");
+        let committed = complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            "legacy normalized text",
+            "legacy normalized text",
+        );
+        let revision_id = committed["revisionId"]
+            .as_str()
+            .expect("revision id")
+            .to_string();
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let mut manifest = read_manifest(&dir).expect("manifest");
+        let raw_indices = manifest.transcript_revisions[0]
+            .raw_text_chunk_indices
+            .take()
+            .expect("raw indices");
+        for index in raw_indices.into_iter().rev() {
+            let chunk = manifest.chunks.pop().expect("raw chunk");
+            assert_eq!(chunk.index, index);
+            fs::remove_file(dir.join(chunk.file_name)).expect("remove raw chunk");
+        }
+        manifest.schema_version = 3;
+        manifest.transcript_revisions[0].kind = TranscriptRevisionKind::Legacy;
+        manifest.transcript_revisions[0].parent_revision_id = None;
+        manifest.current_cleaned_revision_id = None;
+        manifest.processing_receipts.clear();
+        write_manifest(&dir, &manifest).expect("write legacy manifest");
+
+        let history = store
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("legacy history");
+        assert_eq!(history["revisions"][0]["rawComparisonAvailable"], false);
+        assert!(!serde_json::to_string(&history)
+            .expect("history json")
+            .contains("rawTextChunkIndices"));
+        let detail = store
+            .transcript_revision(TranscriptRevisionParams {
+                recording_id,
+                revision_id,
+            })
+            .expect("legacy detail");
+        assert_eq!(detail["comparisonView"]["available"], false);
+        assert_eq!(detail["comparisonView"]["reason"], "legacy-revision");
+        assert_eq!(detail["segments"][0]["text"], "legacy normalized text");
+    }
+
+    fn assert_orphan_raw_recovery(manifest_damage: Option<&str>) {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        write_segment(&store, &recording_id, "ordinary readable meeting text");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let orphan = write_orphan_raw_transcript_file(
+            &store,
+            &recording_id,
+            "crash-window-private-raw-text",
+        );
+        let manifest_path = store
+            .recording_dir(&recording_id)
+            .expect("recording dir")
+            .join(MANIFEST_FILE);
+        match manifest_damage {
+            Some("missing") => fs::remove_file(&manifest_path).expect("remove manifest"),
+            Some("corrupt") => fs::write(&manifest_path, b"{corrupt").expect("corrupt manifest"),
+            _ => {}
+        }
+
+        let recovered = store.recover().expect("recover orphan raw chunk");
+        assert_eq!(recovered["quarantinedCount"], 0);
+        assert!(!orphan.exists());
+        let read = store
+            .read(RecordingIdParams { recording_id })
+            .expect("ordinary meeting remains readable");
+        let serialized = serde_json::to_string(&read).expect("serialize recovered meeting");
+        assert!(serialized.contains("ordinary readable meeting text"));
+        assert!(!serialized.contains("crash-window-private-raw-text"));
+        assert!(!serialized.contains("rawTranscriptText"));
+        assert!(!serialized.contains(RAW_TRANSCRIPT_FILE_MARKER));
+        let search = wait_for_search(&store, "crash-window-private-raw-text");
+        assert_eq!(search["matchCount"], 0);
+        let export = store
+            .export_create(ExportRecordingParams {
+                recording_id: read["summary"]["recordingId"]
+                    .as_str()
+                    .expect("recording id from read")
+                    .to_string(),
+                format: "markdown".to_string(),
+                channel: None,
+                report: None,
+                options: Default::default(),
+            })
+            .expect("export recovered meeting");
+        assert!(!serde_json::to_string(&export)
+            .expect("serialize recovered export")
+            .contains("crash-window-private-raw-text"));
+    }
+
+    #[test]
+    fn recovery_removes_uncommitted_raw_chunk_after_manifest_commit_crash_window() {
+        assert_orphan_raw_recovery(None);
+    }
+
+    #[test]
+    fn recovery_removes_unowned_raw_chunk_when_manifest_is_missing() {
+        assert_orphan_raw_recovery(Some("missing"));
+    }
+
+    #[test]
+    fn recovery_removes_unowned_raw_chunk_when_manifest_is_corrupt() {
+        assert_orphan_raw_recovery(Some("corrupt"));
+    }
+
+    #[test]
+    fn failed_first_attempt_is_invisible_before_and_after_restart() {
+        let store = temp_store();
+        let root = store.root.clone();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Attempt isolation".to_string()),
+            })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let attempt_id = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin failed attempt");
+        write_attempt_segment(
+            &store,
+            &recording_id,
+            &attempt_id,
+            "failed-attempt-private-phrase",
+        );
+        store
+            .record_transcription_failure(TranscriptionFailureDraft {
+                recording_id: recording_id.clone(),
+                engine: "whisper-rs".to_string(),
+                model_id: Some("ggml-base.en.bin".to_string()),
+                started_at_ms: now_ms(),
+                elapsed_ms: 12,
+                error_code: "TRANSCRIPTION_ENGINE_FAILED".to_string(),
+                cancelled: false,
+            })
+            .expect("record failed attempt");
+
+        let assert_invisible = |candidate: &RecordingStore| {
+            let transcript = candidate
+                .transcript(RecordingIdParams {
+                    recording_id: recording_id.clone(),
+                })
+                .expect("read transcript");
+            assert_eq!(transcript["segmentCount"], 0);
+            assert_eq!(transcript["revisionCount"], 0);
+            let read = candidate
+                .read(RecordingIdParams {
+                    recording_id: recording_id.clone(),
+                })
+                .expect("read recording");
+            let serialized = serde_json::to_string(&read).expect("serialize read");
+            assert!(!serialized.contains("failed-attempt-private-phrase"));
+            assert_eq!(read["chunkCount"], 0);
+            assert_eq!(read["summary"]["transcriptSegmentCount"], 0);
+            let search = wait_for_search(candidate, "failed-attempt-private-phrase");
+            assert_eq!(search["matchCount"], 0);
+            let receipt = candidate
+                .privacy_receipt(RecordingIdParams {
+                    recording_id: recording_id.clone(),
+                })
+                .expect("privacy receipt");
+            assert_eq!(receipt["content"]["transcriptSegmentCount"], 0);
+            assert_eq!(receipt["trustHistory"]["revisionCount"], 0);
+            if receipt["trustHistory"]["processingReceiptCount"] == 1 {
+                assert_eq!(
+                    receipt["trustHistory"]["processingReceipts"][0]["outcome"],
+                    "failed"
+                );
+            }
+            assert_eq!(receipt["rawPathExposed"], false);
+            assert_eq!(receipt["keyMaterialExposedToRenderer"], false);
+        };
+
+        assert_invisible(&store);
+        let restarted = RecordingStore::with_root(root.clone());
+        restarted.recover().expect("recover restarted store");
+        assert_invisible(&restarted);
+
+        let manifest_path = restarted
+            .recording_dir(&recording_id)
+            .expect("recording dir")
+            .join(MANIFEST_FILE);
+        let mut tampered: Value = serde_json::from_slice(
+            &fs::read(&manifest_path).expect("read attempt manifest for tamper test"),
+        )
+        .expect("parse attempt manifest for tamper test");
+        tampered["chunks"][0]
+            .as_object_mut()
+            .expect("attempt chunk object")
+            .remove("transcriptionAttemptId");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&tampered).expect("serialize tampered attempt manifest"),
+        )
+        .expect("write tampered attempt manifest");
+        let tampered_error = restarted
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("mismatched attempt membership must fail closed");
+        assert_eq!(tampered_error.code, "TRANSCRIPTION_ATTEMPT_CHUNK_INVALID");
+        restarted
+            .recover()
+            .expect("recover attempt membership from durable chunk name");
+        assert_invisible(&restarted);
+
+        fs::remove_file(manifest_path).expect("remove manifest to exercise fail-closed rebuild");
+        let rebuilt = RecordingStore::with_root(root);
+        rebuilt
+            .recover()
+            .expect("rebuild missing manifest after failed attempt");
+        assert_invisible(&rebuilt);
+    }
+
+    #[test]
+    fn cancelled_attempt_preserves_the_previously_committed_transcript() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let committed_attempt = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin committed attempt");
+        write_attempt_segment(
+            &store,
+            &recording_id,
+            &committed_attempt,
+            "stable committed transcript",
+        );
+        complete_attempt(
+            &store,
+            &recording_id,
+            &committed_attempt,
+            "stable committed transcript",
+        )
+        .expect("commit initial transcript");
+        let before = store
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read transcript before cancellation");
+
+        let cancelled_attempt = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin cancelled attempt");
+        write_attempt_segment(
+            &store,
+            &recording_id,
+            &cancelled_attempt,
+            "cancelled-attempt-private-phrase",
+        );
+        store
+            .record_transcription_failure(TranscriptionFailureDraft {
+                recording_id: recording_id.clone(),
+                engine: "whisper-rs".to_string(),
+                model_id: Some("ggml-base.en.bin".to_string()),
+                started_at_ms: now_ms(),
+                elapsed_ms: 8,
+                error_code: "TRANSCRIPTION_CANCELLED".to_string(),
+                cancelled: true,
+            })
+            .expect("record cancelled attempt");
+
+        let after = store
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read transcript after cancellation");
+        assert_eq!(after["currentRevisionId"], before["currentRevisionId"]);
+        assert_eq!(after["segments"], before["segments"]);
+        let read = store
+            .read(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read recording after cancellation");
+        assert!(!serde_json::to_string(&read)
+            .expect("serialize read")
+            .contains("cancelled-attempt-private-phrase"));
+        let history = store
+            .trust_history(RecordingIdParams { recording_id })
+            .expect("read trust history");
+        assert_eq!(history["revisionCount"], 1);
+        assert_eq!(history["receiptCount"], 2);
+        assert_eq!(history["processingReceipts"][1]["outcome"], "cancelled");
+        assert!(history["processingReceipts"][1]["revisionId"].is_null());
+    }
+
+    #[test]
+    fn failed_final_commit_stays_invisible_and_later_success_is_initial() {
+        let store = temp_store().with_failed_transcription_commit();
+        let root = store.root.clone();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let failed_attempt = store
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin commit-failing attempt");
+        write_attempt_segment(
+            &store,
+            &recording_id,
+            &failed_attempt,
+            "history-commit-failed-private-phrase",
+        );
+        let error = complete_attempt(
+            &store,
+            &recording_id,
+            &failed_attempt,
+            "history-commit-failed-private-phrase",
+        )
+        .expect_err("final history commit must fail");
+        assert_eq!(error.code, "TRANSCRIPTION_HISTORY_COMMIT_FAILED");
+        let failed_dir = store
+            .recording_dir(&recording_id)
+            .expect("failed recording directory");
+        assert!(fs::read_dir(&failed_dir)
+            .expect("list failed recording files")
+            .filter_map(Result::ok)
+            .all(|entry| !entry
+                .file_name()
+                .to_string_lossy()
+                .contains(RAW_TRANSCRIPT_FILE_MARKER)));
+        store
+            .record_transcription_failure(TranscriptionFailureDraft {
+                recording_id: recording_id.clone(),
+                engine: "whisper-rs".to_string(),
+                model_id: Some("ggml-base.en.bin".to_string()),
+                started_at_ms: now_ms(),
+                elapsed_ms: 25,
+                error_code: error.code.to_string(),
+                cancelled: false,
+            })
+            .expect("record final commit failure");
+        assert_eq!(
+            store
+                .transcript(RecordingIdParams {
+                    recording_id: recording_id.clone(),
+                })
+                .expect("read after failed commit")["segmentCount"],
+            0
+        );
+
+        let restarted = RecordingStore::with_root(root.clone());
+        restarted.recover().expect("recover after failed commit");
+        assert_eq!(
+            restarted
+                .transcript(RecordingIdParams {
+                    recording_id: recording_id.clone(),
+                })
+                .expect("read after restart")["segmentCount"],
+            0
+        );
+        let successful_attempt = restarted
+            .begin_transcription_attempt(&recording_id)
+            .expect("begin later successful attempt");
+        write_attempt_segment(
+            &restarted,
+            &recording_id,
+            &successful_attempt,
+            "later committed transcript",
+        );
+        complete_attempt(
+            &restarted,
+            &recording_id,
+            &successful_attempt,
+            "later committed transcript",
+        )
+        .expect("commit later successful attempt");
+
+        let history = restarted
+            .trust_history(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read later trust history");
+        assert_eq!(history["revisionCount"], 1);
+        assert_eq!(history["revisions"][0]["source"], "initial");
+        assert_eq!(history["processingReceipts"][0]["outcome"], "failed");
+        assert_eq!(history["processingReceipts"][1]["outcome"], "succeeded");
+        let transcript = restarted
+            .transcript(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("read later transcript");
+        assert_eq!(transcript["segmentCount"], 1);
+        assert_eq!(
+            transcript["segments"][0]["text"],
+            "later committed transcript"
+        );
+
+        let restarted_again = RecordingStore::with_root(root);
+        let transcript_after_restart = restarted_again
+            .transcript(RecordingIdParams { recording_id })
+            .expect("read committed transcript after second restart");
+        assert_eq!(transcript_after_restart["segments"], transcript["segments"]);
+    }
+
+    #[test]
+    fn processing_receipts_capture_failure_and_comparison_without_content_or_paths() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let index = write_segment(&store, &recording_id, "normalized");
+        complete_revision(
+            &store,
+            &recording_id,
+            vec![index],
+            "initial",
+            " normalized ",
+            "normalized",
+        );
+        store
+            .record_transcription_failure(TranscriptionFailureDraft {
+                recording_id: recording_id.clone(),
+                engine: "whisper-rs".to_string(),
+                model_id: Some("ggml-base.en.bin".to_string()),
+                started_at_ms: now_ms(),
+                elapsed_ms: 42,
+                error_code: "TRANSCRIPTION_ENGINE_FAILED".to_string(),
+                cancelled: false,
+            })
+            .expect("record failed receipt");
+
+        let history = store
+            .trust_history(RecordingIdParams { recording_id })
+            .expect("trust history");
+        assert_eq!(history["revisionCount"], 1);
+        assert_eq!(history["receiptCount"], 2);
+        assert_eq!(history["revisions"][0]["comparison"]["changed"], true);
+        assert_eq!(history["processingReceipts"][1]["outcome"], "failed");
+        assert_eq!(
+            history["processingReceipts"][1]["errorCode"],
+            "TRANSCRIPTION_ENGINE_FAILED"
+        );
+        assert_eq!(history["rawPathExposed"], false);
+        assert_eq!(history["keyMaterialExposedToRenderer"], false);
+        let serialized = serde_json::to_string(&history).expect("serialize history");
+        assert!(!serialized.contains(" normalized "));
+        assert!(!serialized.contains("manifest.json"));
+    }
+
+    #[test]
+    fn reprocessing_preparation_uses_original_audio_without_modifying_or_exposing_it() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_audio_chunk(WriteAudioChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_base64: BASE64_STANDARD.encode([0_u8, 0, 1, 0, 2, 0, 3, 0]),
+                sample_rate_hz: 16_000,
+                channel_count: 1,
+                bits_per_sample: 16,
+                start_ms: Some(0),
+            })
+            .expect("write original audio");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest = read_manifest(&dir).expect("manifest");
+        let audio_file = dir.join(&manifest.chunks[0].file_name);
+        let before = fs::read(&audio_file).expect("audio before");
+
+        let prepared = store
+            .prepare_reprocessing(ReprocessingPrepareParams {
+                recording_id,
+                channel: Some("mic".to_string()),
+            })
+            .expect("prepare reprocessing");
+        assert_eq!(prepared["inputKind"], "originalDurableAudio");
+        assert_eq!(prepared["audioChunkIndices"], json!([0]));
+        assert_eq!(
+            prepared["sourceAudioSha256"]
+                .as_str()
+                .expect("audio hash")
+                .len(),
+            64
+        );
+        assert_eq!(
+            prepared["sourceAudioIntegrity"],
+            "pending-background-content-hash-verification"
+        );
+        assert_eq!(prepared["originalAudioModified"], false);
+        assert_eq!(prepared["rawPathExposed"], false);
+        assert_eq!(prepared["keyMaterialExposedToRenderer"], false);
+        assert_eq!(fs::read(audio_file).expect("audio after"), before);
+    }
+
+    #[test]
+    fn default_reprocessing_and_transcription_include_every_audio_source() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        for (channel, start_ms, fill) in [("system", 25_u64, 2_u8), ("mic", 0, 1)] {
+            store
+                .write_audio_chunk(WriteAudioChunkParams {
+                    recording_id: recording_id.clone(),
+                    channel: channel.to_string(),
+                    data_base64: BASE64_STANDARD.encode(vec![fill; 3_200]),
+                    sample_rate_hz: 16_000,
+                    channel_count: 1,
+                    bits_per_sample: 16,
+                    start_ms: Some(start_ms),
+                })
+                .expect("write source audio");
+        }
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+
+        let prepared = store
+            .prepare_reprocessing(ReprocessingPrepareParams {
+                recording_id: recording_id.clone(),
+                channel: None,
+            })
+            .expect("prepare combined reprocessing");
+        assert_eq!(prepared["channel"], "combined");
+        assert_eq!(prepared["audioChunkIndices"], json!([0, 1]));
+        assert_eq!(prepared["audioChunkCount"], 2);
+        assert_eq!(prepared["sampleRateHz"], 16_000);
+        assert_eq!(prepared["channelCount"], 1);
+        assert_eq!(prepared["bitsPerSample"], 16);
+        assert_eq!(prepared["dispatchInput"]["channel"], "combined");
+        assert_eq!(
+            prepared["sourceAudioSha256"]
+                .as_str()
+                .expect("combined source digest")
+                .len(),
+            64
+        );
+
+        let tracks = store
+            .pcm_tracks_for_transcription(&recording_id, None)
+            .expect("default transcription tracks");
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|track| track.channel.as_str())
+                .collect::<Vec<_>>(),
+            ["mic", "system"]
+        );
+        let mic_only = store
+            .pcm_tracks_for_transcription(&recording_id, Some("mic"))
+            .expect("explicit microphone track");
+        assert_eq!(mic_only.len(), 1);
+        assert_eq!(mic_only[0].channel, "mic");
+    }
+
+    #[test]
+    fn legacy_reprocessing_plan_defers_audio_reads_to_the_background_job() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_audio_chunk(WriteAudioChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_base64: BASE64_STANDARD.encode([0_u8, 0, 1, 0]),
+                sample_rate_hz: 16_000,
+                channel_count: 1,
+                bits_per_sample: 16,
+                start_ms: Some(0),
+            })
+            .expect("write original audio");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let mut manifest = read_manifest(&dir).expect("manifest");
+        manifest.chunks[0].content_sha256 = None;
+        let audio_path = dir.join(&manifest.chunks[0].file_name);
+        write_manifest(&dir, &manifest).expect("write legacy manifest");
+        let stored_len = fs::metadata(&audio_path).expect("audio metadata").len() as usize;
+        fs::write(&audio_path, vec![0_u8; stored_len])
+            .expect("corrupt payload without changing manifest-visible metadata");
+
+        let prepared = store
+            .prepare_reprocessing(ReprocessingPrepareParams {
+                recording_id,
+                channel: Some("mic".to_string()),
+            })
+            .expect("prepare metadata-only reprocessing");
+
+        assert_eq!(prepared["sourceAudioSha256"], Value::Null);
+        assert!(prepared["sourceAudioIntegrity"]
+            .as_str()
+            .is_some_and(|state| state.starts_with("pending-background-")));
+    }
+
+    #[test]
+    fn fts_queries_are_literal_and_cannot_inject_match_operators() {
+        assert_eq!(
+            fts_literal_query("alpha\" OR *").expect("literal query"),
+            "\"alpha\"\" OR *\""
+        );
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "alpha private phrase".to_string(),
+            })
+            .expect("write searchable text");
+        store
+            .finish(RecordingIdParams { recording_id })
+            .expect("finish recording");
+        let result = wait_for_search(&store, "missing\" OR alpha");
+        assert_eq!(result["matchCount"], 0);
+        assert_eq!(result["plaintextIndexPersisted"], false);
+    }
+
+    #[test]
+    fn trust_history_bounds_and_legacy_manifest_defaults_fail_safe() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        let oversized = store
+            .complete_transcription_attempt(TranscriptionSuccessDraft {
+                recording_id: recording_id.clone(),
+                attempt_id: None,
+                chunk_indices: vec![0; MAX_REVISION_CHUNK_INDICES + 1],
+                engine: "whisper-rs".to_string(),
+                model_id: None,
+                model_sha256: None,
+                started_at_ms: now_ms(),
+                elapsed_ms: 1,
+                comparison: comparison("", "", 0),
+                raw_text: String::new(),
+            })
+            .expect_err("oversized history must fail");
+        assert_eq!(oversized.code, "TRANSCRIPT_REVISION_TOO_LARGE");
+
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest_path = dir.join(MANIFEST_FILE);
+        let mut legacy: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).expect("read current manifest"))
+                .expect("parse current manifest");
+        legacy
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("transcriptRevisions");
+        legacy
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("currentTranscriptRevisionId");
+        legacy
+            .as_object_mut()
+            .expect("manifest object")
+            .remove("processingReceipts");
+        fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&legacy).expect("serialize legacy manifest"),
+        )
+        .expect("write legacy manifest");
+        let history = store
+            .trust_history(RecordingIdParams { recording_id })
+            .expect("read legacy history defaults");
+        assert_eq!(history["revisionCount"], 0);
+        assert_eq!(history["receiptCount"], 0);
+
+        let query_error = store
+            .search(SearchRecordingsParams {
+                query: "x".repeat(201),
+            })
+            .expect_err("oversized query must fail");
+        assert_eq!(query_error.code, "RECORDING_SEARCH_QUERY_INVALID");
+    }
+
+    #[cfg(not(feature = "sqlcipher-vault"))]
+    #[test]
+    fn search_without_sqlcipher_uses_bounded_nonpersistent_fallback() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "fallback search".to_string(),
+            })
+            .expect("write text");
+        store
+            .finish(RecordingIdParams { recording_id })
+            .expect("finish");
+        let result = store
+            .search(SearchRecordingsParams {
+                query: "fallback".to_string(),
+            })
+            .expect("fallback search");
+        assert_eq!(result["searchBackend"], "bounded-scan");
+        assert_eq!(result["encryptedIndex"], false);
+        assert_eq!(result["plaintextIndexPersisted"], false);
+        assert!(!store.root.join("search").exists());
+    }
+
+    #[test]
+    fn read_only_search_includes_transcript_and_notes_without_mutating_source_state() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Budget review".to_string()),
+            })
+            .expect("start read-only search recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "Transcript budget decision".to_string(),
+            })
+            .expect("write searchable transcript");
+        store
+            .save_notes(SaveNotesParams {
+                recording_id: recording_id.clone(),
+                markdown: "Notes budget owner is Priya".to_string(),
+            })
+            .expect("write searchable notes");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish read-only search recording");
+        let recording_dir = store.recording_dir(&recording_id).expect("recording dir");
+        let manifest_before = fs::read(recording_dir.join(MANIFEST_FILE)).expect("manifest before");
+
+        let result = store
+            .search_read_only(SearchRecordingsParams {
+                query: "budget".to_string(),
+            })
+            .expect("read-only search");
+
+        assert_eq!(result["searchBackend"], "bounded-read-only-source-scan");
+        assert_eq!(result["matchCount"], 3);
+        let row_kinds = result["matches"]
+            .as_array()
+            .expect("matches")
+            .iter()
+            .filter_map(|value| value["rowKind"].as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            row_kinds,
+            HashSet::from(["meetingLabel", "originalTranscriptText", "notesMarkdown"])
+        );
+        assert_eq!(result["rawPathExposed"], false);
+        assert_eq!(result["keyMaterialExposedToRenderer"], false);
+        assert_eq!(
+            fs::read(recording_dir.join(MANIFEST_FILE)).expect("manifest after"),
+            manifest_before
+        );
+        assert!(!store.root.join(QUARANTINE_RECEIPTS_DIR).exists());
+        #[cfg(feature = "sqlcipher-vault")]
+        let _ = wait_for_search(&store, "budget");
+    }
+
+    #[test]
+    fn read_only_search_does_not_create_a_missing_store_or_key() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let root = std::env::temp_dir().join(format!("candor-search-read-only-empty-{stamp}"));
+        let store = RecordingStore::with_root(root.clone());
+
+        let result = store
+            .search_read_only(SearchRecordingsParams {
+                query: "nothing".to_string(),
+            })
+            .expect("empty read-only search");
+
+        assert_eq!(result["matchCount"], 0);
+        assert!(!root.exists());
+    }
+
+    #[test]
+    fn search_collection_and_plaintext_limits_truncate_before_unbounded_retention() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start bounded search recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "bounded plaintext".to_string(),
+            })
+            .expect("write bounded text");
+        store
+            .finish(RecordingIdParams { recording_id })
+            .expect("finish bounded search recording");
+
+        let (manifests, descriptor_truncated) = store
+            .collect_search_manifests_bounded(10, 0, u64::MAX)
+            .expect("collect with zero descriptor budget");
+        assert!(descriptor_truncated);
+        assert!(manifests.items.is_empty());
+
+        let (manifests, manifest_truncated) = store
+            .collect_search_manifests_bounded(10, 10, 1)
+            .expect("collect with small manifest budget");
+        assert!(manifest_truncated);
+        assert!(manifests.items.is_empty());
+
+        let (rows, quarantined, text_truncated) = store
+            .searchable_text_rows_bounded(10, 10, u64::MAX, 10, 4, false)
+            .expect("collect with small plaintext budget");
+        assert!(text_truncated);
+        assert_eq!(quarantined, 0);
+        assert!(rows.is_empty());
+    }
+
+    #[test]
+    fn bounded_search_collection_skips_an_oversized_manifest_and_keeps_later_meetings() {
+        let store = temp_store();
+        let mut recording_ids = [
+            recording_id(
+                &store
+                    .start(StartRecordingParams { label: None })
+                    .expect("start first bounded recording"),
+            ),
+            recording_id(
+                &store
+                    .start(StartRecordingParams { label: None })
+                    .expect("start second bounded recording"),
+            ),
+        ];
+        recording_ids.sort();
+        for text in ["oversized one", "oversized two"] {
+            store
+                .write_text_chunk(WriteChunkParams {
+                    recording_id: recording_ids[0].clone(),
+                    channel: "mic".to_string(),
+                    data_utf8: text.to_string(),
+                })
+                .expect("write oversized manifest chunk");
+        }
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_ids[1].clone(),
+                channel: "mic".to_string(),
+                data_utf8: "later bounded meeting".to_string(),
+            })
+            .expect("write later bounded manifest chunk");
+
+        let (collection, truncated) = store
+            .collect_search_manifests_bounded(10, 1, u64::MAX)
+            .expect("collect bounded manifests");
+        assert!(truncated);
+        assert_eq!(collection.items.len(), 1);
+        assert_eq!(collection.items[0].0.recording_id, recording_ids[1]);
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn search_with_sqlcipher_uses_encrypted_fts5_without_path_or_key_exposure() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "encrypted full text search".to_string(),
+            })
+            .expect("write text");
+        store
+            .finish(RecordingIdParams { recording_id })
+            .expect("finish");
+        let result = wait_for_search(&store, "encrypted");
+        assert_eq!(result["searchBackend"], "sqlcipher-fts5");
+        assert_eq!(result["encryptedIndex"], true);
+        assert_eq!(result["plaintextIndexPersisted"], false);
+        assert_eq!(result["rawPathExposed"], false);
+        assert_eq!(result["keyMaterialExposedToRenderer"], false);
+        let serialized = serde_json::to_string(&result).expect("serialize result");
+        assert!(!serialized.contains("trust-history.sqlcipher"));
+        let search_path = store.root.join(TRUST_SEARCH_DIR).join(TRUST_SEARCH_FILE);
+        let encrypted_bytes = fs::read(&search_path).expect("read encrypted search database");
+        assert!(!encrypted_bytes.starts_with(b"SQLite format 3\0"));
+        assert!(!encrypted_bytes
+            .windows(b"encrypted full text search".len())
+            .any(|window| window == b"encrypted full text search"));
+
+        let wrong_key = Connection::open_with_flags(
+            &search_path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open encrypted database for wrong-key proof");
+        wrong_key
+            .pragma_update(None, "key", "0".repeat(64))
+            .expect("apply wrong SQLCipher key");
+        assert!(wrong_key
+            .query_row("SELECT count(*) FROM sqlite_master", [], |row| row
+                .get::<_, i64>(0))
+            .is_err());
+
+        let injected = wait_for_search(&store, "missing\" OR encrypted");
+        assert_eq!(injected["searchBackend"], "sqlcipher-fts5");
+        assert_eq!(injected["matchCount"], 0);
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_rebuild_removes_owned_crash_sidecars() {
+        let store = temp_store();
+        let search_root = store.root.join(TRUST_SEARCH_DIR);
+        fs::create_dir_all(&search_root).expect("create search root");
+        let sidecars = [
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next-journal")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next-wal")),
+            search_root.join(format!("{TRUST_SEARCH_FILE}.next-shm")),
+        ];
+        for sidecar in &sidecars {
+            fs::write(sidecar, b"interrupted temporary index").expect("seed crash sidecar");
+        }
+
+        assert!(store
+            .rebuild_trust_search_index_once()
+            .expect("rebuild encrypted search"));
+        assert!(sidecars.iter().all(|sidecar| !sidecar.exists()));
+        assert!(search_root.join(TRUST_SEARCH_FILE).is_file());
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_rejects_live_and_dangling_temporary_symlinks() {
+        use std::os::windows::fs::{symlink_dir, symlink_file};
+
+        let store = temp_store();
+        let search_root = store.root.join(TRUST_SEARCH_DIR);
+        fs::create_dir_all(&search_root).expect("create search root");
+        let target = search_root.join("outside-owned-temp.db");
+        let link = search_root.join(format!("{TRUST_SEARCH_FILE}.next"));
+        fs::write(&target, b"not an owned temporary index").expect("write symlink target");
+        if symlink_file(&target, &link).is_err() {
+            return;
+        }
+        let live_error = remove_owned_trust_search_files(std::slice::from_ref(&link))
+            .expect_err("live temporary symlink must fail closed");
+        assert_eq!(live_error.code, "TRUST_SEARCH_SYNC_FAILED");
+        fs::remove_file(&link).expect("remove live symlink");
+        fs::remove_file(&target).expect("remove symlink target");
+
+        if symlink_file(&target, &link).is_err() {
+            return;
+        }
+        let dangling_error = remove_owned_trust_search_files(std::slice::from_ref(&link))
+            .expect_err("dangling temporary symlink must fail closed");
+        assert_eq!(dangling_error.code, "TRUST_SEARCH_SYNC_FAILED");
+        fs::remove_file(&link).expect("remove dangling symlink");
+
+        let outside_directory = store.root.join("outside-search-directory");
+        fs::create_dir_all(&outside_directory).expect("create outside directory");
+        fs::remove_dir_all(&search_root).expect("remove owned search directory");
+        if symlink_dir(&outside_directory, &search_root).is_err() {
+            return;
+        }
+        fs::remove_dir_all(&outside_directory).expect("make search directory symlink dangling");
+        let invalidate_error = store
+            .invalidate_trust_search_index_unlocked()
+            .expect_err("dangling search directory symlink must fail closed");
+        assert_eq!(invalidate_error.code, "TRUST_SEARCH_INVALIDATE_FAILED");
+        fs::remove_dir(&search_root).expect("remove dangling directory symlink");
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_rebuilds_existing_index_after_restart_before_serving_results() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start restart search recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "restart freshness phrase".to_string(),
+            })
+            .expect("write restart search text");
+        store
+            .finish(RecordingIdParams { recording_id })
+            .expect("finish restart search recording");
+        assert_eq!(
+            wait_for_search(&store, "restart freshness")["matchCount"],
+            1
+        );
+
+        let restarted = RecordingStore::with_root(store.root.clone());
+        let first = restarted
+            .search(SearchRecordingsParams {
+                query: "restart freshness".to_string(),
+            })
+            .expect_err("restart must not trust a prior process index generation");
+        assert_eq!(first.code, "RECORDING_SEARCH_INDEX_BUILDING");
+        assert_eq!(
+            wait_for_search(&restarted, "restart freshness")["matchCount"],
+            1
+        );
+    }
+
+    fn wait_for_search(store: &RecordingStore, query: &str) -> Value {
+        for _ in 0..400 {
+            match store.search(SearchRecordingsParams {
+                query: query.to_string(),
+            }) {
+                Ok(result) => return result,
+                Err(error) if error.code == "RECORDING_SEARCH_INDEX_BUILDING" => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => panic!("encrypted search failed: {}: {}", error.code, error.message),
+            }
+        }
+        panic!("encrypted search index did not become ready");
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn first_encrypted_search_reports_index_building_instead_of_zero_matches() {
+        let store = temp_store();
+        let error = store
+            .search(SearchRecordingsParams {
+                query: "first query".to_string(),
+            })
+            .expect_err("a missing encrypted index must be an explicit retry state");
+        assert_eq!(error.code, "RECORDING_SEARCH_INDEX_BUILDING");
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_surfaces_persistent_backfill_failure_and_recovers_after_source_change() {
+        let store = temp_store();
+        let search_root = store.root.join(TRUST_SEARCH_DIR);
+        fs::create_dir_all(&store.root).expect("create test root");
+        fs::write(&search_root, b"not an owned search directory")
+            .expect("seed invalid search root");
+        let initial = store
+            .search(SearchRecordingsParams {
+                query: "failure".to_string(),
+            })
+            .expect_err("first request schedules backfill");
+        assert_eq!(initial.code, "RECORDING_SEARCH_INDEX_BUILDING");
+
+        let failure = (0..400)
+            .find_map(|_| {
+                let error = store
+                    .search(SearchRecordingsParams {
+                        query: "failure".to_string(),
+                    })
+                    .expect_err("invalid search root cannot become ready");
+                if error.code == "RECORDING_SEARCH_INDEX_BUILDING" {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    None
+                } else {
+                    Some(error)
+                }
+            })
+            .expect("persistent backfill failure");
+        assert_eq!(failure.code, "TRUST_SEARCH_BACKFILL_FAILED");
+        let repeated = store
+            .search(SearchRecordingsParams {
+                query: "failure".to_string(),
+            })
+            .expect_err("stable failure must not reschedule forever");
+        assert_eq!(repeated.code, "TRUST_SEARCH_BACKFILL_FAILED");
+        assert!(!store.trust_search_backfill_running.load(Ordering::Acquire));
+
+        fs::remove_file(&search_root).expect("remove invalid search root");
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start after repair");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "recovered encrypted search".to_string(),
+            })
+            .expect("write after repair");
+        store
+            .finish(RecordingIdParams { recording_id })
+            .expect("finish after repair");
+        assert_eq!(wait_for_search(&store, "recovered")["matchCount"], 1);
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_returns_promptly_instead_of_waiting_for_backfill() {
+        let store = temp_store();
+        store
+            .trust_search_index_generation
+            .store(1, Ordering::Release);
+        store
+            .trust_search_source_generation
+            .store(1, Ordering::Release);
+        let search_guard = store
+            .trust_search_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let started = std::time::Instant::now();
+        let error = store
+            .search(SearchRecordingsParams {
+                query: "bounded".to_string(),
+            })
+            .expect_err("busy index must surface an explicit retry state");
+        assert_eq!(error.code, "RECORDING_SEARCH_INDEX_BUILDING");
+        assert!(started.elapsed() < std::time::Duration::from_millis(250));
+        drop(search_guard);
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_refreshes_selected_revision_and_recovery_state() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Revision search".to_string()),
+            })
+            .expect("start revision recording");
+        let recording_id = recording_id(&started);
+        let first_index = write_segment(&store, &recording_id, "first revision phrase");
+        let first = complete_revision(
+            &store,
+            &recording_id,
+            vec![first_index],
+            "initial",
+            "first revision phrase",
+            "first revision phrase",
+        );
+        let first_revision_id = first["revisionId"]
+            .as_str()
+            .expect("first revision id")
+            .to_string();
+        let second_index = write_segment(&store, &recording_id, "second revision phrase");
+        complete_revision(
+            &store,
+            &recording_id,
+            vec![second_index],
+            "reprocess",
+            "second revision phrase",
+            "second revision phrase",
+        );
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish revision recording");
+        assert_eq!(wait_for_search(&store, "second revision")["matchCount"], 1);
+        assert_eq!(wait_for_search(&store, "first revision")["matchCount"], 0);
+
+        store
+            .select_transcript_revision(TranscriptRevisionParams {
+                recording_id: recording_id.clone(),
+                revision_id: first_revision_id,
+            })
+            .expect("select first revision");
+        assert_eq!(wait_for_search(&store, "first revision")["matchCount"], 1);
+        assert_eq!(wait_for_search(&store, "second revision")["matchCount"], 0);
+
+        let dir = store.recording_dir(&recording_id).expect("recording dir");
+        let mut manifest = read_manifest(&dir).expect("read manifest for recovery test");
+        manifest.state = RecordingState::Recording;
+        write_manifest(&dir, &manifest).expect("write interrupted state");
+        store.recover().expect("recover interrupted recording");
+        let recovered = wait_for_search(&store, "first revision");
+        assert_eq!(recovered["matchCount"], 1);
+        assert_eq!(recovered["matches"][0]["state"], "needsRecovery");
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn encrypted_search_refreshes_notes_and_deletion_without_stale_text() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Search freshness".to_string()),
+            })
+            .expect("start freshness recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "retained transcript phrase".to_string(),
+            })
+            .expect("write freshness transcript");
+        store
+            .save_notes(SaveNotesParams {
+                recording_id: recording_id.clone(),
+                markdown: "superseded private note".to_string(),
+            })
+            .expect("save first note");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish freshness recording");
+        assert_eq!(wait_for_search(&store, "superseded")["matchCount"], 1);
+
+        store
+            .save_notes(SaveNotesParams {
+                recording_id: recording_id.clone(),
+                markdown: "replacement local note".to_string(),
+            })
+            .expect("replace note");
+        assert_eq!(wait_for_search(&store, "replacement")["matchCount"], 1);
+        assert_eq!(wait_for_search(&store, "superseded")["matchCount"], 0);
+
+        let maintenance_store = store.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let maintenance = std::thread::spawn(move || {
+            let search_guard = maintenance_store
+                .trust_search_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            locked_tx.send(()).expect("report held search lock");
+            release_rx.recv().expect("release held search lock");
+            drop(search_guard);
+        });
+        locked_rx.recv().expect("wait for held search lock");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            release_tx.send(()).expect("release search maintenance");
+        });
+        let deleted = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("confirmed deletion waits for bounded search maintenance");
+        release.join().expect("release thread");
+        maintenance.join().expect("maintenance thread");
+        assert_eq!(deleted["recordingDataRemoved"], true);
+        assert_eq!(wait_for_search(&store, "replacement")["matchCount"], 0);
+        assert_eq!(wait_for_search(&store, "retained")["matchCount"], 0);
     }
 
     #[test]
@@ -3780,6 +11617,13 @@ mod tests {
         let marker = store
             .deletion_pending_marker(&recording_id)
             .expect("pending marker");
+        let search_root = store.root.join(TRUST_SEARCH_DIR);
+        fs::create_dir_all(&search_root).expect("seed derived search directory");
+        fs::write(
+            search_root.join(TRUST_SEARCH_FILE),
+            b"unique deleted meeting text retained by a stale index",
+        )
+        .expect("seed derived search index");
 
         let removed = store
             .delete_finished(RecordingIdParams {
@@ -3790,6 +11634,7 @@ mod tests {
         assert_eq!(removed["state"], "metadataCleanupPending");
         assert_eq!(removed["recordingDataRemoved"], true);
         assert!(!active_dir.exists());
+        assert!(!search_root.exists());
         assert!(marker.is_file());
         assert_eq!(
             store.list().expect("list after delete")["recordingCount"],
@@ -3809,6 +11654,96 @@ mod tests {
             .join(QUARANTINE_RECEIPTS_DIR)
             .join(format!("{recording_id}.json"))
             .exists());
+    }
+
+    #[test]
+    fn deletion_fails_closed_when_derived_search_storage_cannot_be_invalidated() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams { label: None })
+            .expect("start recording");
+        let recording_id = recording_id(&started);
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish recording");
+        let search_root = store.root.join(TRUST_SEARCH_DIR);
+        fs::write(&search_root, b"not an owned search directory")
+            .expect("seed invalid search target");
+
+        let error = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect_err("delete must fail before content removal");
+
+        assert_eq!(error.code, "TRUST_SEARCH_INVALIDATE_FAILED");
+        assert!(store
+            .recording_dir(&recording_id)
+            .expect("recording directory")
+            .is_dir());
+    }
+
+    #[cfg(all(feature = "sqlcipher-vault", windows))]
+    #[test]
+    fn confirmed_deletion_queues_after_bounded_search_wait_without_reconfirmation() {
+        let store = temp_store();
+        let started = store
+            .start(StartRecordingParams {
+                label: Some("Queued deletion".to_string()),
+            })
+            .expect("start queued deletion recording");
+        let recording_id = recording_id(&started);
+        store
+            .write_text_chunk(WriteChunkParams {
+                recording_id: recording_id.clone(),
+                channel: "mic".to_string(),
+                data_utf8: "queued deletion search text".to_string(),
+            })
+            .expect("write queued deletion text");
+        store
+            .finish(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("finish queued deletion recording");
+        assert_eq!(wait_for_search(&store, "queued deletion")["matchCount"], 1);
+
+        let maintenance_store = store.clone();
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let maintenance = std::thread::spawn(move || {
+            let search_guard = maintenance_store
+                .trust_search_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            locked_tx.send(()).expect("report held search lock");
+            release_rx.recv().expect("release held search lock");
+            drop(search_guard);
+        });
+        locked_rx.recv().expect("wait for held search lock");
+
+        let started_wait = std::time::Instant::now();
+        let queued = store
+            .delete_finished(RecordingIdParams {
+                recording_id: recording_id.clone(),
+            })
+            .expect("confirmed deletion is durably queued");
+        assert_eq!(queued["state"], "deletionQueued");
+        assert_eq!(queued["recordingDataRemoved"], false);
+        assert_eq!(queued["confirmationRetained"], true);
+        assert!(started_wait.elapsed() >= std::time::Duration::from_millis(900));
+        assert!(store.deletion_pending(&recording_id));
+        assert!(store
+            .recording_dir(&recording_id)
+            .expect("queued recording directory")
+            .is_dir());
+
+        release_tx.send(()).expect("release search maintenance");
+        maintenance.join().expect("maintenance thread");
+        let recovered = store.recover().expect("resume confirmed deletion");
+        assert_eq!(recovered["completedDeletionCount"], 1);
+        assert_eq!(recovered["completedDeletionIds"][0], recording_id);
     }
 
     #[test]
@@ -3951,11 +11886,7 @@ mod tests {
             "Focus on the core platform refresh."
         );
 
-        let search = store
-            .search(SearchRecordingsParams {
-                query: "platform".to_string(),
-            })
-            .expect("search");
+        let search = wait_for_search(&store, "platform");
         assert_eq!(search["rawPathExposed"], false);
         assert_eq!(search["matchCount"], 1);
         assert_eq!(search["matches"][0]["rawPathExposed"], false);
@@ -4031,6 +11962,7 @@ mod tests {
                     stored_bytes: 2,
                     encrypted: false,
                     cipher: None,
+                    content_sha256: None,
                     speaker: None,
                     confidence: None,
                     sample_rate_hz: None,
@@ -4038,18 +11970,20 @@ mod tests {
                     bits_per_sample: None,
                     start_ms: None,
                     duration_ms: None,
+                    transcription_attempt_id: None,
                     created_at_ms: now,
                 }],
                 privacy_events: Vec::new(),
+                transcript_revisions: Vec::new(),
+                current_transcript_revision_id: None,
+                current_cleaned_revision_id: None,
+                processing_receipts: Vec::new(),
+                processing_profile: None,
             },
         )
         .expect("write unreadable manifest");
 
-        let searched = store
-            .search(SearchRecordingsParams {
-                query: "platform".to_string(),
-            })
-            .expect("search around unreadable content");
+        let searched = wait_for_search(&store, "platform");
 
         assert_eq!(searched["matchCount"], 1);
         assert_eq!(searched["matches"][0]["recordingId"], healthy_id);
@@ -4094,11 +12028,7 @@ mod tests {
         assert_eq!(read["rawPathExposed"], false);
         assert_eq!(read["markdown"], saved["markdown"]);
 
-        let search = store
-            .search(SearchRecordingsParams {
-                query: "M3 notes".to_string(),
-            })
-            .expect("search notes");
+        let search = wait_for_search(&store, "M3 notes");
         assert_eq!(search["matchCount"], 1);
         assert_eq!(search["matches"][0]["channel"], "notes");
 
@@ -4506,7 +12436,7 @@ mod tests {
             &fs::read(dir.join(MANIFEST_FILE)).expect("read upgraded manifest"),
         )
         .expect("parse upgraded manifest");
-        assert_eq!(upgraded["schemaVersion"], 2);
+        assert_eq!(upgraded["schemaVersion"], CURRENT_MANIFEST_SCHEMA_VERSION);
         assert_eq!(
             upgraded["privacyEvents"]
                 .as_array()
@@ -4619,9 +12549,23 @@ mod tests {
         let store = RecordingStore {
             root: root.clone(),
             root_kind: "test-root",
+            manifest_mutation_lock: Arc::new(Mutex::new(())),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_lock: Arc::new(Mutex::new(())),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_source_generation: Arc::new(AtomicU64::new(1)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_index_generation: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_backfill_running: Arc::new(AtomicBool::new(false)),
+            #[cfg(feature = "sqlcipher-vault")]
+            trust_search_backfill_failure: Arc::new(Mutex::new(None)),
             available_space_override: None,
             fail_space_probe: false,
             fail_tombstone_removal: false,
+            fail_finish: false,
+            fail_abort_unfinished: false,
+            fail_transcription_commit: false,
         };
 
         let health = store.storage_health();

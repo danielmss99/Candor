@@ -18,7 +18,7 @@ function coreApi(overrides: Record<string, unknown> = {}): CoreApi {
   if (overrides.version) app.getVersion = overrides.version as typeof app.getVersion;
   if (overrides.recordingDurableListPage) meetings.list = overrides.recordingDurableListPage as typeof meetings.list;
   return {
-    version: 3,
+    version: 4,
     app,
     meetings,
     settings,

@@ -13,12 +13,14 @@ The proof checks:
 - Windows NSIS installer artifact exists
 - Windows app executable is Authenticode-signed
 - Windows `candor-core.exe` sidecar is Authenticode-signed
+- Windows `candorctl.exe` and `candor-mcp.exe` companions are Authenticode-signed
 - Windows installer is Authenticode-signed
 - Current platform release artifact hashes match the M0 artifact manifest
 - Current platform release artifact hashes match the release artifact smoke proof
 - macOS DMG artifact exists
 - macOS notarization credentials are configured
 - macOS app bundle codesign verification passes when an unpacked app bundle exists
+- macOS `candorctl` and `candor-mcp` nested-binary codesign verification passes
 - macOS app bundle Gatekeeper assessment passes when an unpacked app bundle exists
 - macOS DMG Gatekeeper assessment passes
 - macOS DMG or app bundle stapler validation proves notarization
@@ -70,6 +72,13 @@ the proof requires local `codesign`, `spctl`, and `xcrun stapler validate`
 evidence for existing app bundles and DMG artifacts. Running the proof on a
 non-macOS host records the macOS checks as unverified rather than treating
 credential presence as proof.
+
+The Windows release configuration signs every packaged `.exe`, including both
+automation companions. The proof still checks each companion independently so
+a signed application or installer cannot hide an unsigned nested executable.
+Linux detached signatures cover the complete AppImage and deb payloads, while
+the artifact smoke separately proves both companions are present in each
+package.
 `electron:v3:dist` can create installer-shaped artifacts, but signed
 distribution still requires the platform signing inputs and a passing strict
 release-readiness audit before Candor v3 can be called ready for distribution.

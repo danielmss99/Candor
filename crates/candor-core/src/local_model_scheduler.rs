@@ -20,6 +20,7 @@ impl LocalModelSchedulerError {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum LocalModelJobKind {
     Whisper,
+    Parakeet,
     Llm,
 }
 
@@ -27,6 +28,7 @@ impl LocalModelJobKind {
     fn label(self) -> &'static str {
         match self {
             Self::Whisper => "whisper",
+            Self::Parakeet => "parakeet",
             Self::Llm => "llm",
         }
     }
@@ -191,5 +193,15 @@ mod tests {
         assert_eq!(proof["proof"]["deniedCode"], "LOCAL_MODEL_JOB_ACTIVE");
         assert_eq!(proof["proof"]["rawPathExposed"], false);
         assert_eq!(proof["statusAfterProof"]["active"], false);
+    }
+
+    #[test]
+    fn scheduler_reports_parakeet_as_its_own_local_job_kind() {
+        let mut scheduler = LocalModelScheduler::default();
+        let job = scheduler
+            .start_job(LocalModelJobKind::Parakeet, "unit-test")
+            .expect("Parakeet job starts");
+        assert_eq!(scheduler.status()["activeJob"]["kind"], "parakeet");
+        scheduler.finish_job(job);
     }
 }

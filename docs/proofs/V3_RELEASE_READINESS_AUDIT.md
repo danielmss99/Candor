@@ -125,8 +125,9 @@ Current expected gaps include:
   Use `npm run m1:real-capture-proof` with explicit consent to produce it.
 - Signed release readiness has not been proven until
   `v3-release-signing-proof-<platform>-<arch>.json` records signed Windows
-  app, sidecar, and installer artifacts plus macOS and Linux release package
-  readiness. The signing proof must also match the current platform release
+  app, core sidecar, `candorctl`, `candor-mcp`, and installer artifacts plus
+  macOS and Linux release package readiness. The signing proof must also match
+  the current platform release
   artifact hashes recorded by the M0 artifact manifest and release artifact
   smoke proof. macOS readiness requires local codesign verification for any
   unpacked app bundle, Gatekeeper assessment for the app bundle and DMG, and
@@ -137,9 +138,10 @@ Current expected gaps include:
 - Release artifact contents are proven by
   `v3-release-artifact-smoke-<platform>-<arch>.json`. On Windows this extracts
   the NSIS installer payload without installing it and checks that the packaged
-  app executable, `app.asar`, and `candor-core.exe` match the unpacked output.
-  On macOS and Linux, the DMG, AppImage, or deb payload entries must also
-  hash-match the corresponding unpacked app payloads.
+  app executable, `app.asar`, `candor-core.exe`, `candorctl.exe`, and
+  `candor-mcp.exe` match the unpacked output. On macOS and Linux, the DMG,
+  AppImage, or deb core and companion payload entries must also hash-match the
+  corresponding unpacked app payloads.
 - Release package checksums are proven by
   `v3-release-checksums-<platform>-<arch>.json` after verification mode confirms
   that `SHA256SUMS` exactly matches every current top-level release package.
